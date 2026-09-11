@@ -42,6 +42,7 @@ lazy val root =
       Seq(
         nativeConfig ~= { c =>
           c.withMultithreading(true)
+            .withLinkingOptions(c.linkingOptions :+ "-luring")
         }
       )
     )

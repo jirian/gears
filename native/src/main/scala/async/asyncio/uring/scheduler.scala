@@ -10,6 +10,7 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.JavaConversions._
 import scala.concurrent.duration._
 import scala.scalanative.libc.stdlib
+import scala.scalanative.posix.errno
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
 
@@ -45,7 +46,7 @@ class UringScheduler(val exec: ExecutionContext) extends Scheduler:
       stdlib.free(ts.asInstanceOf[Ptr[Byte]])
       // -ETIME is the expected "deadline reached" completion; a cancelled
       // timeout completes with -ECANCELED and must not run the body.
-      if res == -62 /* -ETIME */ then exec.execute(body)
+      if res == -errno.ETIME then exec.execute(body)
     }
 
     () =>

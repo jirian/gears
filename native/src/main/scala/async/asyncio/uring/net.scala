@@ -26,24 +26,28 @@ import scala.scalanative.unsigned._
 /** Submits one op and suspends the current fiber until its single CQE
   * arrives, returning the raw `res` field. Unlike the epoll backend there is
   * no EAGAIN-retry loop: one submit, one completion.
+  *
+  * io_uring guarantees exactly one CQE per submitted SQE, no matter what
+  * happens to it - including cancellation. So there is exactly one settler
+  * for this op's `Resolver`, not two racing ones: the completion callback
+  * below. `onCancel` never touches `resolver` itself; it only asks the
+  * kernel to finish the op early (best-effort, fire-and-forget - we don't
+  * wait for the cancel op's own, separate CQE). Per `Resolver.onCancel`'s
+  * contract the handler only has to *eventually* settle the future, not
+  * synchronously - so leaving that to the one guaranteed completion is
+  * enough, and `Async.group`'s own cancel-then-`waitCompletion` split
+  * already expects settling to take a real amount of time.
   */
 private[uring] def submitAwait(ring: UringRing)(prep: Ptr[io_uring_sqe] => Unit)(using
     Async
 ): Int =
   Future
     .withResolver[Int]: resolver =>
-      // ASYNC_CANCEL only asks the kernel to complete the original op early
-      // (with -ECANCELED) - it doesn't stop the original callback below from
-      // firing. Guard so a race between a natural completion and a
-      // cancellation can't resolve the same Future twice.
-      val settled = new java.util.concurrent.atomic.AtomicBoolean(false)
       val userData = ring.submit(prep): res =>
-        if settled.compareAndSet(false, true) then resolver.resolve(res)
+        if res == -errno.ECANCELED then resolver.rejectAsCancelled()
+        else resolver.resolve(res)
       resolver.onCancel: () =>
-        if settled.compareAndSet(false, true) then
-          // Best-effort: fire the cancellation and don't wait for it to land.
-          ring.submit(sqe => io_uring_prep_cancel64(sqe, userData, 0))(_ => ())
-          resolver.rejectAsCancelled()
+        ring.submit(sqe => io_uring_prep_cancel64(sqe, userData, 0))(_ => ())
     .link()
     .await
 
@@ -157,14 +161,21 @@ trait UringTcpSupport(ring: UringRing) extends net.TcpSupport:
     val fd =
       submitAwait(ring)(sqe => io_uring_prep_socket(sqe, posixSocket.AF_INET, posixSocket.SOCK_STREAM, 0, 0.toUInt))
     if fd < 0 then throw IOException(-fd)
-    val sockAddr = stdlib.malloc(sizeof[sockaddr_in]).asInstanceOf[Ptr[sockaddr_in]]
+    // If CONNECT fails or is cancelled, close the fd from SOCKET - otherwise
+    // it leaks, since nothing else owns it until UringTcpStream is returned.
     try
-      fillSockAddrIn(sockAddr, inetAddr)
-      val res = submitAwait(ring)(sqe =>
-        io_uring_prep_connect(sqe, fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], sizeof[sockaddr_in].toUInt)
-      )
-      if res < 0 then throw IOException(-res)
-    finally stdlib.free(sockAddr.asInstanceOf[Ptr[Byte]])
+      val sockAddr = stdlib.malloc(sizeof[sockaddr_in]).asInstanceOf[Ptr[sockaddr_in]]
+      try
+        fillSockAddrIn(sockAddr, inetAddr)
+        val res = submitAwait(ring)(sqe =>
+          io_uring_prep_connect(sqe, fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], sizeof[sockaddr_in].toUInt)
+        )
+        if res < 0 then throw IOException(-res)
+      finally stdlib.free(sockAddr.asInstanceOf[Ptr[Byte]])
+    catch
+      case e: Throwable =>
+        unistd.close(fd)
+        throw e
     // TODO: local ephemeral port requires getsockname; not implemented yet.
     UringTcpStream(fd, ring, localAddress = inetAddr, remoteAddress = inetAddr)
 

@@ -277,61 +277,61 @@ private[uring] object uringOps {
     castRawPtrToObject(castLongToRawPtr(cqe.user_data.toLong)).asInstanceOf[A]
 
   implicit final class io_uring_sqeOps(val io_uring_sqe: Ptr[io_uring_sqe]) extends AnyVal {
-    def opcode: __u8 = io_uring_sqe._1
-    def opcode_=(opcode: __u8): Unit = !io_uring_sqe.at1 = opcode
+    inline def opcode: __u8 = io_uring_sqe._1
+    inline def opcode_=(opcode: __u8): Unit = !io_uring_sqe.at1 = opcode
 
-    def flags: __u8 = io_uring_sqe._2
-    def flags_=(flags: __u8): Unit = !io_uring_sqe.at2 = flags
+    inline def flags: __u8 = io_uring_sqe._2
+    inline def flags_=(flags: __u8): Unit = !io_uring_sqe.at2 = flags
 
-    def ioprio: __u16 = io_uring_sqe._3
-    def ioprio_=(ioprio: __u16): Unit = !io_uring_sqe.at3 = ioprio
+    inline def ioprio: __u16 = io_uring_sqe._3
+    inline def ioprio_=(ioprio: __u16): Unit = !io_uring_sqe.at3 = ioprio
 
-    def fd: __s32 = io_uring_sqe._4
-    def fd_=(fd: __s32): Unit = !io_uring_sqe.at4 = fd
+    inline def fd: __s32 = io_uring_sqe._4
+    inline def fd_=(fd: __s32): Unit = !io_uring_sqe.at4 = fd
 
-    def off: __u64 = io_uring_sqe._5
-    def off_=(off: __u64): Unit = !io_uring_sqe.at5 = off
+    inline def off: __u64 = io_uring_sqe._5
+    inline def off_=(off: __u64): Unit = !io_uring_sqe.at5 = off
 
-    def addr: __u64 = io_uring_sqe._6
-    def addr_=(addr: __u64): Unit = !io_uring_sqe.at6 = addr
+    inline def addr: __u64 = io_uring_sqe._6
+    inline def addr_=(addr: __u64): Unit = !io_uring_sqe.at6 = addr
 
-    def len: __u32 = io_uring_sqe._7
-    def len_=(len: __u32): Unit = !io_uring_sqe.at7 = len
+    inline def len: __u32 = io_uring_sqe._7
+    inline def len_=(len: __u32): Unit = !io_uring_sqe.at7 = len
 
-    def rw_flags: __kernel_rwf_t = io_uring_sqe._8
-    def rw_flags_=(rw_flags: __kernel_rwf_t): Unit = !io_uring_sqe.at8 = rw_flags
-    def msg_flags: __u32 = io_uring_sqe._8
-    def msg_flags_=(msg_flags: __u32): Unit = !io_uring_sqe.at8 = msg_flags
-    def accept_flags: __u32 = io_uring_sqe._8
-    def accept_flags_=(accept_flags: __u32): Unit = !io_uring_sqe.at8 = accept_flags
-    def cancel_flags: __u32 = io_uring_sqe._8
-    def cancel_flags_=(cancel_flags: __u32): Unit = !io_uring_sqe.at8 = cancel_flags
-    def timeout_flags: __u32 = io_uring_sqe._8
-    def timeout_flags_=(timeout_flags: __u32): Unit = !io_uring_sqe.at8 = timeout_flags
-    def timeout_remove_flags: __u32 = io_uring_sqe._8
-    def timeout_remove_flags_=(timeout_remove_flags: __u32): Unit = !io_uring_sqe.at8 = timeout_remove_flags
+    inline def rw_flags: __kernel_rwf_t = io_uring_sqe._8
+    inline def rw_flags_=(rw_flags: __kernel_rwf_t): Unit = !io_uring_sqe.at8 = rw_flags
+    inline def msg_flags: __u32 = io_uring_sqe._8
+    inline def msg_flags_=(msg_flags: __u32): Unit = !io_uring_sqe.at8 = msg_flags
+    inline def accept_flags: __u32 = io_uring_sqe._8
+    inline def accept_flags_=(accept_flags: __u32): Unit = !io_uring_sqe.at8 = accept_flags
+    inline def cancel_flags: __u32 = io_uring_sqe._8
+    inline def cancel_flags_=(cancel_flags: __u32): Unit = !io_uring_sqe.at8 = cancel_flags
+    inline def timeout_flags: __u32 = io_uring_sqe._8
+    inline def timeout_flags_=(timeout_flags: __u32): Unit = !io_uring_sqe.at8 = timeout_flags
+    inline def timeout_remove_flags: __u32 = io_uring_sqe._8
+    inline def timeout_remove_flags_=(timeout_remove_flags: __u32): Unit = !io_uring_sqe.at8 = timeout_remove_flags
 
-    def user_data: __u64 = io_uring_sqe._9
-    def user_data_=(user_data: __u64): Unit = !io_uring_sqe.at9 = user_data
+    inline def user_data: __u64 = io_uring_sqe._9
+    inline def user_data_=(user_data: __u64): Unit = !io_uring_sqe.at9 = user_data
 
-    def __pad2: CArray[__u64, Nat._3] = io_uring_sqe._10
+    inline def __pad2: CArray[__u64, Nat._3] = io_uring_sqe._10
   }
 
   implicit final class io_uring_cqeOps(val io_uring_cqe: Ptr[io_uring_cqe]) extends AnyVal {
-    def user_data: __u64 = io_uring_cqe._1
-    def user_data_=(user_data: __u64): Unit = !io_uring_cqe.at1 = user_data
-    def res: __s32 = io_uring_cqe._2
-    def res_=(res: __s32): Unit = !io_uring_cqe.at2 = res
-    def flags: __u32 = io_uring_cqe._3
-    def flags_=(flags: __u32): Unit = !io_uring_cqe.at3 = flags
+    inline def user_data: __u64 = io_uring_cqe._1
+    inline def user_data_=(user_data: __u64): Unit = !io_uring_cqe.at1 = user_data
+    inline def res: __s32 = io_uring_cqe._2
+    inline def res_=(res: __s32): Unit = !io_uring_cqe.at2 = res
+    inline def flags: __u32 = io_uring_cqe._3
+    inline def flags_=(flags: __u32): Unit = !io_uring_cqe.at3 = flags
   }
 
   implicit final class __kernel_timespecOps(val __kernel_timespec: Ptr[__kernel_timespec])
       extends AnyVal {
-    def tv_sec: __kernel_time64_t = __kernel_timespec._1
-    def tv_sec_=(tv_sec: __kernel_time64_t): Unit = !__kernel_timespec.at1 = tv_sec
-    def tv_nsec: CLongLong = __kernel_timespec._2
-    def tv_nsec_=(tv_nsec: CLongLong): Unit = !__kernel_timespec.at2 = tv_nsec
+    inline def tv_sec: __kernel_time64_t = __kernel_timespec._1
+    inline def tv_sec_=(tv_sec: __kernel_time64_t): Unit = !__kernel_timespec.at1 = tv_sec
+    inline def tv_nsec: CLongLong = __kernel_timespec._2
+    inline def tv_nsec_=(tv_nsec: CLongLong): Unit = !__kernel_timespec.at2 = tv_nsec
   }
 
 }

@@ -64,7 +64,7 @@ class UringRing(entries: Int = 256) extends Closeable:
     val cqePtr =
       stdlib.malloc(sizeof[Ptr[io_uring_cqe]]).asInstanceOf[Ptr[Ptr[io_uring_cqe]]]
     val batch = stdlib
-      .malloc(sizeof[Ptr[io_uring_cqe]] * MAX_BATCH.toLong)
+      .malloc(sizeof[Ptr[io_uring_cqe]] * MAX_BATCH.toUInt)
       .asInstanceOf[Ptr[Ptr[io_uring_cqe]]]
     try
       while true do

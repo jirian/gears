@@ -41,8 +41,16 @@ lazy val root =
     .nativeSettings(
       Seq(
         nativeConfig ~= { c =>
-          c.withMultithreading(true)
+          val withLinking = c.withMultithreading(true)
             .withLinkingOptions(c.linkingOptions :+ "-luring")
+          // Debug mode (the sbt-scala-native default) skips LLVM's optimizer
+          // and Scala Native's own whole-program NIR optimizer (inlining,
+          // devirtualization, dead-code elimination) entirely, favoring link
+          // speed over runtime performance. Opt into full optimization with
+          // `RELEASE=1 sbt run` / `nativeLink` when what matters is measuring
+          // or shipping optimized code, not iteration speed.
+          if (sys.env.contains("RELEASE")) withLinking.withMode(Mode.releaseFast)
+          else withLinking
         }
       )
     )

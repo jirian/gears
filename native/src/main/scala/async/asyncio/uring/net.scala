@@ -97,9 +97,9 @@ class UringTcpStream private[uring] (
 
   override def readBuf(buf: Buffer)(using Async): Result[Unit] = either:
     val len = buf.remaining()
-    val scratch = stdlib.malloc(len.toULong).asInstanceOf[Ptr[Byte]]
+    val scratch = stdlib.malloc(len).asInstanceOf[Ptr[Byte]]
     try
-      val res = submitAwait(ring)(sqe => io_uring_prep_recv(sqe, fd, scratch, len.toULong, 0))
+      val res = submitAwait(ring)(sqe => io_uring_prep_recv(sqe, fd, scratch, len.toUSize, 0))
       if res < 0 then throw IOException(-res)
       else if res == 0 then either.error(Error.EOF)
       else copyFromNative(scratch, res, buf)
@@ -107,13 +107,13 @@ class UringTcpStream private[uring] (
 
   override def writeBuf(buf: Buffer)(using Async): Result[Unit] = either:
     val len = buf.remaining()
-    val scratch = stdlib.malloc(len.toULong).asInstanceOf[Ptr[Byte]]
+    val scratch = stdlib.malloc(len).asInstanceOf[Ptr[Byte]]
     try
       copyToNative(buf, scratch, len)
       var sent = 0
       while sent < len do
         val res = submitAwait(ring)(sqe =>
-          io_uring_prep_send(sqe, fd, scratch + sent, (len - sent).toULong, posixSocket.MSG_NOSIGNAL)
+          io_uring_prep_send(sqe, fd, scratch + sent, (len - sent).toUSize, posixSocket.MSG_NOSIGNAL)
         )
         if res < 0 then throw IOException(-res)
         else sent += res

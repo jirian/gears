@@ -55,12 +55,15 @@ private[epoll] object epollImplicits {
 
   import epoll._
 
-  implicit final class epoll_eventOps(epoll_event: Ptr[epoll_event]) {
-    def events: CUnsignedInt = !epoll_event.asInstanceOf[Ptr[CUnsignedInt]]
-    def events_=(events: CUnsignedInt): Unit =
+  // `val` param + AnyVal: this wrapper is erased at compile time, so
+  // `.events`/`.data` compile down to direct pointer arithmetic with no
+  // allocation - these run on the hot per-event-notification path.
+  implicit final class epoll_eventOps(val epoll_event: Ptr[epoll_event]) extends AnyVal {
+    inline def events: CUnsignedInt = !epoll_event.asInstanceOf[Ptr[CUnsignedInt]]
+    inline def events_=(events: CUnsignedInt): Unit =
       !epoll_event.asInstanceOf[Ptr[CUnsignedInt]] = events
 
-    def data: epoll_data_t = {
+    inline def data: epoll_data_t = {
       val offset =
         if (LinktimeInfo.target.arch == "x86_64")
           sizeof[CUnsignedInt]
@@ -70,7 +73,7 @@ private[epoll] object epollImplicits {
         .asInstanceOf[Ptr[epoll_data_t]]
     }
 
-    def data_=(data: epoll_data_t): Unit = {
+    inline def data_=(data: epoll_data_t): Unit = {
       val offset =
         if (LinktimeInfo.target.arch == "x86_64")
           sizeof[CUnsignedInt]

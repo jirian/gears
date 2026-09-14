@@ -7,6 +7,7 @@ import gears.async.native
 
 import java.util.concurrent.ForkJoinPool
 import scala.concurrent.ExecutionContext
+import scala.concurrent.JavaConversions._
 import scala.concurrent.duration._
 import scala.scalanative.libc.stdlib
 import scala.scalanative.unsafe._

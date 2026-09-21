@@ -34,6 +34,8 @@ private[uring] object uring {
   final val IORING_SETUP_DEFER_TASKRUN = 1 << 13
 
   final val IORING_OP_NOP = 0
+  final val IORING_OP_SENDMSG = 9
+  final val IORING_OP_RECVMSG = 10
   final val IORING_OP_TIMEOUT = 11
   final val IORING_OP_TIMEOUT_REMOVE = 12
   final val IORING_OP_ACCEPT = 13
@@ -55,6 +57,16 @@ private[uring] object uring {
   type __kernel_timespec = CStruct2[__kernel_time64_t, CLongLong]
 
   type __kernel_rwf_t = CUnsignedInt
+
+  // Matches glibc's <sys/uio.h>/<sys/socket.h> layout on this platform (a
+  // pointer + size_t pair, and a pointer/socklen_t/pointer/size_t/.../int
+  // struct respectively) - defined locally rather than reusing
+  // scala-native's own posix bindings for the same reason every other
+  // struct in this file is: CStruct layout here is computed from the field
+  // types/order exactly like C would, so this is no less reliable, and it
+  // keeps every struct this backend depends on in one place.
+  type iovec = CStruct2[Ptr[Byte], size_t]
+  type msghdr = CStruct7[Ptr[Byte], CUnsignedInt, Ptr[iovec], size_t, Ptr[Byte], size_t, CInt]
 
   type io_uring = CStruct9[
     io_uring_sq,
@@ -127,6 +139,7 @@ private[uring] object uring {
 
   def io_uring_submit(ring: Ptr[io_uring]): CInt = extern
 
+  @blocking
   def io_uring_submit_and_wait_timeout(
       ring: Ptr[io_uring],
       cqe_ptr: Ptr[Ptr[io_uring_cqe]],
@@ -135,6 +148,15 @@ private[uring] object uring {
       sigmask: Ptr[sigset_t]
   ): CInt = extern
 
+  // Without @blocking, Scala Native's runtime has no way to know this call
+  // (which blocks indefinitely, forever, in UringRing's dedicated ring
+  // thread - our null timeout means "wait forever for the next CQE") can
+  // block for an unbounded time. The GC's stop-the-world safepoint wait
+  // then hangs forever waiting for that thread to check in, since it never
+  // returns to managed code to do so. Confirmed empirically: without this
+  // annotation, any System.gc() (or GC-triggered collection) anywhere in
+  // the process hangs permanently once a UringRing exists.
+  @blocking
   def io_uring_wait_cqe_timeout(
       ring: Ptr[io_uring],
       cqe_ptr: Ptr[Ptr[io_uring_cqe]],
@@ -256,6 +278,26 @@ private[uring] object uringOps {
     sqe.msg_flags = flags.toUInt
   }
 
+  def io_uring_prep_sendmsg(
+      sqe: Ptr[io_uring_sqe],
+      fd: CInt,
+      msg: Ptr[msghdr],
+      flags: CInt
+  ): Unit = {
+    io_uring_prep_rw(IORING_OP_SENDMSG, sqe, fd, msg.asInstanceOf[Ptr[Byte]], 1.toUInt, 0.toULong)
+    sqe.msg_flags = flags.toUInt
+  }
+
+  def io_uring_prep_recvmsg(
+      sqe: Ptr[io_uring_sqe],
+      fd: CInt,
+      msg: Ptr[msghdr],
+      flags: CInt
+  ): Unit = {
+    io_uring_prep_rw(IORING_OP_RECVMSG, sqe, fd, msg.asInstanceOf[Ptr[Byte]], 1.toUInt, 0.toULong)
+    sqe.msg_flags = flags.toUInt
+  }
+
   def io_uring_prep_shutdown(sqe: Ptr[io_uring_sqe], fd: CInt, how: CInt): Unit =
     io_uring_prep_rw(IORING_OP_SHUTDOWN, sqe, fd, null, how.toUInt, 0.toULong)
 
@@ -332,6 +374,30 @@ private[uring] object uringOps {
     inline def tv_sec_=(tv_sec: __kernel_time64_t): Unit = !__kernel_timespec.at1 = tv_sec
     inline def tv_nsec: CLongLong = __kernel_timespec._2
     inline def tv_nsec_=(tv_nsec: CLongLong): Unit = !__kernel_timespec.at2 = tv_nsec
+  }
+
+  implicit final class iovecOps(val iovec: Ptr[iovec]) extends AnyVal {
+    inline def iov_base: Ptr[Byte] = iovec._1
+    inline def iov_base_=(iov_base: Ptr[Byte]): Unit = !iovec.at1 = iov_base
+    inline def iov_len: size_t = iovec._2
+    inline def iov_len_=(iov_len: size_t): Unit = !iovec.at2 = iov_len
+  }
+
+  implicit final class msghdrOps(val msghdr: Ptr[msghdr]) extends AnyVal {
+    inline def msg_name: Ptr[Byte] = msghdr._1
+    inline def msg_name_=(msg_name: Ptr[Byte]): Unit = !msghdr.at1 = msg_name
+    inline def msg_namelen: CUnsignedInt = msghdr._2
+    inline def msg_namelen_=(msg_namelen: CUnsignedInt): Unit = !msghdr.at2 = msg_namelen
+    inline def msg_iov: Ptr[iovec] = msghdr._3
+    inline def msg_iov_=(msg_iov: Ptr[iovec]): Unit = !msghdr.at3 = msg_iov
+    inline def msg_iovlen: size_t = msghdr._4
+    inline def msg_iovlen_=(msg_iovlen: size_t): Unit = !msghdr.at4 = msg_iovlen
+    inline def msg_control: Ptr[Byte] = msghdr._5
+    inline def msg_control_=(msg_control: Ptr[Byte]): Unit = !msghdr.at5 = msg_control
+    inline def msg_controllen: size_t = msghdr._6
+    inline def msg_controllen_=(msg_controllen: size_t): Unit = !msghdr.at6 = msg_controllen
+    inline def msg_flags: CInt = msghdr._7
+    inline def msg_flags_=(msg_flags: CInt): Unit = !msghdr.at7 = msg_flags
   }
 
 }

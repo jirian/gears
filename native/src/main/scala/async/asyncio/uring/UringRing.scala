@@ -5,7 +5,7 @@ import uringOps._
 
 import java.io.Closeable
 import scala.annotation.tailrec
-import scala.scalanative.libc.stdlib
+import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
 
@@ -21,8 +21,16 @@ class IOException(errno: Int) extends Exception:
   * once.
   */
 class UringRing(entries: Int = 256) extends Closeable:
+  // GC-managed, not malloc'd: `ring` lives exactly as long as this
+  // UringRing does (an ordinary field reference on a long-lived object),
+  // and is reclaimed automatically whenever the collector gets to it after
+  // that - safe because this GC never relocates live objects (checked
+  // directly against its source) and the *deterministic* half of teardown,
+  // releasing the kernel-side resource, is close()'s io_uring_queue_exit
+  // call, not the reclamation of this struct's own backing bytes.
+  private val ringStorage = new Array[Byte](sizeof[io_uring].toInt)
   private val ring: Ptr[io_uring] =
-    stdlib.malloc(sizeof[io_uring]).asInstanceOf[Ptr[io_uring]]
+    ringStorage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[io_uring]]
   if io_uring_queue_init(entries.toUInt, ring, 0.toUInt) < 0 then
     throw IOException(-1)
 
@@ -45,7 +53,8 @@ class UringRing(entries: Int = 256) extends Closeable:
 
   override def close(): Unit =
     io_uring_queue_exit(ring)
-    stdlib.free(ring.asInstanceOf[Ptr[Byte]])
+    // ringStorage is reclaimed by the GC in its own time - the kernel-side
+    // resource is already released deterministically by the call above.
 
   @tailrec private def drainBatch(batch: Ptr[Ptr[io_uring_cqe]], max: Int): Unit =
     val count = io_uring_peek_batch_cqe(ring, batch, max.toUInt)
@@ -61,21 +70,21 @@ class UringRing(entries: Int = 256) extends Closeable:
 
   private def completionLoop(): Unit =
     val MAX_BATCH = 64
-    val cqePtr =
-      stdlib.malloc(sizeof[Ptr[io_uring_cqe]]).asInstanceOf[Ptr[Ptr[io_uring_cqe]]]
-    val batch = stdlib
-      .malloc(sizeof[Ptr[io_uring_cqe]] * MAX_BATCH.toUInt)
-      .asInstanceOf[Ptr[Ptr[io_uring_cqe]]]
-    try
-      while true do
-        // Blocks until at least one CQE is available (null timeout = wait
-        // indefinitely). Timers ride on this same queue via
-        // IORING_OP_TIMEOUT, so no separate wakeup/timer thread is needed.
-        val rc = io_uring_wait_cqe_timeout(ring, cqePtr, null)
-        if rc == 0 then drainBatch(batch, MAX_BATCH)
-    finally
-      stdlib.free(cqePtr.asInstanceOf[Ptr[Byte]])
-      stdlib.free(batch.asInstanceOf[Ptr[Byte]])
+    // GC-managed: ordinary locals on this thread's own call stack, alive
+    // for as long as the (effectively infinite) loop below runs - the
+    // simplest possible case, no suspension or FFI round-trip involved at
+    // all, exactly like any other object a running thread holds a
+    // reference to.
+    val cqePtrStorage = new Array[Byte](sizeof[Ptr[io_uring_cqe]].toInt)
+    val cqePtr = cqePtrStorage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[Ptr[io_uring_cqe]]]
+    val batchStorage = new Array[Byte]((sizeof[Ptr[io_uring_cqe]] * MAX_BATCH.toUInt).toInt)
+    val batch = batchStorage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[Ptr[io_uring_cqe]]]
+    while true do
+      // Blocks until at least one CQE is available (null timeout = wait
+      // indefinitely). Timers ride on this same queue via
+      // IORING_OP_TIMEOUT, so no separate wakeup/timer thread is needed.
+      val rc = io_uring_wait_cqe_timeout(ring, cqePtr, null)
+      if rc == 0 then drainBatch(batch, MAX_BATCH)
 
   private val ringThread = new Thread(() => completionLoop())
   ringThread.setDaemon(true)

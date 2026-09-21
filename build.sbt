@@ -45,7 +45,8 @@ lazy val root =
           // speed over runtime performance. Opt into full optimization with
           // `RELEASE=1 sbt run` / `nativeLink` when what matters is measuring
           // or shipping optimized code, not iteration speed.
-          if (sys.env.contains("RELEASE")) withLinking.withMode(Mode.releaseFast)
+          if (sys.env.contains("RELEASE"))
+            withLinking.withMode(scala.scalanative.build.Mode.releaseFast)
           else withLinking
         }
       )

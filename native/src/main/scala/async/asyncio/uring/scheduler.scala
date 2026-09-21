@@ -9,8 +9,7 @@ import java.util.concurrent.ForkJoinPool
 import scala.concurrent.ExecutionContext
 import scala.concurrent.JavaConversions._
 import scala.concurrent.duration._
-import scala.scalanative.libc.stdlib
-import scala.scalanative.posix.errno
+import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
 
@@ -36,22 +35,48 @@ class UringScheduler(val exec: ExecutionContext) extends Scheduler:
   override def execute(body: Runnable): Unit = exec.execute(body)
 
   override def schedule(delay: FiniteDuration, body: Runnable): Cancellable =
-    val ts = stdlib.malloc(sizeof[__kernel_timespec]).asInstanceOf[Ptr[__kernel_timespec]]
+    // GC-managed, not malloc'd: same reasoning as net.scala's direct buffer
+    // access - this GC never relocates live objects (checked directly
+    // against its actual source: no forwarding pointers/compaction
+    // anywhere in it), and a reference kept alive only by an in-flight
+    // completion closure's own capture survives real, concurrent GC
+    // pressure - verified empirically, specifically for "a closure with no
+    // OTHER reference, reachable only via the kernel-stored raw pointer in
+    // user_data," under both debug and release-fast builds
+    // (ClosureLivenessStress). `tsArr` is captured by the completion
+    // closure below so its lifetime is tied to the op's, explicitly rather
+    // than relying on that alone.
+    val tsArr = new Array[Byte](sizeof[__kernel_timespec].toInt)
+    val ts = tsArr.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[__kernel_timespec]]
     ts.tv_sec = delay.toSeconds
     ts.tv_nsec = (delay - delay.toSeconds.seconds).toNanos
 
     val userData = ring.submit { sqe =>
       io_uring_prep_timeout(sqe, ts, 0.toULong, 0.toUInt)
     } { res =>
-      stdlib.free(ts.asInstanceOf[Ptr[Byte]])
+      val _ = tsArr // keep tsArr (and the memory `ts` points into) alive until here
       // -ETIME is the expected "deadline reached" completion; a cancelled
       // timeout completes with -ECANCELED and must not run the body.
-      if res == -errno.ETIME then exec.execute(body)
+      //
+      // Deliberately NOT errno.ETIME: confirmed empirically (by adding a
+      // diagnostic print and comparing against a small C program using the
+      // same glibc) that this specific scala-native posixlib binding
+      // resolves to 0 instead of 62 in this environment, silently making
+      // every scheduled timeout/sleep a no-op forever. errno.ECANCELED,
+      // errno.EAGAIN etc. all checked out fine - this one specifically is
+      // broken. Worth reporting upstream to scala-native; until then, use
+      // the real glibc value directly.
+      if res == -62 /* -ETIME */ then exec.execute(body)
     }
 
     () =>
-      ring.submit { sqe =>
-        io_uring_prep_timeout_remove(sqe, userData, 0.toUInt)
-      } { _ => () }
+      // Same best-effort reasoning as net.scala's submitAwait: don't let a
+      // full submission queue throw out of Cancellable.cancel().
+      try
+        ring.submit { sqe =>
+          io_uring_prep_timeout_remove(sqe, userData, 0.toUInt)
+        } { _ => () }
+      catch case _: IOException => ()
 
   def tcpSupport = new UringTcpSupport(ring) {}
+  def udpSupport = new UringUdpSupport(ring) {}

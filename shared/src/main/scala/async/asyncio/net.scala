@@ -44,6 +44,39 @@ object TcpSupport:
   ) =
     tcp.listen(address, options)
 
+// Represents a connectionless UDP socket, bound to a local address.
+abstract class UdpSocket extends Closeable:
+  def localAddress: SocketAddress
+
+  /** Sends one datagram containing all of `buf`'s remaining bytes to
+    * `target`. Unlike [[Writer.writeBuf]], a single call always sends the
+    * whole of `buf`'s remaining bytes as one datagram - UDP has no partial-
+    * send concept the way a stream write does.
+    */
+  def sendTo(buf: Buffer, target: SocketAddress)(using Async): Result[Unit]
+
+  /** Receives one datagram into `buf`, starting at its current position, up
+    * to its remaining capacity. If the datagram is larger than `buf` has
+    * room for, the excess is discarded (standard UDP behavior - there is no
+    * way to read the rest of an oversized datagram later). Returns the
+    * sender's address.
+    */
+  def receiveFrom(buf: Buffer)(using Async): Result[SocketAddress]
+
+trait UdpSupport:
+  type Socket <: UdpSocket
+
+  def bind(address: SocketAddress, options: Seq[SocketOption])(using
+      Async
+  ): Result[Socket]
+
+object UdpSupport:
+  def bind(address: SocketAddress, options: SocketOption*)(using
+      udp: UdpSupport,
+      async: Async
+  ) =
+    udp.bind(address, options)
+
 // Options for socket creation.
 sealed trait SocketOption:
   type Value

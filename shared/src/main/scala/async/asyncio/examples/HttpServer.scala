@@ -8,7 +8,8 @@ import gears.async.asyncio.Error
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 
-/** Minimal single-request-per-connection HTTP/1.1 server: no HTTP framing/
+/** TODO: make into proper HTTP server
+  * Minimal single-request-per-connection HTTP/1.1 server: no HTTP framing/
   * keep-alive/chunked bodies, just enough to answer a GET with a fixed
   * response. Written entirely against `net.TcpListener`/`TcpStream` (the
   * shared, backend-agnostic interface), so it's the same code regardless of
@@ -35,9 +36,6 @@ private def handleConnection(stream: TcpStream)(using Async): Unit =
   catch case e: Exception => System.err.println(s"connection error: $e")
   finally stream.close()
 
-/** Reads (and discards) bytes until the end of the request headers
-  * (`\r\n\r\n`) or EOF - no attempt to parse/consume a request body.
-  */
 private def readRequestHead(stream: TcpStream)(using Async): String =
   val buf = ByteBuffer.allocate(4096)
   val acc = new StringBuilder

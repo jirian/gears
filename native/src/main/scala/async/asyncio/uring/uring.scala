@@ -42,6 +42,7 @@ private[uring] object uring {
   final val IORING_OP_ASYNC_CANCEL = 14
   final val IORING_OP_CONNECT = 16
   final val IORING_OP_CLOSE = 19
+  final val IORING_OP_READ = 22
   final val IORING_OP_SEND = 26
   final val IORING_OP_RECV = 27
   final val IORING_OP_SHUTDOWN = 34
@@ -148,14 +149,6 @@ private[uring] object uring {
       sigmask: Ptr[sigset_t]
   ): CInt = extern
 
-  // Without @blocking, Scala Native's runtime has no way to know this call
-  // (which blocks indefinitely, forever, in UringRing's dedicated ring
-  // thread - our null timeout means "wait forever for the next CQE") can
-  // block for an unbounded time. The GC's stop-the-world safepoint wait
-  // then hangs forever waiting for that thread to check in, since it never
-  // returns to managed code to do so. Confirmed empirically: without this
-  // annotation, any System.gc() (or GC-triggered collection) anywhere in
-  // the process hangs permanently once a UringRing exists.
   @blocking
   def io_uring_wait_cqe_timeout(
       ring: Ptr[io_uring],
@@ -249,6 +242,14 @@ private[uring] object uringOps {
   def io_uring_prep_close(sqe: Ptr[io_uring_sqe], fd: CInt): Unit =
     io_uring_prep_rw(IORING_OP_CLOSE, sqe, fd, null, 0.toUInt, 0.toULong)
 
+  def io_uring_prep_read(
+      sqe: Ptr[io_uring_sqe],
+      fd: CInt,
+      buf: Ptr[Byte],
+      nbytes: CUnsignedInt,
+      offset: __u64
+  ): Unit = io_uring_prep_rw(IORING_OP_READ, sqe, fd, buf, nbytes, offset)
+
   def io_uring_prep_connect(
       sqe: Ptr[io_uring_sqe],
       fd: CInt,
@@ -311,12 +312,6 @@ private[uring] object uringOps {
     io_uring_prep_rw(IORING_OP_SOCKET, sqe, domain, null, protocol.toUInt, `type`.toULong)
     sqe.rw_flags = flags.toUInt
   }
-
-  def io_uring_sqe_set_data[A <: AnyRef](sqe: Ptr[io_uring_sqe], data: A): Unit =
-    sqe.user_data = castRawPtrToLong(castObjectToRawPtr(data)).toULong
-
-  def io_uring_cqe_get_data[A <: AnyRef](cqe: Ptr[io_uring_cqe]): A =
-    castRawPtrToObject(castLongToRawPtr(cqe.user_data.toLong)).asInstanceOf[A]
 
   implicit final class io_uring_sqeOps(val io_uring_sqe: Ptr[io_uring_sqe]) extends AnyVal {
     inline def opcode: __u8 = io_uring_sqe._1

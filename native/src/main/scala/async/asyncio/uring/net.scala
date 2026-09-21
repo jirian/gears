@@ -31,15 +31,36 @@ private[uring] def submitAwait(scheduler: UringPerThreadScheduler)(keepAlive: An
 ): Int =
   Future
     .withResolver[Int]: resolver =>
-      val userData = scheduler.submit(prep): res =>
-        val _ = keepAlive
+      val (shard, userData) = scheduler.submit(prep): res =>
+        reachabilityFence(keepAlive)
         if res == -errno.ECANCELED then resolver.rejectAsCancelled()
         else resolver.resolve(res)
       resolver.onCancel: () =>
-        try scheduler.submit(sqe => io_uring_prep_cancel64(sqe, userData, 0))(_ => ())
+        // Targets the exact shard this op was submitted to, not wherever
+        // the cancelling thread happens to be - IORING_OP_ASYNC_CANCEL only
+        // matches an op on the same ring it's submitted to, so routing
+        // this through scheduler.submit's normal current-thread/round-robin
+        // logic would often silently cancel nothing. See submitOn's doc.
+        try scheduler.submitOn(shard)(sqe => io_uring_prep_cancel64(sqe, userData, 0))(_ => ())
         catch case _: IOException => ()
     .link()
     .await
+
+/** Runs `body`, closing `fd` if it throws - for the setup sequence between
+  * creating a socket and handing it off wrapped in a `UringTcpStream`/
+  * `UringTcpListener`/`UringUdpSocket` (whose own `close()` is the only
+  * thing that normally closes it). Without this, a failure partway through
+  * setup (a bad socket option, a failed bind/listen/connect, even
+  * `getLocalAddress` itself) leaks the fd for the life of the process -
+  * nothing else ever closes it, since the wrapper that would own that
+  * responsibility was never successfully constructed.
+  */
+private[uring] def closeFdOnFailure[A](fd: Int)(body: => A): A =
+  try body
+  catch
+    case e: Throwable =>
+      unistd.close(fd)
+      throw e
 
 private[uring] def sockaddrSize(addr: InetAddress): CUnsignedInt =
   addr match
@@ -249,7 +270,8 @@ class UringTcpListener private[uring] (
       io_uring_prep_accept(sqe, fd, addr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrLen, 0)
     )
     if clientFd < 0 then throw IOException(-clientFd)
-    UringTcpStream(clientFd, scheduler, localAddress, parseSockAddr(addr))
+    closeFdOnFailure(clientFd):
+      UringTcpStream(clientFd, scheduler, localAddress, parseSockAddr(addr))
 
 class UringUdpSocket private[uring] (
     val fd: Int,
@@ -351,14 +373,15 @@ trait UringUdpSupport(scheduler: UringPerThreadScheduler) extends net.UdpSupport
       if inetAddr.getAddress.isInstanceOf[Inet6Address] then posixSocket.AF_INET6 else posixSocket.AF_INET
     val fd = posixSocket.socket(family, posixSocket.SOCK_DGRAM, 0)
     if fd < 0 then throw IOException(errno.errno)
-    options.foreach(applySocketOption(fd, _))
-    Zone.acquire: zone =>
-      val addrSize = sockaddrSize(inetAddr.getAddress)
-      val sockAddr = alloc[Byte](addrSize)(using zone)
-      fillSockAddr(sockAddr, inetAddr)
-      if posixSocket.bind(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize) < 0 then
-        throw IOException(errno.errno)
-    UringUdpSocket(fd, scheduler, getLocalAddress(fd))
+    closeFdOnFailure(fd):
+      options.foreach(applySocketOption(fd, _))
+      Zone.acquire: zone =>
+        val addrSize = sockaddrSize(inetAddr.getAddress)
+        val sockAddr = alloc[Byte](addrSize)(using zone)
+        fillSockAddr(sockAddr, inetAddr)
+        if posixSocket.bind(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize) < 0 then
+          throw IOException(errno.errno)
+      UringUdpSocket(fd, scheduler, getLocalAddress(fd))
 
 trait UringTcpSupport(scheduler: UringPerThreadScheduler) extends net.TcpSupport:
   type Stream = UringTcpStream
@@ -373,7 +396,7 @@ trait UringTcpSupport(scheduler: UringPerThreadScheduler) extends net.TcpSupport
     val fd =
       submitAwait(scheduler)(null)(sqe => io_uring_prep_socket(sqe, family, posixSocket.SOCK_STREAM, 0, 0.toUInt))
     if fd < 0 then throw IOException(-fd)
-    try
+    closeFdOnFailure(fd):
       options.foreach(applySocketOption(fd, _))
       val addrSize = sockaddrSize(inetAddr.getAddress)
       val sockAddrArr = new Array[Byte](addrSize.toInt)
@@ -383,11 +406,7 @@ trait UringTcpSupport(scheduler: UringPerThreadScheduler) extends net.TcpSupport
         io_uring_prep_connect(sqe, fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize)
       )
       if res < 0 then throw IOException(-res)
-    catch
-      case e: Throwable =>
-        unistd.close(fd)
-        throw e
-    UringTcpStream(fd, scheduler, localAddress = getLocalAddress(fd), remoteAddress = inetAddr)
+      UringTcpStream(fd, scheduler, localAddress = getLocalAddress(fd), remoteAddress = inetAddr)
 
   override def listen(address: SocketAddress, options: Seq[SocketOption])(using
       Async
@@ -397,21 +416,22 @@ trait UringTcpSupport(scheduler: UringPerThreadScheduler) extends net.TcpSupport
       if inetAddr.getAddress.isInstanceOf[Inet6Address] then posixSocket.AF_INET6 else posixSocket.AF_INET
     val fd = posixSocket.socket(family, posixSocket.SOCK_STREAM, 0)
     if fd < 0 then throw IOException(errno.errno)
-    options.foreach(applySocketOption(fd, _))
-    Zone.acquire: zone =>
-      val optVal = alloc[CInt]()(using zone)
-      !optVal = 1
-      posixSocket.setsockopt(
-        fd,
-        posixSocket.SOL_SOCKET,
-        posixSocket.SO_REUSEADDR,
-        optVal.asInstanceOf[Ptr[Byte]],
-        sizeof[CInt].toUInt
-      )
-      val addrSize = sockaddrSize(inetAddr.getAddress)
-      val sockAddr = alloc[Byte](addrSize)(using zone)
-      fillSockAddr(sockAddr, inetAddr)
-      if posixSocket.bind(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize) < 0 then
-        throw IOException(errno.errno)
-    if posixSocket.listen(fd, 128) < 0 then throw IOException(errno.errno)
-    UringTcpListener(fd, scheduler, getLocalAddress(fd))
+    closeFdOnFailure(fd):
+      options.foreach(applySocketOption(fd, _))
+      Zone.acquire: zone =>
+        val optVal = alloc[CInt]()(using zone)
+        !optVal = 1
+        posixSocket.setsockopt(
+          fd,
+          posixSocket.SOL_SOCKET,
+          posixSocket.SO_REUSEADDR,
+          optVal.asInstanceOf[Ptr[Byte]],
+          sizeof[CInt].toUInt
+        )
+        val addrSize = sockaddrSize(inetAddr.getAddress)
+        val sockAddr = alloc[Byte](addrSize)(using zone)
+        fillSockAddr(sockAddr, inetAddr)
+        if posixSocket.bind(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize) < 0 then
+          throw IOException(errno.errno)
+      if posixSocket.listen(fd, 128) < 0 then throw IOException(errno.errno)
+      UringTcpListener(fd, scheduler, getLocalAddress(fd))

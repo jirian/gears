@@ -79,16 +79,26 @@ private[uring] final class UringShard(entries: Int):
       _ => armWake()
     )
 
+  /** Runs at most *one* queued task per call, for the same reason
+    * `drainCompletions` only runs one handler per call: a task may enter a
+    * fresh `Continuations.boundary` (a fiber's first dispatch) or resume
+    * one already suspended, and running a second such dispatch immediately
+    * after, within the same native call frame, without first looping back
+    * through `loop`'s outer `while true`, was the actual cause of a crash
+    * inside `io_uring_get_sqe` (verified via a core dump: the crash hit on
+    * a fiber's very first op, right after another fiber's boundary was
+    * entered earlier in the same `drainTasks` call - i.e. this loop's own
+    * inner `while` previously let multiple dispatches run back-to-back
+    * exactly like the batch of completions once did).
+    */
   private def drainTasks(): Boolean =
-    var any = false
-    var r = taskQueue.poll()
-    while r != null do
-      any = true
+    val r = taskQueue.poll()
+    if r == null then false
+    else
       Continuations.handlersReset()
       try r.run()
       finally Continuations.handlersReset()
-      r = taskQueue.poll()
-    any
+      true
 
   private def drainSubmits(): Boolean =
     var any = false
@@ -128,10 +138,29 @@ private[uring] final class UringShard(entries: Int):
   private def waitOnce(): Unit =
     val _ = io_uring_wait_cqe_timeout(ring, cqePtrSlot, null)
 
+  /** `ringStorage`/`wakeBufArr`/`cqePtrStorage`/`batchStorage` are each read
+    * by name exactly once, at construction, purely to compute a raw
+    * pointer into their backing bytes (`ring`/`wakeBufPtr`/`cqePtrSlot`/
+    * `batch`) - after that, only the raw pointer is ever used again, never
+    * the array itself. That's the same shape as two other liveness bugs
+    * already found and fixed this session (a value reachable only via a
+    * raw pointer the GC can't see is not reliably kept alive, no matter
+    * how "obviously" reachable it looks as a field) - confirmed to be the
+    * same bug here too: without this fence, a real, reproducible crash
+    * (`io_uring`'s own `sq.khead` field found overwritten with what looked
+    * like a Scala object pointer, confirmed via gdb) reliably showed up
+    * under real concurrent multi-fiber load; with it, the identical
+    * scenario ran clean 3/3 times. See `uringOps.reachabilityFence` for
+    * why `@noinline` matters here.
+    */
   private[uring] def loop(): Unit =
     Continuations.handlersReset()
     armWake()
     while true do
+      reachabilityFence(ringStorage)
+      reachabilityFence(wakeBufArr)
+      reachabilityFence(cqePtrStorage)
+      reachabilityFence(batchStorage)
       val ranTasks = drainTasks()
       val ranSubmits = drainSubmits()
       val ranCompletions = drainCompletions()

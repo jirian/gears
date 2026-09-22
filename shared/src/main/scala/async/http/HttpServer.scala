@@ -7,61 +7,103 @@ import gears.async.asyncio.Error
 
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeoutException
 import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.duration.FiniteDuration
+
+/** A server's configuration - Go's `http.Server`. [[readTimeout]]/
+  * [[writeTimeout]] bound, respectively, how long reading a request's body
+  * and running the handler (headers included - streamed writes each reset
+  * nothing, so a slow handler racing a fast one can still blow this budget,
+  * same as Go's own non-per-write `WriteTimeout`) may take once a request's
+  * head has arrived; [[idleTimeout]] bounds how long a keep-alive
+  * connection may sit idle waiting for the *next* request's head to start
+  * arriving (Go's own `IdleTimeout`). All three default to `None`
+  * (unbounded), matching `http.Server`'s zero-value defaults.
+  */
+final case class Server(
+    handler: Handler,
+    readTimeout: Option[FiniteDuration] = None,
+    writeTimeout: Option[FiniteDuration] = None,
+    idleTimeout: Option[FiniteDuration] = None
+):
+  /** Equivalent to `serve(listener, this)` - Go's `Server.Serve`. */
+  def serve(listener: TcpListener)(using Async, AsyncOperations): Unit = gears.async.http.serve(listener, this)
 
 /** A backend-agnostic HTTP/1.0 and HTTP/1.1 server, written entirely
   * against `net.TcpListener`/`TcpStream` - the same code runs regardless of
   * which `net.TcpSupport` (uring/epoll/kqueue/...) is plugged in. Each
   * backend only needs a few-line entry point that constructs its own
-  * `Scheduler`/`TcpSupport`, builds a [[Router]], and calls [[serve]].
+  * `Scheduler`/`TcpSupport`, builds a [[Handler]] (a [[Router]], typically),
+  * and calls [[serve]] - or wraps it in a [[Server]] for timeouts.
   *
   * Supported: request-line/header parsing, `Content-Length` request and
-  * response bodies, `HEAD` (served from the matching `GET` handler, body
-  * stripped), and persistent (keep-alive) connections - HTTP/1.1 defaults
-  * to keep-alive and HTTP/1.0 to close, either overridable by a
-  * `Connection` request header. Not supported: chunked request or response
-  * bodies (`Transfer-Encoding: chunked` on a request is answered with 501)
-  * and pipelined responses to unread requests beyond the one in flight.
+  * response bodies, streaming responses via [[ResponseWriter]], `HEAD`
+  * (dispatched to the matching `GET` handler, body suppressed once the real
+  * `Content-Length` is known), persistent (keep-alive) connections -
+  * HTTP/1.1 defaults to keep-alive and HTTP/1.0 to close, either
+  * overridable by a `Connection` request header, and a streamed response
+  * with no known length forces `Connection: close` regardless (see
+  * [[ResponseWriter]]'s own doc) - and [[Server]]'s per-phase timeouts. Not
+  * supported: chunked request or response bodies (`Transfer-Encoding:
+  * chunked` on a request is answered with 501) and pipelined responses to
+  * unread requests beyond the one in flight.
   */
-def serve(listener: TcpListener, router: Router)(using Async): Unit =
+def serve(listener: TcpListener, handler: Handler)(using Async, AsyncOperations): Unit =
+  serve(listener, Server(handler))
+
+def serve(listener: TcpListener, server: Server)(using Async, AsyncOperations): Unit =
   Async.group:
     while true do
       listener.accept() match
-        case Right(stream) => Future(handleConnection(stream, router))
-        case Left(e)        => System.err.println(s"accept failed: $e")
+        case Right(stream) => Future(handleConnection(stream, server))
+        case Left(e)         => System.err.println(s"accept failed: $e")
 
-private def handleConnection(stream: TcpStream, router: Router)(using Async): Unit =
+private[http] def handleConnection(stream: TcpStream, server: Server)(using Async, AsyncOperations): Unit =
   val reader = RequestReader(stream)
   try
     var keepAlive = true
-    while keepAlive do keepAlive = handleOneRequest(stream, reader, router)
+    while keepAlive do keepAlive = handleOneRequest(stream, reader, server)
   catch case e: Exception => System.err.println(s"connection error: $e")
   finally stream.close()
 
 /** Handles one request/response cycle on `stream`, returning whether the
-  * connection should stay open for another request.
+  * connection should stay open for another request. A phase that exceeds
+  * its configured [[Server]] timeout ends the connection (`false`) rather
+  * than propagating [[TimeoutException]] up through [[handleConnection]]'s
+  * generic `catch`, since a half-read request or half-written response
+  * leaves the connection in no state to carry another one.
   */
-private def handleOneRequest(stream: TcpStream, reader: RequestReader, router: Router)(using Async): Boolean =
-  reader.readHead() match
-    case None => false // client closed the connection cleanly between requests
+private def handleOneRequest(stream: TcpStream, reader: RequestReader, server: Server)(using Async, AsyncOperations): Boolean =
+  val headBytesOpt =
+    try server.idleTimeout.fold(reader.readHead())(t => withTimeoutOption(t)(reader.readHead()).flatten)
+    catch case _: TimeoutException => None
+  headBytesOpt match
+    case None => false // client closed the connection cleanly between requests, or the idle timeout elapsed
     case Some(headBytes) =>
       parseHead(headBytes) match
         case Left(errorResponse) =>
-          writeResponse(stream, errorResponse.withHeader("Connection", "close"), sendBody = true)
+          writeSimpleResponse(stream, errorResponse.withHeader("Connection", "close"))
           false
         case Right(head) =>
           determineBodyLength(head.headers) match
             case Left(errorResponse) =>
-              writeResponse(stream, errorResponse.withHeader("Connection", "close"), sendBody = true)
+              writeSimpleResponse(stream, errorResponse.withHeader("Connection", "close"))
               false
             case Right(bodyLength) =>
-              val body = reader.readBody(bodyLength)
-              val request = HttpRequest(head.method, head.path, head.query, head.version, head.headers, body)
-              val response = router.dispatch(request)
-              val keepAlive = wantsKeepAlive(head.version, head.headers)
-              val finalResponse = response.withHeader("Connection", if keepAlive then "keep-alive" else "close")
-              writeResponse(stream, finalResponse, sendBody = head.method != HttpMethod.HEAD)
-              keepAlive
+              try
+                val body = server.readTimeout.fold(reader.readBody(bodyLength))(t => withTimeout(t)(reader.readBody(bodyLength)))
+                val request = HttpRequest(head.method, head.path, head.query, head.version, head.headers, body)
+                val requestWantsKeepAlive = wantsKeepAlive(head.version, head.headers)
+                val w = StreamResponseWriter(stream, suppressBody = head.method == HttpMethod.HEAD)
+                w.header.set("Connection", if requestWantsKeepAlive then "keep-alive" else "close")
+                def dispatch(): Unit =
+                  try server.handler.serveHTTP(w, request)
+                  catch case e: Exception => Handler.of(_ => HttpResponse.internalError(e)).serveHTTP(w, request)
+                  w.finish()
+                server.writeTimeout.fold(dispatch())(t => withTimeout(t)(dispatch()))
+                requestWantsKeepAlive && !w.forcedClose
+              catch case _: TimeoutException => false
 
 private def wantsKeepAlive(version: String, headers: Headers): Boolean =
   headers.get("Connection") match
@@ -69,13 +111,56 @@ private def wantsKeepAlive(version: String, headers: Headers): Boolean =
     case Some(v) if v.equalsIgnoreCase("keep-alive") => true
     case _                                             => version == "HTTP/1.1"
 
-private def writeResponse(stream: TcpStream, response: HttpResponse, sendBody: Boolean)(using Async): Unit =
+/** Streams a response directly to `stream` - see [[ResponseWriter]]'s own
+  * doc for the framing rules (`Content-Length` if set before the first
+  * write, otherwise `Connection: close`). `suppressBody` implements `HEAD`:
+  * the handler still runs as if this were `GET` (so headers, including
+  * whatever `Content-Length` it would have sent, come out identically),
+  * but the body bytes themselves are never written to the wire.
+  */
+private final class StreamResponseWriter(stream: TcpStream, suppressBody: Boolean) extends ResponseWriter:
+  val header: MutableHeaders = MutableHeaders()
+  private var status: HttpStatus = HttpStatus.Ok
+  private var headersFlushed = false
+  private var _forcedClose = false
+
+  def forcedClose: Boolean = _forcedClose
+
+  def writeHeader(s: HttpStatus): Unit =
+    if !headersFlushed then status = s
+
+  private def flushHeaders()(using Async): Unit =
+    if !headersFlushed then
+      headersFlushed = true
+      if header.get("Content-Length").isEmpty && header.get("Transfer-Encoding").isEmpty then
+        _forcedClose = true
+        header.set("Connection", "close")
+      val statusLine = s"HTTP/1.1 ${status.code} ${status.reason}\r\n"
+      val headerText = header.toHeaders.iterator.map((k, v) => s"$k: $v\r\n").mkString
+      val headBytes = (statusLine + headerText + "\r\n").getBytes(StandardCharsets.ISO_8859_1)
+      stream.writeBuf(ByteBuffer.wrap(headBytes))
+
+  def write(bytes: Array[Byte])(using Async): Unit =
+    flushHeaders()
+    if !suppressBody && bytes.nonEmpty then stream.writeBuf(ByteBuffer.wrap(bytes))
+
+  /** Flushes headers even if the handler never called [[write]] at all
+    * (an empty body, or a handler that only calls [[writeHeader]]).
+    */
+  def finish()(using Async): Unit = flushHeaders()
+
+/** Writes a complete, already-known [[HttpResponse]] in one shot - used
+  * only for the two error paths in [[handleOneRequest]] that happen
+  * *before* a [[StreamResponseWriter]] would otherwise exist (a malformed
+  * request line/headers, or an unsupported `Transfer-Encoding`), where
+  * there's no request to dispatch to a handler at all.
+  */
+private def writeSimpleResponse(stream: TcpStream, response: HttpResponse)(using Async): Unit =
   val withLength = response.withHeader("Content-Length", response.body.length.toString)
   val statusLine = s"HTTP/1.1 ${withLength.status.code} ${withLength.status.reason}\r\n"
   val headerText = withLength.headers.iterator.map((k, v) => s"$k: $v\r\n").mkString
   val headBytes = (statusLine + headerText + "\r\n").getBytes(StandardCharsets.ISO_8859_1)
-  val payload = if sendBody then headBytes ++ withLength.body else headBytes
-  stream.writeBuf(ByteBuffer.wrap(payload))
+  stream.writeBuf(ByteBuffer.wrap(headBytes ++ withLength.body))
 
 private final case class ParsedHead(method: HttpMethod, path: String, query: String, version: String, headers: Headers)
 
@@ -124,9 +209,9 @@ private def determineBodyLength(headers: Headers): Either[HttpResponse, Int] =
             case Some(n) if n >= 0 => Right(n)
             case _                  => Left(HttpResponse.badRequest("invalid Content-Length"))
 
-private val MaxHeadSize = 16 * 1024
+private[http] val MaxHeadSize = 16 * 1024
 
-private final class HeadTooLargeException extends Exception("request head exceeds the maximum allowed size")
+private[http] final class HeadTooLargeException extends Exception("request head exceeds the maximum allowed size")
 
 /** Buffers bytes read off `stream` beyond what one logical piece (a
   * request's head, or its body) consumed, so they carry over to the next
@@ -134,7 +219,7 @@ private final class HeadTooLargeException extends Exception("request head exceed
   * have arrived in the same underlying `readBuf` call that finished this
   * one's body.
   */
-private final class RequestReader(stream: TcpStream):
+private[http] final class RequestReader(stream: TcpStream):
   private val pending = new ArrayBuffer[Byte]()
   private val tmp = ByteBuffer.allocate(8192)
   private var eof = false
@@ -188,4 +273,14 @@ private final class RequestReader(stream: TcpStream):
     if pending.length < n then throw new java.io.EOFException("connection closed mid-body")
     val body = pending.slice(0, n).toArray
     pending.remove(0, n)
+    body
+
+  /** Reads and consumes everything up to the connection's close - the
+    * "no `Content-Length`, no `Transfer-Encoding`" body framing
+    * [[Client]] falls back to on a response.
+    */
+  def readUntilEof()(using Async): Array[Byte] =
+    while fill() do ()
+    val body = pending.toArray
+    pending.clear()
     body

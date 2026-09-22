@@ -15,7 +15,7 @@ private def demoRouter(): Router =
     .get("/health")(_ => HttpResponse.text("ok\n"))
     .post("/echo")(req => HttpResponse.text(new String(req.body, StandardCharsets.UTF_8)))
 
-private def runServer(port: Int, backendName: String)(using Async, TcpSupport): Unit =
+private def runServer(port: Int, backendName: String)(using Async, TcpSupport, AsyncOperations): Unit =
   val listener = TcpSupport.listen(InetSocketAddress("0.0.0.0", port)) match
     case Right(l) => l
     case Left(e)  => throw new RuntimeException(s"listen failed: $e")

@@ -171,22 +171,6 @@ private[uring] object uringOps {
 
   import uring._
 
-  /** Forces a reference to stay reachable past whatever point it's passed
-    * to, for values whose only remaining "use" is a raw pointer the kernel
-    * holds onto (across a suspension point, or for as long as an op stays
-    * outstanding) - the GC has no way to see that pointer, so nothing
-    * about it otherwise keeps the backing allocation alive. A plain
-    * reference that's never actually read again (e.g. `val _ = buf`) is
-    * NOT a reliable substitute for this: confirmed via a gdb core dump in
-    * `UringShard.scala`, where exactly that weaker pattern let a
-    * `io_uring`-backing byte array get collected/reused while a raw
-    * pointer into it was still live in the kernel, corrupting unrelated
-    * memory. `@noinline` matters - an inlined empty call is free to be
-    * optimized away entirely, defeating the whole point (same idiom
-    * `scala.scalanative.runtime.Continuations` itself uses internally).
-    */
-  @noinline def reachabilityFence(o: AnyRef): Unit = ()
-
   def io_uring_prep_rw(
       op: Int,
       sqe: Ptr[io_uring_sqe],

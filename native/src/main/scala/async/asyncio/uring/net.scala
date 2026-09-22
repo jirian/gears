@@ -26,13 +26,19 @@ import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
 
+/** `keepAlive` - the buffer (or tuple of buffers) whose raw address the
+  * kernel holds onto for as long as this op is outstanding - rides in the
+  * same shard-owned `handlers` entry as the completion closure below,
+  * rather than needing a reachability fence of its own; see
+  * `UringShard.Handler`'s doc for why that's a strictly stronger
+  * guarantee than fencing a closure-captured value would be.
+  */
 private[uring] def submitAwait(scheduler: UringPerThreadScheduler)(keepAlive: AnyRef)(prep: Ptr[io_uring_sqe] => Unit)(using
     Async
 ): Int =
   Future
     .withResolver[Int]: resolver =>
-      val (shard, userData) = scheduler.submit(prep): res =>
-        reachabilityFence(keepAlive)
+      val (shard, userData) = scheduler.submit(prep, keepAlive): res =>
         if res == -errno.ECANCELED then resolver.rejectAsCancelled()
         else resolver.resolve(res)
       resolver.onCancel: () =>
@@ -41,7 +47,7 @@ private[uring] def submitAwait(scheduler: UringPerThreadScheduler)(keepAlive: An
         // matches an op on the same ring it's submitted to, so routing
         // this through scheduler.submit's normal current-thread/round-robin
         // logic would often silently cancel nothing. See submitOn's doc.
-        try scheduler.submitOn(shard)(sqe => io_uring_prep_cancel64(sqe, userData, 0))(_ => ())
+        try scheduler.submitOn(shard)(sqe => io_uring_prep_cancel64(sqe, userData, 0), null)(_ => ())
         catch case _: IOException => ()
     .link()
     .await

@@ -15,7 +15,23 @@ class UringPerThreadScheduler(
     entriesPerShard: Int = 256
 ) extends Scheduler:
 
-  private val shards: Array[UringShard] = Array.fill(parallelism)(new UringShard(entriesPerShard))
+  /** Fiber dispatches arriving from outside every shard (a brand new fiber's
+    * first dispatch, mainly - see `execute`) land here rather than being
+    * bound to one round-robin-picked shard, so *whichever* shard goes idle
+    * first picks them up - the Go-scheduler-style global run queue. Unlike
+    * `UringShard.submitQueue`, this is genuinely stealable: it holds plain
+    * `Runnable`s (fiber boundary-entries/resumes), not io_uring submissions
+    * bound to one specific ring.
+    */
+  private val globalQueue = new java.util.concurrent.ConcurrentLinkedQueue[Runnable]()
+
+  private val shards: Array[UringShard] = Array.fill(parallelism)(new UringShard(entriesPerShard, globalQueue))
+  // Every shard needs to see every other shard to steal from, but the full
+  // array doesn't exist until Array.fill above returns - wired up here,
+  // strictly before any shard's thread starts, rather than threaded through
+  // the constructor. See UringShard.siblings's own doc for why this plain,
+  // set-once-before-start field needs no synchronization.
+  shards.foreach(_.siblings = shards)
   private val threads: Array[UringShardThread] = shards.map { shard =>
     val t = new UringShardThread(shard)
     t.setDaemon(true)
@@ -32,7 +48,15 @@ class UringPerThreadScheduler(
   override def execute(body: Runnable): Unit =
     UringShard.current() match
       case Some(shard) => shard.execute(body, calledFromOwnThread = true)
-      case None        => pickShard().execute(body, calledFromOwnThread = false)
+      case None =>
+        // Not bound to any one shard - pushed to the global queue so any
+        // shard that goes idle can steal it, not just whichever one
+        // round-robin happens to land on next. pickShard() here is purely
+        // "who to nudge awake first", not an assignment - any other idle
+        // shard notices this too, either via its own next poll-timeout
+        // wakeup or by stealing it once this one's been taken.
+        globalQueue.offer(body)
+        pickShard().wake()
 
   /** Returns the shard the op actually landed on alongside its id, not
     * just the id - a cancellation (`IORING_OP_ASYNC_CANCEL`) or timer
@@ -43,16 +67,23 @@ class UringPerThreadScheduler(
     * shard owns the original op), silently failing to cancel anything.
     * Callers needing to target this specific op later should use
     * `submitOn` with the returned shard, not call `submit` again.
+    *
+    * `keepAlive` (any buffer the kernel holds a raw pointer into for as
+    * long as this op is outstanding, e.g. a socket read target or - here -
+    * a timer's own timespec) rides directly in the same shard-owned
+    * `handlers` entry as the completion closure; see `UringShard.Handler`.
+    * Pass `null` for ops with nothing to keep alive (a bare cancel, a
+    * timer removal, `IORING_OP_SOCKET`'s no-buffer creation call, ...).
     */
-  private[uring] def submit(prep: Ptr[io_uring_sqe] => Unit)(onComplete: Int => Unit): (UringShard, __u64) =
+  private[uring] def submit(prep: Ptr[io_uring_sqe] => Unit, keepAlive: AnyRef)(onComplete: Int => Unit): (UringShard, __u64) =
     val id = UringShard.nextId()
     val shard = UringShard.current() match
       case Some(s) =>
-        s.submitFast(id, prep, onComplete)
+        s.submitFast(id, prep, onComplete, keepAlive)
         s
       case None =>
         val s = pickShard()
-        s.submitRemote(id, prep, onComplete)
+        s.submitRemote(id, prep, onComplete, keepAlive)
         s
     (shard, id.toULong)
 
@@ -61,10 +92,10 @@ class UringPerThreadScheduler(
     * path otherwise. Used to target a follow-up op (cancel, timer
     * removal) at the exact shard an earlier `submit` landed on.
     */
-  private[uring] def submitOn(shard: UringShard)(prep: Ptr[io_uring_sqe] => Unit)(onComplete: Int => Unit): Unit =
+  private[uring] def submitOn(shard: UringShard)(prep: Ptr[io_uring_sqe] => Unit, keepAlive: AnyRef)(onComplete: Int => Unit): Unit =
     val id = UringShard.nextId()
-    if UringShard.current().contains(shard) then shard.submitFast(id, prep, onComplete)
-    else shard.submitRemote(id, prep, onComplete)
+    if UringShard.current().contains(shard) then shard.submitFast(id, prep, onComplete, keepAlive)
+    else shard.submitRemote(id, prep, onComplete, keepAlive)
 
   override def schedule(delay: FiniteDuration, body: Runnable): Cancellable =
     val tsArr = new Array[Byte](sizeof[__kernel_timespec].toInt)
@@ -72,15 +103,12 @@ class UringPerThreadScheduler(
     ts.tv_sec = delay.toSeconds
     ts.tv_nsec = (delay - delay.toSeconds.seconds).toNanos
 
-    val (shard, userData) = submit(sqe => io_uring_prep_timeout(sqe, ts, 0.toULong, 0.toUInt)) { res =>
-      // keep tsArr (and the memory `ts` points into) alive until here - see
-      // uringOps.reachabilityFence for why a plain reference isn't enough
-      reachabilityFence(tsArr)
+    val (shard, userData) = submit(sqe => io_uring_prep_timeout(sqe, ts, 0.toULong, 0.toUInt), tsArr) { res =>
       if res == -62 /* -ETIME */ then execute(body)
     }
 
     () =>
-      try submitOn(shard)(sqe => io_uring_prep_timeout_remove(sqe, userData, 0.toUInt))(_ => ())
+      try submitOn(shard)(sqe => io_uring_prep_timeout_remove(sqe, userData, 0.toUInt), null)(_ => ())
       catch case _: IOException => ()
 
   def tcpSupport = new UringTcpSupport(this) {}

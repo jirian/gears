@@ -1,7 +1,7 @@
 package gears.async.http
 
 import gears.async.Async
-import gears.async.net.{TcpStream, TcpSupport}
+import gears.async.net.{TcpStream, TcpSupport, TlsContext, TlsSupport}
 
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
@@ -20,8 +20,8 @@ object Url:
     val schemeSep = raw.indexOf("://")
     if schemeSep < 0 then throw new IllegalArgumentException(s"missing scheme in URL: $raw")
     val scheme = raw.substring(0, schemeSep)
-    if scheme != "http" then
-      throw new UnsupportedOperationException(s"unsupported URL scheme '$scheme' (no TLS backend - only http:// is supported)")
+    if scheme != "http" && scheme != "https" then
+      throw new IllegalArgumentException(s"unsupported URL scheme '$scheme' (only http/https are supported)")
     val rest = raw.substring(schemeSep + 3)
     val pathStart = rest.indexWhere(c => c == '/' || c == '?')
     val authority = if pathStart < 0 then rest else rest.substring(0, pathStart)
@@ -54,36 +54,53 @@ object ClientRequest:
   def post(url: String, body: Array[Byte], contentType: String = "application/octet-stream"): ClientRequest =
     ClientRequest(HttpMethod.POST, Url.parse(url), Headers("Content-Type" -> contentType), body)
 
-final class Transport(using tcp: TcpSupport):
-  private val idle = new ConcurrentHashMap[(String, Int), ConcurrentLinkedQueue[TcpStream]]()
+/** `tls`, if given, is used to wrap the raw TCP connection whenever a
+  * request's URL scheme is `https`; an `https` request without one fails
+  * fast with a clear error rather than silently talking plaintext to a TLS
+  * port. `tlsContext` builds the (reusable) client context to hand to
+  * `tls.wrapClient` - defaults to `tls.clientContext()` (full certificate
+  * verification against the system trust store), overridable to add a CA
+  * or disable verification for testing.
+  */
+final class Transport(
+    tls: Option[TlsSupport] = None,
+    tlsContext: TlsSupport => TlsContext = _.clientContext()
+)(using tcp: TcpSupport):
+  private val idle = new ConcurrentHashMap[(String, String, Int), ConcurrentLinkedQueue[TcpStream]]()
+  private lazy val tlsCtx: TlsContext = tlsContext(tls.get)
 
-  private def takeIdle(host: String, port: Int): Option[TcpStream] =
-    Option(idle.get((host, port))).flatMap(q => Option(q.poll()))
+  private def takeIdle(scheme: String, host: String, port: Int): Option[TcpStream] =
+    Option(idle.get((scheme, host, port))).flatMap(q => Option(q.poll()))
 
-  private def release(host: String, port: Int, stream: TcpStream): Unit =
-    idle.computeIfAbsent((host, port), _ => new ConcurrentLinkedQueue()).offer(stream)
+  private def release(scheme: String, host: String, port: Int, stream: TcpStream): Unit =
+    idle.computeIfAbsent((scheme, host, port), _ => new ConcurrentLinkedQueue()).offer(stream)
 
-  private def dial(host: String, port: Int)(using Async): TcpStream =
-    tcp.connect(new InetSocketAddress(host, port), Seq.empty) match
+  private def dial(scheme: String, host: String, port: Int)(using Async): TcpStream =
+    val raw = tcp.connect(new InetSocketAddress(host, port), Seq.empty) match
       case Right(stream) => stream
       case Left(e)         => throw new java.io.IOException(s"connect to $host:$port failed: $e")
+    if scheme != "https" then raw
+    else
+      val ts = tls.getOrElse(throw new UnsupportedOperationException("https requested but no TlsSupport configured on this Transport"))
+      ts.wrapClient(raw, tlsCtx, host)
 
   def roundTrip(request: ClientRequest)(using Async): HttpResponse =
+    val scheme = request.url.scheme
     val host = request.url.host
     val port = request.url.port
-    takeIdle(host, port) match
+    takeIdle(scheme, host, port) match
       case Some(reused) =>
         try attempt(reused, request)
         catch
           case _: Exception =>
             reused.close()
-            attempt(dial(host, port), request)
-      case None => attempt(dial(host, port), request)
+            attempt(dial(scheme, host, port), request)
+      case None => attempt(dial(scheme, host, port), request)
 
   private def attempt(stream: TcpStream, request: ClientRequest)(using Async): HttpResponse =
     writeRequest(stream, request)
     val (response, keepAlive) = readResponse(stream, isHead = request.method == HttpMethod.HEAD)
-    if keepAlive then release(request.url.host, request.url.port, stream) else stream.close()
+    if keepAlive then release(request.url.scheme, request.url.host, request.url.port, stream) else stream.close()
     response
 
   private def writeRequest(stream: TcpStream, request: ClientRequest)(using Async): Unit =
@@ -152,6 +169,7 @@ final class Client(transport: Transport, maxRedirects: Int = 10):
 object Client:
   def apply()(using TcpSupport): Client = new Client(Transport())
   def apply(transport: Transport): Client = new Client(transport)
+  def apply(tls: TlsSupport)(using TcpSupport): Client = new Client(Transport(tls = Some(tls)))
 
   private[http] def redirectMethod(status: Int, method: HttpMethod): HttpMethod =
     if (status == 301 || status == 302 || status == 303) && method != HttpMethod.GET && method != HttpMethod.HEAD then

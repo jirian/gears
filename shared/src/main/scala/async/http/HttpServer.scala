@@ -3,6 +3,7 @@ package gears.async.http
 import gears.async._
 import gears.async.net.TcpListener
 import gears.async.net.TcpStream
+import gears.async.net.{TlsContext, TlsSupport}
 import gears.async.asyncio.Error
 
 import java.nio.ByteBuffer
@@ -11,11 +12,16 @@ import java.util.concurrent.TimeoutException
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration.FiniteDuration
 
+/** `tls`, if given, wraps every accepted connection in a TLS server
+  * handshake before treating it as HTTP - build it with
+  * `(support, support.serverContext(certFile, keyFile))`.
+  */
 final case class Server(
     handler: Handler,
     readTimeout: Option[FiniteDuration] = None,
     writeTimeout: Option[FiniteDuration] = None,
-    idleTimeout: Option[FiniteDuration] = None
+    idleTimeout: Option[FiniteDuration] = None,
+    tls: Option[(TlsSupport, TlsContext)] = None
 ):
   /** Equivalent to `serve(listener, this)` - Go's `Server.Serve`. */
   def serve(listener: TcpListener)(using Async, AsyncOperations): Unit = gears.async.http.serve(listener, this)
@@ -27,8 +33,16 @@ def serve(listener: TcpListener, server: Server)(using Async, AsyncOperations): 
   Async.group:
     while true do
       listener.accept() match
-        case Right(stream) => Future(handleConnection(stream, server))
-        case Left(e)         => System.err.println(s"accept failed: $e")
+        case Right(raw) =>
+          Future {
+            try
+              val stream = server.tls match
+                case Some((tls, ctx)) => tls.wrapServer(raw, ctx)
+                case None              => raw
+              handleConnection(stream, server)
+            catch case e: Exception => System.err.println(s"TLS handshake failed: $e")
+          }
+        case Left(e) => System.err.println(s"accept failed: $e")
 
 private[http] def handleConnection(stream: TcpStream, server: Server)(using Async, AsyncOperations): Unit =
   val reader = RequestReader(stream)

@@ -16,25 +16,6 @@ class IOException(errno: Int) extends Exception:
   override def toString(): String = s"IO Error: errno=$errno"
 
 private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinkedQueue[Runnable]):
-  /** `ring`/`wakeBufPtr`/`cqePtrSlot`/`batch` below are all `def`s that
-    * recompute their pointer from a backing array on every single access,
-    * deliberately never cached in a `val`. A cached-once pointer leaves
-    * the array itself read by name exactly one time, at construction -
-    * exactly the shape of a real, gdb-confirmed liveness bug found this
-    * session (`io_uring`'s own `sq.khead` field overwritten with what
-    * looked like an unrelated Scala object's pointer), and the kind of
-    * thing no amount of "it's obviously still a live field" reasoning
-    * reliably prevents. Recomputing instead means every one of these
-    * arrays gets a genuine, unavoidable read on every op - not a
-    * discarded one either, since the recomputed pointer is immediately
-    * passed to a real `extern` call - so nothing can prove the read
-    * droppable without changing what that call receives. That's a
-    * strictly stronger guarantee than a reachability fence (which is why
-    * none of these fields need one, unlike the per-operation buffers that
-    * ride `handlers` - see `Handler`'s doc below), at the cost of a few
-    * extra address-arithmetic instructions per call, on values `.at`
-    * computes cheaply and without allocating.
-    */
   private val ringStorage = new Array[Byte](sizeof[io_uring].toInt)
   private def ring: Ptr[io_uring] =
     ringStorage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[io_uring]]
@@ -45,18 +26,6 @@ private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinke
   private val taskQueue = new ConcurrentLinkedQueue[Runnable]()
   private val submitQueue = new ConcurrentLinkedQueue[SubmitRequest]()
 
-  /** Holds `keepAlive` (a buffer, or any other value whose raw address the
-    * kernel holds onto for as long as this op is outstanding) directly
-    * alongside its completion closure, rather than relying on the closure
-    * to capture it - the same map entry standing for both. `handlers`
-    * itself is what makes this reliable: unlike a plain field touched once
-    * and never read again (the actual shape of a real, gdb-confirmed
-    * liveness bug found and fixed this session), every entry here is
-    * genuinely inserted and looked up per-op, so nothing about it can be
-    * mistaken for dead. That's a strictly stronger guarantee than a
-    * standalone reachability fence, and makes one unnecessary for any
-    * value that already flows through here.
-    */
   private case class Handler(onComplete: Int => Unit, keepAlive: AnyRef)
   private val handlers = scala.collection.mutable.LongMap[Handler]()
 
@@ -77,19 +46,8 @@ private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinke
   private var pendingCount = 0
   private var pendingCursor = 0
 
-  /** The other shards this one can steal a task from when its own queues
-    * and ring both come up empty (Go-style work stealing - see `loop`'s
-    * fallback sequence). Set exactly once by `UringPerThreadScheduler`,
-    * right after every shard has been constructed and before any shard's
-    * thread starts - `Thread.start()` itself establishes the
-    * happens-before edge that makes this plain field read safe from this
-    * shard's own thread afterward, with no further synchronization needed
-    * since it's never written again.
-    */
   private[uring] var siblings: Array[UringShard] = Array.empty
 
-  // Only ever touched from this shard's own thread (loop()/stealFromSibling),
-  // so a plain, non-thread-safe Random is fine - no shared state to race on.
   private val rng = new scala.util.Random()
 
   private def submitLocal(id: Long, prep: Ptr[io_uring_sqe] => Unit, onComplete: Int => Unit, keepAlive: AnyRef): Unit =
@@ -114,13 +72,6 @@ private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinke
     taskQueue.offer(body)
     if !calledFromOwnThread then wake()
 
-  /** `private[uring]`, not `private`, so `UringPerThreadScheduler` can nudge
-    * this shard directly after pushing work onto the *global* queue (see
-    * `execute`'s external-thread path in scheduler.scala) - distinct from
-    * `execute(_, calledFromOwnThread = false)`, which both enqueues onto
-    * *this shard's own* local queue and wakes it; a global-queue push must
-    * not also bind the work to one specific shard.
-    */
   private[uring] def wake(): Unit =
     val buf = stackalloc[CLongLong]()
     !buf = 1L
@@ -131,21 +82,9 @@ private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinke
       UringShard.nextId(),
       sqe => io_uring_prep_read(sqe, wakeFd, wakeBufPtr, 8.toUInt, 0.toULong),
       _ => armWake(),
-      null // wakeBufArr needs nothing here - see wakeBufPtr's own doc above
+      null
     )
 
-  /** Runs at most *one* queued task per call, for the same reason
-    * `drainCompletions` only runs one handler per call: a task may enter a
-    * fresh `Continuations.boundary` (a fiber's first dispatch) or resume
-    * one already suspended, and running a second such dispatch immediately
-    * after, within the same native call frame, without first looping back
-    * through `loop`'s outer `while true`, was the actual cause of a crash
-    * inside `io_uring_get_sqe` (verified via a core dump: the crash hit on
-    * a fiber's very first op, right after another fiber's boundary was
-    * entered earlier in the same `drainTasks` call - i.e. this loop's own
-    * inner `while` previously let multiple dispatches run back-to-back
-    * exactly like the batch of completions once did).
-    */
   private def drainTasks(): Boolean =
     val r = taskQueue.poll()
     if r == null then false
@@ -183,8 +122,6 @@ private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinke
       val id = idsBuf(pendingCursor)
       val res = resBuf(pendingCursor)
       pendingCursor += 1
-      // h.keepAlive needs no separate mention here - it's alive for exactly
-      // as long as h is, which is exactly as long as this op needed it.
       handlers.remove(id).foreach { h =>
         Continuations.handlersReset()
         try h.onComplete(res)
@@ -192,33 +129,8 @@ private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinke
       }
       true
 
-  /** Lets a sibling take one task off *this* shard's local queue - the
-    * Go-scheduler-style "steal" half of work stealing. Safe with no extra
-    * synchronization: `taskQueue` is a `ConcurrentLinkedQueue`, already
-    * safe for concurrent `poll()` from multiple threads, this shard's own
-    * included.
-    */
   private[uring] def stealTask(): Runnable = taskQueue.poll()
 
-  /** The global-queue-then-steal fallback, tried once `drainTasks`/
-    * `drainSubmits`/`drainCompletions` have all come up empty - mirrors
-    * Go's own local -> global -> steal-from-a-random-P order. Runs at most
-    * one task, for the same reason every other dispatch point in this file
-    * does: see `drainTasks`'s doc.
-    *
-    * Deliberately not implemented: Go's other half of "work sharing" -
-    * proactively routing *self-produced* work to the global queue once a
-    * local queue passes some size threshold, so one P can't hoard work a
-    * stalled sibling never gets a chance to steal. Go needs that because
-    * its local queues are fixed at 256 slots and goroutines routinely
-    * spawn more goroutines in bursts. Ours are unbounded, and this
-    * backend's actual workload doesn't really produce that pattern - one
-    * fiber per connection, doing its own reads and writes, not spawning
-    * a burst of siblings for itself - so stealing alone (plus the bounded
-    * poll below, so an idle shard keeps re-checking rather than blocking
-    * past the point a sibling's backlog appears) covers it. Revisit if a
-    * workload with self-spawning fibers ever shows the gap in practice.
-    */
   private def tryStealOrGlobal(): Boolean =
     val fromGlobal = globalQueue.poll()
     val task = if fromGlobal != null then fromGlobal else stealFromSibling()
@@ -242,14 +154,6 @@ private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinke
         i += 1
       stolen
 
-  // How long an idle shard sleeps before waking on its own to recheck for
-  // stealable work, rather than only ever waking via an explicit wake()
-  // (a real completion on its own ring, or a sibling/scheduler nudge).
-  // Without this, a shard that goes idle and blocks has no way to notice
-  // a sibling's backlog growing later - nothing currently calls wake() on
-  // it just because *another* shard's local queue got deeper. Short
-  // enough to keep rebalancing latency low, long enough that a genuinely
-  // idle shard isn't busy-polling; tune if this proves wrong in practice.
   private val pollTimeoutStorage = new Array[Byte](sizeof[__kernel_timespec].toInt)
   private def pollTimeout: Ptr[__kernel_timespec] =
     val ts = pollTimeoutStorage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[__kernel_timespec]]

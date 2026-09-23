@@ -4,31 +4,6 @@ import gears.async.Async
 
 import scala.collection.mutable
 
-/** A minimal method+path router - Go's `http.ServeMux`. A registered
-  * pattern matches a request path one of three ways, and when more than one
-  * registered pattern matches, the longest (most specific) one wins -
-  * mirroring `ServeMux`'s own precedence rule, with "longer" approximated
-  * as "more characters in the pattern string", which is exact for
-  * exact-vs-subtree precedence and reasonable for subtree-vs-subtree:
-  *
-  *   - an **exact** pattern (no trailing `/`, no `{...}`) matches only that
-  *     literal path;
-  *   - a **subtree** pattern (registered with a trailing `/`, e.g. `"/images/"`)
-  *     matches any path with that prefix;
-  *   - a **wildcard** pattern (containing one or more `{name}` segments,
-  *     e.g. `"/items/{id}"`) matches paths with the same number of `/`-
-  *     separated segments, where each `{name}` matches exactly one segment
-  *     and is extracted into the dispatched [[HttpRequest]]'s
-  *     [[HttpRequest.pathValue]]. Simplified from Go 1.22's actual syntax:
-  *     no catch-all `{name...}` trailing wildcard, no host-qualified or
-  *     method-qualified (`"GET /path"`) pattern strings - use [[get]]/
-  *     [[post]]/etc. (or [[handle]] plus a per-method check inside the
-  *     handler) instead of encoding the method into the pattern itself.
-  *
-  * A path with no registered pattern matching it at all answers 404; a path
-  * matched by some pattern, but not for this method, answers 405 with an
-  * `Allow` header listing what is registered for it.
-  */
 final class Router extends Handler:
   private final case class Registration(
       pattern: String,
@@ -48,13 +23,6 @@ final class Router extends Handler:
       }
     )
 
-  /** Registers `handler` for every method on `pattern` (Go's
-    * `ServeMux.Handle`) - the handler itself is responsible for checking
-    * `r.method` if it only wants to serve some of them. Takes precedence
-    * over any per-method registration ([[get]]/[[post]]/etc.) on the exact
-    * same pattern string, but not over a *different*, longer-matching
-    * pattern - same precedence rule as everything else, see the class doc.
-    */
   def handle(pattern: String)(handler: Handler): this.type =
     registrationFor(pattern).anyMethod = Some(handler)
     this
@@ -93,11 +61,6 @@ final class Router extends Handler:
       }
       if ok then Some(extracted.toMap) else None
 
-  /** Every registration whose pattern matches `path`, with whatever
-    * wildcard values that specific pattern extracted (empty unless it has
-    * `{...}` segments) - [[serveHTTP]] picks the longest pattern among
-    * these.
-    */
   private def candidates(path: String): Seq[(Registration, Map[String, String])] =
     registrations.toSeq.flatMap { reg =>
       val pattern = reg.pattern
@@ -106,10 +69,6 @@ final class Router extends Handler:
       else Option.when(pattern == path)(reg -> Map.empty[String, String])
     }
 
-  /** Dispatches `request` to its registered [[Handler]], writing through
-    * `w`. A handler that throws is turned into a 500 response rather than
-    * propagating and killing the connection's fiber.
-    */
   def serveHTTP(w: ResponseWriter, request: HttpRequest)(using Async): Unit =
     candidates(request.path).sortBy(-_._1.pattern.length).headOption match
       case None => dispatchTo(Handler.of(_ => HttpResponse.notFound(request.path)), w, request)
@@ -130,10 +89,6 @@ final class Router extends Handler:
     try handler.serveHTTP(w, request)
     catch case e: Exception => Handler.of(_ => HttpResponse.internalError(e)).serveHTTP(w, request)
 
-  /** The buffered-response equivalent of [[serveHTTP]], for callers that
-    * want a plain [[HttpResponse]] value back rather than writing through a
-    * [[ResponseWriter]] (tests, simple scripts, ...).
-    */
   def dispatch(request: HttpRequest)(using Async): HttpResponse =
     var captured: HttpResponse = null
     val w = new ResponseWriter:

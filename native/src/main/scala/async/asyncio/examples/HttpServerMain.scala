@@ -29,9 +29,4 @@ private def runServer(port: Int, backendName: String)(using Async, TcpSupport, A
     given tcp: TcpSupport = support.tcpSupport
     Async.blocking(runServer(port, "uring"))
   else
-    // The kqueue backend was removed as unverified/unmaintained (no macOS
-    // toolchain in this repo to build or test it against); uring is
-    // Linux-only. Until a macOS-capable backend exists, every non-Linux
-    // platform is equally unsupported - no separate isMac branch to keep
-    // silently doing nothing on macOS specifically.
     throw new UnsupportedOperationException("no TCP backend wired up for this platform")

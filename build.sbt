@@ -38,7 +38,7 @@ lazy val root =
       Seq(
         nativeConfig ~= { c =>
           val withLinking = c.withMultithreading(true)
-            .withLinkingOptions(c.linkingOptions :+ "-luring")
+            .withLinkingOptions(c.linkingOptions ++ Seq("-luring", "-lssl", "-lcrypto"))
           // Debug mode (the sbt-scala-native default) skips LLVM's optimizer
           // and Scala Native's own whole-program NIR optimizer (inlining,
           // devirtualization, dead-code elimination) entirely, favoring link

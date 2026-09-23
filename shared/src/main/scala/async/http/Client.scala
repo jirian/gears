@@ -8,17 +8,9 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
 
-/** A parsed `scheme://host[:port]/path[?query]` target - just enough of a
-  * URL to drive [[Client]]. Only `http` is supported: this backend has no
-  * TLS stack to speak `https` with (unlike Go's `net/http`, which delegates
-  * to `crypto/tls`).
-  */
 final case class Url(scheme: String, host: String, port: Int, path: String, query: String):
   def target: String = if query.isEmpty then path else s"$path?$query"
 
-  /** The `Host` request-header value - omits the port when it's the
-    * scheme's default, matching what browsers and `net/http` send.
-    */
   def hostHeader: String = if port == Url.defaultPort(scheme) then host else s"$host:$port"
 
 object Url:
@@ -42,11 +34,6 @@ object Url:
       case i  => (pathAndQuery.substring(0, i), pathAndQuery.substring(i + 1))
     Url(scheme, host, port, if path.isEmpty then "/" else path, query)
 
-  /** Resolves a `Location` header value against the URL it came from - an
-    * absolute URL, an absolute path (`/foo`), or (a simplified, common-case
-    * approximation of RFC 3986 relative resolution) a path relative to
-    * `base`'s directory.
-    */
   def resolve(base: Url, location: String): Url =
     if location.contains("://") then parse(location)
     else
@@ -58,10 +45,6 @@ object Url:
         else base.path.substring(0, base.path.lastIndexOf('/') + 1) + path
       base.copy(path = absolutePath, query = query)
 
-/** An outgoing HTTP request - Go's `http.Request` on the client side.
-  * `Content-Length`, `Host`, and `Connection` are filled in by [[Transport]]
-  * when the request is actually sent, so callers don't set them themselves.
-  */
 final case class ClientRequest(method: HttpMethod, url: Url, headers: Headers, body: Array[Byte]):
   def withHeader(name: String, value: String): ClientRequest = copy(headers = headers.set(name, value))
   def addCookie(cookie: Cookie): ClientRequest = copy(headers = headers.add("Cookie", cookie.rendered))
@@ -71,14 +54,6 @@ object ClientRequest:
   def post(url: String, body: Array[Byte], contentType: String = "application/octet-stream"): ClientRequest =
     ClientRequest(HttpMethod.POST, Url.parse(url), Headers("Content-Type" -> contentType), body)
 
-/** Low-level connection handling for [[Client]] - Go's `http.Transport`.
-  * Keeps a pool of idle, still-open keep-alive connections per `(host,
-  * port)`, reusing one for [[roundTrip]] when available instead of dialing
-  * fresh every time. A pooled connection the peer has since closed (idle
-  * timeout, e.g.) is detected by the write/read failing, in which case the
-  * round trip is retried exactly once against a newly dialed connection -
-  * the caller never sees the stale-connection failure.
-  */
 final class Transport(using tcp: TcpSupport):
   private val idle = new ConcurrentHashMap[(String, Int), ConcurrentLinkedQueue[TcpStream]]()
 
@@ -93,10 +68,6 @@ final class Transport(using tcp: TcpSupport):
       case Right(stream) => stream
       case Left(e)         => throw new java.io.IOException(s"connect to $host:$port failed: $e")
 
-  /** One HTTP round trip: writes `request` and reads back the response,
-    * over either a freshly dialed connection or (when one is idle) a reused
-    * one from the pool.
-    */
   def roundTrip(request: ClientRequest)(using Async): HttpResponse =
     val host = request.url.host
     val port = request.url.port
@@ -126,18 +97,6 @@ final class Transport(using tcp: TcpSupport):
     stream.writeBuf(ByteBuffer.wrap(headBytes))
     if request.body.nonEmpty then stream.writeBuf(ByteBuffer.wrap(request.body))
 
-  /** Parses the status line and headers off `stream` (via the same
-    * [[RequestReader]] buffering the server side uses - it doesn't care
-    * which direction the protocol runs) and, unless `isHead` or the status
-    * is 204/304 (which never carry a body regardless of `Content-Length`,
-    * per RFC 7230 3.3.3), reads the body: exactly `Content-Length` bytes
-    * when present, otherwise everything up to the connection's close
-    * (chunked responses aren't supported, matching [[HttpServer]]'s
-    * symmetric choice not to send or parse chunked bodies). The returned
-    * `Boolean` says whether the connection is safe to pool: never after
-    * reading until EOF (the peer already closed it), and never on
-    * HTTP/1.0 or an explicit `Connection: close`.
-    */
   private def readResponse(stream: TcpStream, isHead: Boolean)(using Async): (HttpResponse, Boolean) =
     val reader = RequestReader(stream)
     val headBytes = reader.readHead().getOrElse(throw new java.io.EOFException("connection closed before any response"))
@@ -167,15 +126,6 @@ final class Transport(using tcp: TcpSupport):
         (noBody || headers.get("Content-Length").isDefined)
     (HttpResponse(HttpStatus(code, reason), headers, body), keepAlive)
 
-/** An HTTP client - Go's `http.Client`. Follows redirects (301/302/303/307/
-  * 308) up to [[maxRedirects]] hops, per Go's own per-status rules: 301/302/
-  * 303 downgrade a non-GET/HEAD method to `GET` with an empty body, while
-  * 307/308 resend the original method and body unchanged. No persistent
-  * cookie jar (matching bare `net/http` without `net/http/cookiejar`) -
-  * `Set-Cookie`s on a response are available via [[HttpResponse.cookies]]
-  * for a caller to inspect or re-send explicitly via
-  * [[ClientRequest.addCookie]].
-  */
 final class Client(transport: Transport, maxRedirects: Int = 10):
   def send(request: ClientRequest)(using Async): HttpResponse = follow(request, maxRedirects)
 

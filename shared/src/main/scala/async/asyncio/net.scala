@@ -125,6 +125,30 @@ trait TlsSupport:
     */
   def wrapServer(stream: TcpStream, context: TlsContext)(using Async): TcpStream
 
+/** Asynchronous hostname resolution - Go's `net.Resolver`/`LookupHost`.
+  * `java.net.InetSocketAddress(host: String, port: Int)`'s own constructor
+  * already resolves `host` internally, but does so *synchronously* - which
+  * is exactly the trap `gears.async.http.Transport.dial` used to fall
+  * into: calling that constructor from inside a fiber body blocks whatever
+  * shard/carrier thread the fiber happens to be running on for the entire
+  * lookup, stalling every other fiber that shard owns too, not just the
+  * one doing the lookup. [[resolve]] exists to do the same underlying
+  * lookup (there's no reason to reimplement DNS - a real resolver is
+  * already there, this is purely about *how* it gets called) without ever
+  * blocking a shard thread.
+  */
+trait DnsSupport:
+  /** Resolves `host` to all of its addresses. A genuine failure (unknown
+    * host, no working resolver, ...) is a thrown exception, matching every
+    * other setup-time failure in this package ([[TcpSupport.connect]],
+    * `FileSupport`'s `openRead`/`openWrite`) - not a `Result` `Left`.
+    */
+  def resolve(host: String)(using Async): Array[java.net.InetAddress]
+
+object DnsSupport:
+  def resolve(host: String)(using dns: DnsSupport, async: Async): Array[java.net.InetAddress] =
+    dns.resolve(host)
+
 // Options for socket creation.
 sealed trait SocketOption:
   type Value

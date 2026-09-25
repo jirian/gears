@@ -1,9 +1,9 @@
 package gears.async.asyncio.examples
 
 import gears.async._
-import gears.async.net.TcpSupport
+import gears.async.net.{DnsSupport, TcpSupport}
 import gears.async.http._
-import gears.async.asyncio.uring.UringPerThreadSupport
+import gears.async.asyncio.uring.{NativeDnsSupport, UringPerThreadSupport}
 import gears.async.asyncio.tls.NativeTlsSupport
 
 import java.net.InetSocketAddress
@@ -13,16 +13,6 @@ import scala.scalanative.meta.LinktimeInfo
 import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe._
 
-/** A runnable demonstration of TLS support: generates a throwaway
-  * self-signed certificate (via the `openssl` CLI - there's no guaranteed
-  * external network or pre-existing certificate to use instead), starts an
-  * HTTPS server with it, then drives two clients against it: one that
-  * trusts that certificate specifically and gets a real, fully verified
-  * TLS connection through, and one that doesn't (just the system trust
-  * store, like a real browser hitting a self-signed site) and correctly
-  * fails the handshake - proving verification is actually enforced, not
-  * silently skipped.
-  */
 private def generateSelfSignedCert(certFile: String, keyFile: String): Unit =
   val cmd =
     s"openssl req -x509 -newkey rsa:2048 -nodes -keyout $keyFile -out $certFile -days 1 -subj /CN=localhost >/dev/null 2>&1"
@@ -32,7 +22,7 @@ private def generateSelfSignedCert(certFile: String, keyFile: String): Unit =
 private def deleteFile(path: String): Unit =
   val _ = Zone.acquire(zone => stdio.remove(toCString(path)(using zone)))
 
-private def runHttpsDemo(port: Int)(using Async, TcpSupport, AsyncOperations): Unit =
+private def runHttpsDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOperations): Unit =
   val pid = unistd.getpid()
   val certFile = s"/tmp/gears-https-example-$pid-cert.pem"
   val keyFile = s"/tmp/gears-https-example-$pid-key.pem"
@@ -79,6 +69,7 @@ private def runHttpsDemo(port: Int)(using Async, TcpSupport, AsyncOperations): U
   if LinktimeInfo.isLinux then
     given support: UringPerThreadSupport = UringPerThreadSupport()
     given tcp: TcpSupport = support.tcpSupport
+    given dns: DnsSupport = NativeDnsSupport
     Async.blocking(runHttpsDemo(port))
   else
     throw new UnsupportedOperationException("no TCP backend wired up for this platform")

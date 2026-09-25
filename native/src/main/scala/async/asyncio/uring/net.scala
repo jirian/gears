@@ -100,17 +100,6 @@ private[uring] def parseSockAddr(addr: Ptr[Byte]): InetSocketAddress =
       i += 1
     new InetSocketAddress(InetAddress.getByAddress(bytes), port)
 
-/** TODO: Good idea?
-  * The kernel-assigned local address of `fd` - the actual bound address and
-  * (for an outbound connect) the ephemeral port the kernel picked.
-  *
-  * getsockname is a plain, synchronous POSIX call - not an io_uring op, no
-  * suspension anywhere in here - so this only needs to live for one call on
-  * this thread's own stack. Zone-scoped allocation is the right tool, not
-  * malloc (nothing to explicitly free) and not a GC array (no need to
-  * involve the collector for memory that's dead before this function
-  * returns).
-  */
 private[uring] def getLocalAddress(fd: Int): SocketAddress =
   Zone.acquire: zone =>
     val addrLen = alloc[posixSocket.socklen_t]()(using zone)

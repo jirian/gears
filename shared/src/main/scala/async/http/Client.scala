@@ -1,7 +1,7 @@
 package gears.async.http
 
 import gears.async.Async
-import gears.async.net.{TcpStream, TcpSupport, TlsContext, TlsSupport}
+import gears.async.net.{DnsSupport, TcpStream, TcpSupport, TlsContext, TlsSupport}
 
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
@@ -65,7 +65,7 @@ object ClientRequest:
 final class Transport(
     tls: Option[TlsSupport] = None,
     tlsContext: TlsSupport => TlsContext = _.clientContext()
-)(using tcp: TcpSupport):
+)(using tcp: TcpSupport, dns: DnsSupport):
   private val idle = new ConcurrentHashMap[(String, String, Int), ConcurrentLinkedQueue[TcpStream]]()
   private lazy val tlsCtx: TlsContext = tlsContext(tls.get)
 
@@ -76,7 +76,14 @@ final class Transport(
     idle.computeIfAbsent((scheme, host, port), _ => new ConcurrentLinkedQueue()).offer(stream)
 
   private def dial(scheme: String, host: String, port: Int)(using Async): TcpStream =
-    val raw = tcp.connect(new InetSocketAddress(host, port), Seq.empty) match
+    // Resolved asynchronously (off a background thread, never this fiber's
+    // own shard thread) rather than via `new InetSocketAddress(host, port)`,
+    // whose constructor resolves `host` *synchronously* - see DnsSupport's
+    // own doc for why that matters. Only the first address is tried; real
+    // multi-address fallback (Happy Eyeballs-style) is out of scope here.
+    val addrs = dns.resolve(host)
+    if addrs.isEmpty then throw new java.net.UnknownHostException(host)
+    val raw = tcp.connect(new InetSocketAddress(addrs(0), port), Seq.empty) match
       case Right(stream) => stream
       case Left(e)         => throw new java.io.IOException(s"connect to $host:$port failed: $e")
     if scheme != "https" then raw
@@ -167,9 +174,9 @@ final class Client(transport: Transport, maxRedirects: Int = 10):
     else response
 
 object Client:
-  def apply()(using TcpSupport): Client = new Client(Transport())
+  def apply()(using TcpSupport, DnsSupport): Client = new Client(Transport())
   def apply(transport: Transport): Client = new Client(transport)
-  def apply(tls: TlsSupport)(using TcpSupport): Client = new Client(Transport(tls = Some(tls)))
+  def apply(tls: TlsSupport)(using TcpSupport, DnsSupport): Client = new Client(Transport(tls = Some(tls)))
 
   private[http] def redirectMethod(status: Int, method: HttpMethod): HttpMethod =
     if (status == 301 || status == 302 || status == 303) && method != HttpMethod.GET && method != HttpMethod.HEAD then

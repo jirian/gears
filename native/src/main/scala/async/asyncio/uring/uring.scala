@@ -41,8 +41,10 @@ private[uring] object uring {
   final val IORING_OP_ACCEPT = 13
   final val IORING_OP_ASYNC_CANCEL = 14
   final val IORING_OP_CONNECT = 16
+  final val IORING_OP_OPENAT = 18
   final val IORING_OP_CLOSE = 19
   final val IORING_OP_READ = 22
+  final val IORING_OP_WRITE = 23
   final val IORING_OP_SEND = 26
   final val IORING_OP_RECV = 27
   final val IORING_OP_SHUTDOWN = 34
@@ -250,6 +252,29 @@ private[uring] object uringOps {
       offset: __u64
   ): Unit = io_uring_prep_rw(IORING_OP_READ, sqe, fd, buf, nbytes, offset)
 
+  def io_uring_prep_write(
+      sqe: Ptr[io_uring_sqe],
+      fd: CInt,
+      buf: Ptr[Byte],
+      nbytes: CUnsignedInt,
+      offset: __u64
+  ): Unit = io_uring_prep_rw(IORING_OP_WRITE, sqe, fd, buf, nbytes, offset)
+
+  /** `dfd`/`path`/`flags`/`mode` match `openat(2)` exactly - pass
+    * `AT_FDCWD` for `dfd` to resolve a relative `path` against the
+    * process's current working directory the way plain `open(2)` would.
+    */
+  def io_uring_prep_openat(
+      sqe: Ptr[io_uring_sqe],
+      dfd: CInt,
+      path: CString,
+      flags: CInt,
+      mode: CUnsignedInt
+  ): Unit = {
+    io_uring_prep_rw(IORING_OP_OPENAT, sqe, dfd, path.asInstanceOf[Ptr[Byte]], mode, 0.toULong)
+    sqe.open_flags = flags.toUInt
+  }
+
   def io_uring_prep_connect(
       sqe: Ptr[io_uring_sqe],
       fd: CInt,
@@ -347,6 +372,8 @@ private[uring] object uringOps {
     inline def timeout_flags_=(timeout_flags: __u32): Unit = !io_uring_sqe.at8 = timeout_flags
     inline def timeout_remove_flags: __u32 = io_uring_sqe._8
     inline def timeout_remove_flags_=(timeout_remove_flags: __u32): Unit = !io_uring_sqe.at8 = timeout_remove_flags
+    inline def open_flags: __u32 = io_uring_sqe._8
+    inline def open_flags_=(open_flags: __u32): Unit = !io_uring_sqe.at8 = open_flags
 
     inline def user_data: __u64 = io_uring_sqe._9
     inline def user_data_=(user_data: __u64): Unit = !io_uring_sqe.at9 = user_data

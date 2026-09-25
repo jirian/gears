@@ -1,20 +1,14 @@
 package gears.async.asyncio.examples
 
 import gears.async._
-import gears.async.net.TcpSupport
+import gears.async.net.{DnsSupport, TcpSupport}
 import gears.async.http._
-import gears.async.asyncio.uring.UringPerThreadSupport
+import gears.async.asyncio.uring.{NativeDnsSupport, UringPerThreadSupport}
 
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import scala.scalanative.meta.LinktimeInfo
 
-/** A runnable demonstration of [[Client]] - Go's `net/http` client, this
-  * repo's version - exercised against this repo's own [[HttpServer]]
-  * (there's no guaranteed external network access to reach a real site
-  * from, so the example is self-contained: it starts a small server on
-  * `localhost` first, then drives every client feature against it).
-  */
 private def clientDemoRouter(): Router =
   Router()
     .get("/")(_ => HttpResponse.text("Hello from gears!\n"))
@@ -23,7 +17,7 @@ private def clientDemoRouter(): Router =
     .get("/set-cookie")(_ => HttpResponse.text("cookie set\n").withHeader("Set-Cookie", "session=abc123; Path=/; HttpOnly"))
     .get("/items/{id}")(req => HttpResponse.text(s"item ${req.pathValue("id").getOrElse("?")}\n"))
 
-private def runClientDemo(port: Int)(using Async, TcpSupport, AsyncOperations): Unit =
+private def runClientDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOperations): Unit =
   val listener = TcpSupport.listen(InetSocketAddress("127.0.0.1", port)) match
     case Right(l) => l
     case Left(e)  => throw new RuntimeException(s"listen failed: $e")
@@ -41,8 +35,6 @@ private def runClientDemo(port: Int)(using Async, TcpSupport, AsyncOperations): 
     val postResp = client.post(s"$base/echo", "round trip!".getBytes(StandardCharsets.UTF_8), "text/plain")
     println(s"POST /echo -> ${postResp.status.code}: ${new String(postResp.body, StandardCharsets.UTF_8).trim}")
 
-    // Client.send follows the 302 automatically, ending up with the
-    // *final* response - the body from "/", not the redirect page itself.
     val redirectResp = client.get(s"$base/redirect")
     println(s"GET /redirect -> ${redirectResp.status.code} (after following redirect): ${new String(redirectResp.body, StandardCharsets.UTF_8).trim}")
 
@@ -66,6 +58,7 @@ private def runClientDemo(port: Int)(using Async, TcpSupport, AsyncOperations): 
   if LinktimeInfo.isLinux then
     given support: UringPerThreadSupport = UringPerThreadSupport()
     given tcp: TcpSupport = support.tcpSupport
+    given dns: DnsSupport = NativeDnsSupport
     Async.blocking(runClientDemo(port))
   else
     throw new UnsupportedOperationException("no TCP backend wired up for this platform")

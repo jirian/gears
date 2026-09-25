@@ -72,6 +72,7 @@ class UringPerThreadScheduler(
 
   def tcpSupport = new UringTcpSupport(this) {}
   def udpSupport = new UringUdpSupport(this) {}
+  def fileSupport = new UringFileSupport(this) {}
 
 class UringPerThreadSupport(parallelism: Int = Runtime.getRuntime().availableProcessors())
     extends UringPerThreadScheduler(parallelism)

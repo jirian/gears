@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-package gears.async.asyncio.uring
+package asyncio.uring
 
 import scala.scalanative.libc.stddef._
 import scala.scalanative.posix.signal.sigset_t
@@ -34,6 +34,7 @@ private[uring] object uring {
   final val IORING_SETUP_DEFER_TASKRUN = 1 << 13
 
   final val IORING_OP_NOP = 0
+  final val IORING_OP_POLL_ADD = 6
   final val IORING_OP_SENDMSG = 9
   final val IORING_OP_RECVMSG = 10
   final val IORING_OP_TIMEOUT = 11
@@ -241,6 +242,12 @@ private[uring] object uringOps {
     sqe.timeout_remove_flags = flags
   }
 
+  /** `mask` is a `poll(2)` event mask (`POLLIN`, `POLLOUT`, ...); the CQE's `res` is the events that fired. */
+  def io_uring_prep_poll_add(sqe: Ptr[io_uring_sqe], fd: CInt, mask: CUnsignedInt): Unit = {
+    io_uring_prep_rw(IORING_OP_POLL_ADD, sqe, fd, null, 0.toUInt, 0.toULong)
+    sqe.poll32_events = mask // little-endian layout, as liburing does on x86_64/aarch64
+  }
+
   def io_uring_prep_close(sqe: Ptr[io_uring_sqe], fd: CInt): Unit =
     io_uring_prep_rw(IORING_OP_CLOSE, sqe, fd, null, 0.toUInt, 0.toULong)
 
@@ -372,6 +379,8 @@ private[uring] object uringOps {
     inline def timeout_flags_=(timeout_flags: __u32): Unit = !io_uring_sqe.at8 = timeout_flags
     inline def timeout_remove_flags: __u32 = io_uring_sqe._8
     inline def timeout_remove_flags_=(timeout_remove_flags: __u32): Unit = !io_uring_sqe.at8 = timeout_remove_flags
+    inline def poll32_events: __u32 = io_uring_sqe._8
+    inline def poll32_events_=(poll32_events: __u32): Unit = !io_uring_sqe.at8 = poll32_events
     inline def open_flags: __u32 = io_uring_sqe._8
     inline def open_flags_=(open_flags: __u32): Unit = !io_uring_sqe.at8 = open_flags
 

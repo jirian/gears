@@ -13,19 +13,13 @@ import scala.scalanative.meta.LinktimeInfo
 import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe._
 
-private def generateSelfSignedCert(certFile: String, keyFile: String): Unit =
-  val cmd =
-    s"openssl req -x509 -newkey rsa:2048 -nodes -keyout $keyFile -out $certFile -days 1 -subj /CN=localhost >/dev/null 2>&1"
-  val status = Zone.acquire(zone => stdlib.system(toCString(cmd)(using zone)))
-  if status != 0 then throw new RuntimeException(s"failed to generate a self-signed certificate (is 'openssl' on PATH?), exit=$status")
-
-private def demoRouter(): Router =
+private def tlsDemoRouter(): Router =
   Router()
     .get("/")(_ => HttpResponse.text("Hello over TLS!\n"))
     .get("/health")(_ => HttpResponse.text("ok\n"))
     .post("/echo")(req => HttpResponse.text(new String(req.body, StandardCharsets.UTF_8)))
 
-private def runServer(port: Int)(using Async, TcpSupport, AsyncOperations): Unit =
+private def runTlsServer(port: Int)(using Async, TcpSupport, AsyncOperations): Unit =
   val pid = unistd.getpid()
   val certFile = s"/tmp/gears-https-server-$pid-cert.pem"
   val keyFile = s"/tmp/gears-https-server-$pid-key.pem"
@@ -36,7 +30,7 @@ private def runServer(port: Int)(using Async, TcpSupport, AsyncOperations): Unit
     case Left(e)  => throw new RuntimeException(s"listen failed: $e")
 
   val serverConfig = Server(
-    handler = demoRouter(),
+    handler = tlsDemoRouter(),
     tls = Some((NativeTlsSupport, NativeTlsSupport.serverContext(certFile, keyFile)))
   )
 
@@ -64,6 +58,6 @@ private def runServer(port: Int)(using Async, TcpSupport, AsyncOperations): Unit
   if LinktimeInfo.isLinux then
     given support: UringPerThreadSupport = UringPerThreadSupport()
     given tcp: TcpSupport = support.tcpSupport
-    Async.blocking(runServer(port))
+    Async.blocking(runTlsServer(port))
   else
     throw new UnsupportedOperationException("no TCP backend wired up for this platform")

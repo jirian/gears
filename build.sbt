@@ -73,3 +73,23 @@ lazy val root =
         }
       )
     )
+    // The uring-backed gears scheduler is built on the uring `asyncio.Reactor`.
+    .nativeConfigure(_.dependsOn(nativeAsyncioLoop))
+
+// The platform-independent reactor model: ops, completions, the Reactor trait, and the blocker pool.
+lazy val asyncio =
+  crossProject(JVMPlatform, NativePlatform)
+    .crossType(CrossType.Pure)
+    .in(file("asyncio"))
+    .settings(
+      publish / skip := true,
+      libraryDependencies += "org.scalameta" %% "munit" % "1.3.6" % Test,
+      testFrameworks += MUnitFramework
+    )
+
+// ported from https://github.com/bishabosha/scala-native-async-io/commit/6e8320d36c71f75c9daf85065f5c89729f0825c0
+lazy val nativeAsyncioLoop =
+  (project in file("asyncio-native/loop"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(publish / skip := true)
+    .dependsOn(asyncio.native)

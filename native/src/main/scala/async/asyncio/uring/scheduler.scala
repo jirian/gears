@@ -1,14 +1,11 @@
 package gears.async.asyncio.uring
 
+import asyncio.Completion
+import asyncio.uring.{UringOp, UringReactor}
 import gears.async._
-import uring._
-import uringOps._
 import gears.async.native
 
 import scala.concurrent.duration._
-import scala.scalanative.runtime.ByteArray
-import scala.scalanative.unsafe._
-import scala.scalanative.unsigned._
 
 class UringPerThreadScheduler(
     parallelism: Int = Runtime.getRuntime().availableProcessors(),
@@ -39,36 +36,37 @@ class UringPerThreadScheduler(
         globalQueue.offer(body)
         pickShard().wake()
 
-  private[uring] def submit(prep: Ptr[io_uring_sqe] => Unit, keepAlive: AnyRef)(onComplete: Int => Unit): (UringShard, __u64) =
-    val id = UringShard.nextId()
-    val shard = UringShard.current() match
-      case Some(s) =>
-        s.submitFast(id, prep, onComplete, keepAlive)
-        s
-      case None =>
-        val s = pickShard()
-        s.submitRemote(id, prep, onComplete, keepAlive)
-        s
-    (shard, id.toULong)
+  /** The shard to submit to from here: the current one on a shard thread, otherwise the next in turn. */
+  private[uring] def shardForSubmit(): UringShard = UringShard.current().getOrElse(pickShard())
 
-  private[uring] def submitOn(shard: UringShard)(prep: Ptr[io_uring_sqe] => Unit, keepAlive: AnyRef)(onComplete: Int => Unit): Unit =
-    val id = UringShard.nextId()
-    if UringShard.current().contains(shard) then shard.submitFast(id, prep, onComplete, keepAlive)
-    else shard.submitRemote(id, prep, onComplete, keepAlive)
+  /** Submits `op` to a shard's reactor and suspends until it finishes, rethrowing its failure. Cancelling the caller
+    * cancels the op; the caller then sees it as cancelled, even if the kernel was already done with it.
+    */
+  private[uring] def await(build: UringReactor => UringOp[?])(using Async): Unit =
+    val shard = shardForSubmit()
+    val reactor = shard.reactor
+    val op = build(reactor).asInstanceOf[reactor.Op]
+    Future
+      .withResolver[Unit]: resolver =>
+        resolver.onCancel(() => shard.onLoop(reactor.cancel(op)))
+        shard.onLoop:
+          try
+            reactor.submit(
+              op,
+              new Completion[reactor.Op]:
+                def onComplete(op: reactor.Op): Unit = resolver.resolve(())
+                override def onFailure(op: reactor.Op, failure: Throwable): Unit = resolver.reject(failure)
+                override def onCancel(op: reactor.Op): Unit = resolver.rejectAsCancelled()
+            )
+          catch case t: Throwable => resolver.reject(t)
+      .link()
+      .await
 
   override def schedule(delay: FiniteDuration, body: Runnable): Cancellable =
-    val tsArr = new Array[Byte](sizeof[__kernel_timespec].toInt)
-    val ts = tsArr.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[__kernel_timespec]]
-    ts.tv_sec = delay.toSeconds
-    ts.tv_nsec = (delay - delay.toSeconds.seconds).toNanos
-
-    val (shard, userData) = submit(sqe => io_uring_prep_timeout(sqe, ts, 0.toULong, 0.toUInt), tsArr) { res =>
-      if res == -62 /* -ETIME */ then execute(body)
-    }
-
-    () =>
-      try submitOn(shard)(sqe => io_uring_prep_timeout_remove(sqe, userData, 0.toUInt), null)(_ => ())
-      catch case _: IOException => ()
+    val shard = shardForSubmit()
+    val timer = shard.reactor.ops.timer(delay)
+    shard.onLoop(shard.reactor.submit(timer, _ => execute(body)))
+    () => shard.onLoop(shard.reactor.cancel(timer))
 
   def tcpSupport = new UringTcpSupport(this) {}
   def udpSupport = new UringUdpSupport(this) {}

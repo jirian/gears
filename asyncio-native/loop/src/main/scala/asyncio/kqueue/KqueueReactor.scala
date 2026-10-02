@@ -6,6 +6,8 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import asyncio.Completion
+import asyncio.BlockingPool
+import asyncio.HostResolver
 import asyncio.Handles
 import asyncio.Interest
 import asyncio.Ops
@@ -15,37 +17,52 @@ import asyncio.unsafe.KqueueLoop
 import asyncio.unsafe.KqueueLoop.Event
 import asyncio.unsafe.PosixErr.cError
 import asyncio.unsafe.PosixSockets
+import asyncio.unsafe.PosixResolver
 
 /** The kqueue implementation of `Reactor`, for ops built by `KqueueOps`. A command waits for readiness with a one-shot
   * filter and is performed on the loop thread; a timer is a kqueue timer; resolved promises wake the loop through a
   * pipe. Each submission is its own kevent call, and each poll returns up to `maxEvents` events.
   */
-final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor {
+final class KqueueReactor private (
+    val kq: Int,
+    maxEvents: Int,
+    blockerPool: BlockingPool,
+    resolver: HostResolver
+) extends Reactor {
 
   /** Every kqueue reactor runs the same kinds of op, so kqueue-specific code may build them directly. Code that only
     * sees the `Reactor` interface still cannot mix ops between reactors.
     */
-  type Op = KqueueOp
+  type Op = KqueueOp[this.type]
 
   /** Kqueue watches POSIX file descriptors. */
   type Handle = Int
 
   type BoxedHandle = Integer
 
-  def ops: Ops[Op, Handle, BoxedHandle] = KqueueOps
+  private val opsBuilder = new KqueueOps[this.type](resolver)
+
+  def ops: KqueueOps[this.type] = opsBuilder
 
   def handles: Handles[Handle] = KqueueHandles
 
   def unbox(boxed: BoxedHandle): Handle = boxed.intValue()
 
   private final class Pending[C <: Op](val op: C, val completion: Completion[C]) {
+    private var isSettled = false
     def complete(): Unit = completion.onComplete(op)
     def fail(failure: Throwable): Unit = completion.onFailure(op, failure)
     def cancelled(): Unit = completion.onCancel(op)
+    def settled(): Unit = synchronized {
+      if !isSettled then {
+        isSettled = true
+        completion.onSettled(op)
+      }
+    }
   }
 
   // Promises resolve on other threads; they queue here and a byte on the pipe interrupts a blocked poll.
-  private val resolvedQueue = new java.util.concurrent.ConcurrentLinkedQueue[KqueuePromise]()
+  private val resolvedQueue = new java.util.concurrent.ConcurrentLinkedQueue[KqueuePromise[?]]()
   private val (wakeRead, wakeWrite) = {
     val ends = stackalloc[CInt](2)
     if unistd.pipe(ends) < 0 then throw new IOException(s"Failed to create wake pipe: ${cError()}")
@@ -68,21 +85,22 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
   private var running = false
 
   // Promises submitted here whose completion has not run, so `close` can cancel them. Loop thread only.
-  private val pendingPromises = scala.collection.mutable.HashSet.empty[KqueuePromise]
+  private val pendingPromises = scala.collection.mutable.HashSet.empty[KqueuePromise[?]]
 
   // Guards the wake pipe against a blocker finishing after `close`, when its descriptor number may already be reused.
   private object wakeLock {}
   private var closed = false
 
   def submit[C <: Op](op: C, completion: Completion[C]): Unit = {
+    if closed then throw new IllegalStateException("The reactor is closed")
     op match {
       case _: Repeatable => ()
-      case one: KqueueOp =>
+      case one: KqueueOp[?] =>
         if one.submitted then throw new IllegalStateException(s"$op is not Repeatable and was already submitted")
     }
     val pending = new Pending(op, completion)
     op match {
-      case command: Command =>
+      case command: Command[?] =>
         val slot = slotFor(command.fd)
         command.interest match {
           case Interest.Read =>
@@ -93,7 +111,7 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
             slot.write = pending
         }
         arm(command.fd, read = command.interest == Interest.Read)
-      case timer: KqueueTimer =>
+      case timer: KqueueTimer[?] =>
         require(timer.id < 0 || !timers.contains(timer.id), "This timer is already pending")
         if timer.id < 0 then
           timer.assign(nextTimerId)
@@ -102,12 +120,19 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
         KqueueLoop.createAndRegisterEvents(kq, 1) { events =>
           KqueueLoop.addTimerOneShot(events(0), timer.id.toUSize, timer.milliseconds)
         }
-      case promise: KqueuePromise =>
+      case promise: KqueuePromise[?] =>
         promise.reactor = this
         promise.pending = pending
         pendingPromises += promise
         promise match {
-          case blocking: KqueueBlocking => Blockers.run(blocking)
+          case blocking: KqueueBlocking[?] =>
+            try Blockers.run(blocking, blockerPool)
+            catch {
+              case t: Throwable =>
+                promise.pending = null
+                pendingPromises -= promise
+                throw t
+            }
           case _                        => () // Completed by whoever holds it.
         }
     }
@@ -115,7 +140,7 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
   }
 
   /** Called from any thread when a promise has its result: queue it and wake the loop. */
-  private[kqueue] def resolved(promise: KqueuePromise): Unit = wakeLock.synchronized {
+  private[kqueue] def resolved(promise: KqueuePromise[?]): Unit = wakeLock.synchronized {
     if closed then return // Its completion was dropped by `close`.
     resolvedQueue.add(promise)
     val signal = stackalloc[Byte]()
@@ -134,6 +159,7 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
       if pending != null then {
         val p = pending.asInstanceOf[Pending[?]]
         val failure = promise.failure
+        p.settled()
         if failure != null then p.fail(failure.nn) else p.complete()
       }
       promise = resolvedQueue.poll()
@@ -172,7 +198,16 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
       }
       KqueueLoop.close(kq) // Its filters and timers go with it.
       // Only now tell the completions, so one that throws cannot leak the reactor's resources.
-      dropped.foreach(_.cancelled())
+      var callbackFailure: Throwable | Null = null
+      dropped.foreach { pending =>
+        try cancelPending(pending)
+        catch {
+          case t: Throwable =>
+            if callbackFailure == null then callbackFailure = t
+            else if callbackFailure.nn ne t then callbackFailure.nn.addSuppressed(t)
+        }
+      }
+      if callbackFailure != null then throw callbackFailure.nn
     }
   }
 
@@ -188,7 +223,7 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
     */
   def cancel(op: Op): Boolean = {
     val pending: Pending[?] | Null = op match {
-      case command: Command =>
+      case command: Command[?] =>
         val slot = if command.fd >= 0 && command.fd < slots.length then slots(command.fd) else null
         if slot == null then null
         else {
@@ -201,7 +236,7 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
             p
           }
         }
-      case timer: KqueueTimer =>
+      case timer: KqueueTimer[?] =>
         val p = if timer.id < 0 then None else timers.remove(timer.id)
         p.foreach { _ =>
           KqueueLoop.createAndRegisterEvents(kq, 1) { events =>
@@ -209,11 +244,11 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
           }
         }
         p.orNull
-      case promise: KqueuePromise => detach(promise)
+      case promise: KqueuePromise[?] => detach(promise)
     }
     if pending == null then false
     else {
-      pending.nn.cancelled()
+      cancelPending(pending.nn)
       true
     }
   }
@@ -225,16 +260,28 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
   private def deleteFilter(fd: Int, read: Boolean): Unit = KqueueLoop.deleteFileIfOpen(kq, fd, read)
 
   /** Detaches a pending promise so its outcome is never delivered, skipping or interrupting a blocking task. */
-  private def detach(promise: KqueuePromise): Pending[?] | Null = {
+  private def detach(promise: KqueuePromise[?]): Pending[?] | Null = {
     val pending = promise.pending
     promise.pending = null
     pendingPromises -= promise
     if pending != null then
       promise match {
-        case blocking: KqueueBlocking => blocking.interrupt() // skip it, or interrupt its worker
+        case blocking: KqueueBlocking[?] =>
+          val p = pending.asInstanceOf[Pending[?]]
+          blocking.whenSettled(() => p.settled())
+          blocking.interrupt() // skip it, or interrupt its worker
         case _                        => ()
       }
     pending.asInstanceOf[Pending[?] | Null]
+  }
+
+  private def cancelPending(pending: Pending[?]): Unit = {
+    try pending.cancelled()
+    finally
+      pending.op match {
+      case _: KqueueBlocking[?] => () // Its worker calls onSettled when it can no longer write the Slot.
+        case _                 => pending.settled()
+      }
   }
 
   def stop(): Unit = running = false
@@ -262,7 +309,11 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
   private def dispatch(event: Event): Unit = {
     val ident = fileIdent(event)
     if ident == wakeRead && isReadEvent(event) then drainWakePipe() // promises are delivered by the loop itself
-    else if KqueueLoop.isTimerEvent(event) then timers.remove(ident).foreach(_.complete())
+    else if KqueueLoop.isTimerEvent(event) then
+      timers.remove(ident).foreach { pending =>
+        pending.settled()
+        pending.complete()
+      }
     else {
       val slot = if ident < slots.length then slots(ident) else null
       if slot != null then {
@@ -272,7 +323,7 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
           if write then slot.write = null else slot.read = null
           val p = pending.nn
           p.op match {
-            case command: Command =>
+            case command: Command[?] =>
               // A throwing command fails its own op; an exception thrown by the completion itself still escapes.
               var failure: Throwable | Null = null
               val done =
@@ -282,8 +333,13 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
                     failure = t
                     true
                 }
-              if failure != null then p.fail(failure.nn)
-              else if done then p.complete()
+              if failure != null then {
+                p.settled()
+                p.fail(failure.nn)
+              } else if done then {
+                p.settled()
+                p.complete()
+              }
               else {
                 // Not ready after all: wait again, without the completion ever seeing it.
                 if write then slot.write = p else slot.read = p
@@ -298,6 +354,7 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
 
   /** Error events throw. */
   def run(): Unit =
+    if closed then throw new IllegalStateException("The reactor is closed")
     KqueueLoop.pollQueue(maxEvents) { events =>
       running = true
       while running do {
@@ -319,11 +376,19 @@ final class KqueueReactor private (val kq: Int, maxEvents: Int) extends Reactor 
 object KqueueReactor {
 
   /** Opens a reactor on a new kqueue; each poll returns up to `maxEvents` events. Close it when done. */
-  def open(maxEvents: Int = 255): KqueueReactor = new KqueueReactor(KqueueLoop.open(), maxEvents)
+  def open(
+      maxEvents: Int = 255,
+      blockerPool: BlockingPool = BlockingPool.global,
+      resolver: HostResolver = PosixResolver
+  ): KqueueReactor = new KqueueReactor(KqueueLoop.open(), maxEvents, blockerPool, resolver)
 
   /** Opens a reactor for `body` and closes it afterwards. */
-  def scoped(maxEvents: Int = 255)(body: KqueueReactor => Unit): Unit = {
-    val reactor = open(maxEvents)
+  def scoped(
+      maxEvents: Int = 255,
+      blockerPool: BlockingPool = BlockingPool.global,
+      resolver: HostResolver = PosixResolver
+  )(body: KqueueReactor => Unit): Unit = {
+    val reactor = open(maxEvents, blockerPool, resolver)
     try body(reactor)
     finally reactor.close()
   }

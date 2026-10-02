@@ -34,6 +34,8 @@ private[uring] object uring {
   final val IORING_SETUP_DEFER_TASKRUN = 1 << 13
 
   final val IORING_OP_NOP = 0
+  final val IORING_OP_READV = 1
+  final val IORING_OP_WRITEV = 2
   final val IORING_OP_POLL_ADD = 6
   final val IORING_OP_SENDMSG = 9
   final val IORING_OP_RECVMSG = 10
@@ -266,6 +268,22 @@ private[uring] object uringOps {
       nbytes: CUnsignedInt,
       offset: __u64
   ): Unit = io_uring_prep_rw(IORING_OP_WRITE, sqe, fd, buf, nbytes, offset)
+
+  def io_uring_prep_readv(
+      sqe: Ptr[io_uring_sqe],
+      fd: CInt,
+      iovecs: Ptr[iovec],
+      count: CUnsignedInt,
+      offset: __u64
+  ): Unit = io_uring_prep_rw(IORING_OP_READV, sqe, fd, iovecs.asInstanceOf[Ptr[Byte]], count, offset)
+
+  def io_uring_prep_writev(
+      sqe: Ptr[io_uring_sqe],
+      fd: CInt,
+      iovecs: Ptr[iovec],
+      count: CUnsignedInt,
+      offset: __u64
+  ): Unit = io_uring_prep_rw(IORING_OP_WRITEV, sqe, fd, iovecs.asInstanceOf[Ptr[Byte]], count, offset)
 
   /** `dfd`/`path`/`flags`/`mode` match `openat(2)` exactly - pass
     * `AT_FDCWD` for `dfd` to resolve a relative `path` against the

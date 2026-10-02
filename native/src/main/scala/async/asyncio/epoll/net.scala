@@ -92,6 +92,9 @@ class EpollTcpStream private[epoll] (
   override def localAddress: SocketAddress = socket.getLocalSocketAddress()
   override def remoteAddress: SocketAddress = socket.getRemoteSocketAddress()
 
+  override def shutdownOutput()(using Async): Unit = socket.shutdownOutput()
+  override def shutdownInput()(using Async): Unit = socket.shutdownInput()
+
 class EpollTcpListener private[epoll] (
     socket: java.net.ServerSocket,
     poller: EpollPoller

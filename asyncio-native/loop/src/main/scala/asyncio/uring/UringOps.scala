@@ -7,12 +7,13 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import asyncio.Address
+import asyncio.BlockingPool
+import asyncio.HostResolver
 import asyncio.Interest
 import asyncio.Ops
 import asyncio.Repeatable
 import asyncio.ResolvedAddress
 import asyncio.Slot
-import asyncio.unsafe.PosixResolver
 import uring.*
 import uringOps.*
 
@@ -52,9 +53,11 @@ abstract class RingOp[Owner] extends UringOp[Owner] {
 }
 
 /** Builds the ops `UringReactor` understands: the `Ops` interface, plus a few uring-only ones. */
-final class UringOps[Owner] extends Ops[UringOp[Owner], Int, Integer] {
+final class UringOps[Owner](resolver: HostResolver) extends Ops[UringOp[Owner], Int, Integer] {
   def read(fd: Int, buf: ByteBuffer): Read[Owner] = new Read(fd, buf)
+  def readv(fd: Int, bufs: Array[ByteBuffer]): ReadVector[Owner] = new ReadVector(fd, bufs)
   def write(fd: Int, buf: ByteBuffer): Write[Owner] = new Write(fd, buf, plain = false)
+  def writev(fd: Int, bufs: Array[ByteBuffer]): WriteVector[Owner] = new WriteVector(fd, bufs)
   def accept(fd: Int, into: Slot[Integer]): Accept[Owner] = new Accept(fd, into)
   def connect(fd: Int): UringOp[Owner] = new Connect(fd)
   def receive(fd: Int, buf: ByteBuffer, from: Slot[Address]): Receive[Owner] = new Receive(fd, buf, from)
@@ -67,7 +70,7 @@ final class UringOps[Owner] extends Ops[UringOp[Owner], Int, Integer] {
     new BlockingTask(() => into.set(body()))
   def promise(): UringSignal[Owner] = new UringSignal
   def promise[A <: AnyRef](into: Slot[A]): UringValuePromise[Owner, A] = new UringValuePromise(into)
-  def resolve(host: String, into: Slot[List[ResolvedAddress]]): Resolve[Owner] = new Resolve(host, into)
+  def resolve(host: String, into: Slot[List[ResolvedAddress]]): Resolve[Owner] = new Resolve(host, into, resolver)
 
   // Uring-only ops, beyond the `Ops` interface.
 
@@ -140,6 +143,8 @@ abstract class UringBlocking[Owner] extends UringPromise[Owner] {
   // Guarded by `this`: the worker running `block`, and whether the task was cancelled.
   private var runner: Thread | Null = null
   private var cancelled = false
+  private var finished = false
+  private var settledCallback: (() => Unit) | Null = null
 
   /** Called by the worker before `block`; false if the task was cancelled before it started. */
   private[uring] def begin(): Boolean = synchronized {
@@ -158,6 +163,28 @@ abstract class UringBlocking[Owner] extends UringPromise[Owner] {
     Thread.interrupted()
   }
 
+  /** Runs after the worker has stopped touching this op's result slot. */
+  private[uring] def whenSettled(callback: () => Unit): Unit = {
+    val runNow = synchronized {
+      if finished then true
+      else {
+        settledCallback = callback
+        false
+      }
+    }
+    if runNow then callback()
+  }
+
+  private[uring] def finish(): Unit = {
+    val callback = synchronized {
+      finished = true
+      val current = settledCallback
+      settledCallback = null
+      current
+    }
+    if callback != null then callback.nn()
+  }
+
   /** Marks the task cancelled and interrupts its worker if it is running. */
   private[uring] def interrupt(): Unit = synchronized {
     cancelled = true
@@ -174,8 +201,9 @@ final class BlockingTask[Owner](body: () => Unit) extends UringBlocking[Owner] {
   * the blocker pool. Completes after writing the addresses into `into`, or fails with an `IOException` carrying the
   * resolver's error.
   */
-final class Resolve[Owner](val host: String, into: Slot[List[ResolvedAddress]]) extends UringBlocking[Owner] {
-  def block(): Unit = PosixResolver.lookup(host) match {
+final class Resolve[Owner](val host: String, into: Slot[List[ResolvedAddress]], resolver: HostResolver)
+    extends UringBlocking[Owner] {
+  def block(): Unit = resolver.resolve(host) match {
     case Right(addresses) => into.set(addresses)
     case Left(error)      => throw new IOException(s"Failed to resolve $host: $error")
   }
@@ -183,34 +211,19 @@ final class Resolve[Owner](val host: String, into: Slot[List[ResolvedAddress]]) 
 
 /** The blocker pool: a few daemon threads that run blocking tasks off the reactor thread. */
 object Blockers {
-  private val queue = new java.util.concurrent.LinkedBlockingQueue[Runnable]()
-  private lazy val threads = (1 to 4).map { i =>
-    val thread = new Thread(
-      () =>
-        while true do {
-          Thread.interrupted() // Never start a task with a stale interrupt.
-          try queue.take().run()
-          catch case _: InterruptedException => () // A late interrupt must not end the worker.
-        },
-      s"uring-blocker-$i"
-    )
-    thread.setDaemon(true)
-    thread.start()
-    thread
-  }
-
   /** Runs `blocking` on the pool and completes it with the outcome, unless it is cancelled first. */
-  def run(blocking: UringBlocking[?]): Unit = {
-    threads
-    queue.put { () =>
-      if blocking.begin() then {
-        var failure: Throwable | Null = null
-        try blocking.block()
-        catch case t: Throwable => failure = t
-        finally blocking.end()
-        // A cancelled task is detached, so neither outcome reaches its completion.
-        if failure != null then blocking.fail(failure.nn) else blocking.signal()
-      }
-    }
-  }
+  def run(blocking: UringBlocking[?], pool: BlockingPool): Unit =
+    pool.execute(() => {
+      val started = blocking.begin()
+      try
+        if started then {
+          var failure: Throwable | Null = null
+          try blocking.block()
+          catch case t: Throwable => failure = t
+          finally blocking.end()
+          // A cancelled task is detached, so neither outcome reaches its completion.
+          if failure != null then blocking.fail(failure.nn) else blocking.signal()
+        }
+      finally blocking.finish()
+    })
 }

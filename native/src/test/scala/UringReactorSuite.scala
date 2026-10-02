@@ -26,15 +26,17 @@ class UringReactorSuite extends munit.FunSuite:
   test("a timer completes and its completion can stop the reactor"):
     Reactor.scoped: r =>
       val started = System.nanoTime()
-      var fired = false
+      val events = ArrayBuffer.empty[String]
       r.submit(
         r.ops.timer(50),
-        _ =>
-          fired = true
-          r.stop()
+        new Completion[r.Op]:
+          def onComplete(op: r.Op): Unit =
+            events += "complete"
+            r.stop()
+          override def onSettled(op: r.Op): Unit = events += "settled"
       )
       r.run()
-      assert(fired)
+      assertEquals(events.toList, List("settled", "complete"))
       assert(System.nanoTime() - started >= 45_000_000L)
 
   test("reads and writes on a pipe, then end of stream"):
@@ -73,6 +75,64 @@ class UringReactorSuite extends munit.FunSuite:
       r.handles.close(out)
       assertEquals(text(received), "abcd")
 
+  test("vectored reads and writes preserve buffer order and positions"):
+    Reactor.scoped: r =>
+      val (in, out) = r.handles.pipe()
+      val first = bytes("ab")
+      val second = bytes("cd")
+      val left = ByteBuffer.allocate(2)
+      val right = ByteBuffer.allocate(2)
+      r.submit(r.ops.writev(out, Array(first, second)), _ => r.handles.close(out))
+      r.submit(r.ops.readv(in, Array(left, right)), _ => r.stop())
+      r.run()
+      r.handles.close(in)
+      assertEquals(text(left), "ab")
+      assertEquals(text(right), "cd")
+      assert(!first.hasRemaining)
+      assert(!second.hasRemaining)
+
+  test("a TCP write half-close sends EOF without disabling reads"):
+    Reactor.scoped: r =>
+      val address = Address.Unix(tempPath("half-close.sock"))
+      val server = r.handles.listen(address)
+      val client = r.handles.connect(address)
+      val accepted = Slot[r.BoxedHandle]()
+      val request = ByteBuffer.allocate(16)
+      val response = ByteBuffer.allocate(16)
+      var serverHandle = -1
+      var sawEof = false
+      r.submit(
+        r.ops.accept(server, accepted),
+        _ =>
+          serverHandle = r.unbox(accepted.clear())
+          val read = r.ops.read(serverHandle, request)
+          r.submit(read, _ =>
+            if request.position() == 7 then
+              r.submit(
+                read,
+                _ =>
+                  sawEof = request.position() == 7
+                  r.submit(r.ops.write(serverHandle, bytes("reply")), _ => ())
+              )
+          )
+      )
+      r.submit(
+        r.ops.connect(client),
+        _ =>
+          r.submit(
+            r.ops.write(client, bytes("request")),
+            _ =>
+              r.handles.shutdown(client, Shutdown.Write)
+              r.submit(r.ops.read(client, response), _ => r.stop())
+          )
+      )
+      r.run()
+      assert(sawEof)
+      assertEquals(text(response), "reply")
+      r.handles.close(serverHandle)
+      r.handles.close(client)
+      r.handles.close(server)
+
   test("a promise completed from another thread wakes the reactor and carries its value"):
     Reactor.scoped: r =>
       val slot = Slot[String]()
@@ -102,13 +162,16 @@ class UringReactorSuite extends munit.FunSuite:
       val completion = new Completion[r.Op]:
         def onComplete(op: r.Op): Unit = events += "complete"
         override def onCancel(op: r.Op): Unit = events += "cancel"
+        override def onSettled(op: r.Op): Unit = events += "settled"
       r.submit(read, completion)
       assert(r.cancel(read))
       assertEquals(events.toList, List("cancel"))
       assert(!r.cancel(read), "nothing is pending any more")
+      intercept[IllegalStateException](r.submit(read, _ => ())) // kernel may still be writing into its buffer
       // Let the kernel finish the cancelled submission before reusing the buffer.
       r.submit(r.ops.timer(20), _ => r.stop())
       r.run()
+      assertEquals(events.toList, List("cancel", "settled"))
       r.submit(
         read,
         _ =>
@@ -117,7 +180,7 @@ class UringReactorSuite extends munit.FunSuite:
       )
       r.submit(r.ops.write(out, bytes("x")), _ => ())
       r.run()
-      assertEquals(events.toList, List("cancel", "again"))
+      assertEquals(events.toList, List("cancel", "settled", "again"))
       assertEquals(text(received), "x")
       r.handles.close(in)
       r.handles.close(out)
@@ -219,6 +282,29 @@ class UringReactorSuite extends munit.FunSuite:
       assertEquals(sender, clientAddress)
       r.handles.close(client)
       r.handles.close(server)
+
+  test("socket options and the injected DNS resolver are used by a reactor"):
+    val pool = new BlockingPool(parallelism = 1, queueCapacity = 4, threadNamePrefix = "uring-test-blocker")
+    val resolverThread = new java.util.concurrent.atomic.AtomicReference[String]()
+    val resolver = new HostResolver:
+      def resolve(host: String): Either[String, List[ResolvedAddress]] =
+        resolverThread.set(Thread.currentThread().getName())
+        Right(List(ResolvedAddress(AddressFamily.IPv4, "127.0.0.1")))
+    val r = UringReactor.open(blockerPool = pool, resolver = resolver)
+    try
+      val server = r.handles.listen(
+        Address.IPv4("127.0.0.1", 0),
+        Seq(SocketOption.ReuseAddress(true), SocketOption.SendBufferSize(8192))
+      )
+      r.handles.close(server)
+      val resolved = Slot[List[ResolvedAddress]]()
+      r.submit(r.ops.resolve("example.test", resolved), _ => r.stop())
+      r.run()
+      assertEquals(resolved.clear(), List(ResolvedAddress(AddressFamily.IPv4, "127.0.0.1")))
+      assert(resolverThread.get().startsWith("uring-test-blocker-"))
+    finally
+      r.close()
+      pool.close()
 
   test("whenReady runs its body once the descriptor is ready, and waits again when told to"):
     Reactor.scoped: r =>

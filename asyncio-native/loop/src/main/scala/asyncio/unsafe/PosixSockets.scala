@@ -7,7 +7,9 @@ import scala.scalanative.posix.arpa.inet
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.fcntl
 import scala.scalanative.posix.netinet.in
+import scala.scalanative.posix.netinet.in.IPPROTO_TCP
 import scala.scalanative.posix.netinet.inOps.{*, given}
+import scala.scalanative.posix.netinet.tcp.TCP_NODELAY
 import scala.scalanative.posix.string
 import scala.scalanative.posix.sys.socket
 import scala.scalanative.posix.sys.socketOps.{*, given}
@@ -19,11 +21,54 @@ import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
+import asyncio.Shutdown
+import asyncio.SocketOption
 import Sockets.Flavor
 import Sockets.Transport
 import PosixErr.cError
 
 object PosixSockets {
+  def shutdown(fd: Int, direction: Shutdown): Unit = {
+    val how = direction match {
+      case Shutdown.Read  => socket.SHUT_RD
+      case Shutdown.Write => socket.SHUT_WR
+      case Shutdown.Both  => socket.SHUT_RDWR
+    }
+    if socket.shutdown(fd, how) < 0 then throw new IOException(s"Failed to shut down socket: ${cError()}")
+  }
+
+  /** Applies portable socket options before bind or connect. */
+  def setSocketOption(fd: Int, option: SocketOption): Unit = Zone.acquire { implicit z =>
+    def setInt(level: CInt, name: CInt, value: Int): Unit = {
+      val valuePtr = alloc[CInt]()
+      !valuePtr = value
+      if socket.setsockopt(fd, level, name, valuePtr.asInstanceOf[Ptr[Byte]], sizeOf[CInt].toUInt) < 0 then
+        throw new IOException(s"Failed to set socket option: ${cError()}")
+    }
+
+    option match {
+      case SocketOption.SendBufferSize(bytes) =>
+        require(bytes > 0, "Send buffer size must be positive")
+        setInt(socket.SOL_SOCKET, socket.SO_SNDBUF, bytes)
+      case SocketOption.ReceiveBufferSize(bytes) =>
+        require(bytes > 0, "Receive buffer size must be positive")
+        setInt(socket.SOL_SOCKET, socket.SO_RCVBUF, bytes)
+      case SocketOption.KeepAlive(enabled) =>
+        setInt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, if enabled then 1 else 0)
+      case SocketOption.ReuseAddress(enabled) =>
+        setInt(socket.SOL_SOCKET, socket.SO_REUSEADDR, if enabled then 1 else 0)
+      case SocketOption.NoDelay(enabled) =>
+        setInt(IPPROTO_TCP, TCP_NODELAY, if enabled then 1 else 0)
+      case SocketOption.Linger(seconds) =>
+        require(seconds >= -1, "Linger must be -1 (disabled) or non-negative seconds")
+        val value = alloc[socket.linger]()
+        value.l_onoff = if seconds < 0 then 0 else 1
+        value.l_linger = math.max(seconds, 0)
+        if socket.setsockopt(fd, socket.SOL_SOCKET, socket.SO_LINGER, value.asInstanceOf[Ptr[Byte]], sizeOf[socket.linger].toUInt) < 0 then
+          throw new IOException(s"Failed to set socket linger: ${cError()}")
+    }
+  }
+
   def open(flavor: Flavor, transport: Transport): Int = {
     val posixFlavor = flavor match {
       case Flavor.Unix => socket.AF_UNIX

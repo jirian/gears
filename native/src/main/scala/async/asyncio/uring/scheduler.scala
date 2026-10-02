@@ -1,7 +1,10 @@
 package gears.async.asyncio.uring
 
 import asyncio.Completion
+import asyncio.BlockingPool
+import asyncio.HostResolver
 import asyncio.uring.{UringOp, UringReactor}
+import asyncio.unsafe.PosixResolver
 import gears.async._
 import gears.async.native
 
@@ -9,12 +12,15 @@ import scala.concurrent.duration._
 
 class UringPerThreadScheduler(
     parallelism: Int = Runtime.getRuntime().availableProcessors(),
-    entriesPerShard: Int = 256
+    entriesPerShard: Int = 256,
+    blockerPool: BlockingPool = BlockingPool.global,
+    resolver: HostResolver = PosixResolver
 ) extends Scheduler:
 
   private val globalQueue = new java.util.concurrent.ConcurrentLinkedQueue[Runnable]()
 
-  private val shards: Array[UringShard] = Array.fill(parallelism)(new UringShard(entriesPerShard, globalQueue))
+  private val shards: Array[UringShard] =
+    Array.fill(parallelism)(new UringShard(entriesPerShard, globalQueue, blockerPool, resolver))
   shards.foreach(_.siblings = shards)
   private val threads: Array[UringShardThread] = shards.map { shard =>
     val t = new UringShardThread(shard)
@@ -72,8 +78,12 @@ class UringPerThreadScheduler(
   def udpSupport = new UringUdpSupport(this) {}
   def fileSupport = new UringFileSupport(this) {}
 
-class UringPerThreadSupport(parallelism: Int = Runtime.getRuntime().availableProcessors())
-    extends UringPerThreadScheduler(parallelism)
+class UringPerThreadSupport(
+    parallelism: Int = Runtime.getRuntime().availableProcessors(),
+    entriesPerShard: Int = 256,
+    blockerPool: BlockingPool = BlockingPool.global,
+    resolver: HostResolver = PosixResolver
+) extends UringPerThreadScheduler(parallelism, entriesPerShard, blockerPool, resolver)
     with AsyncSupport
     with AsyncOperations
     with native.NativeSuspend:

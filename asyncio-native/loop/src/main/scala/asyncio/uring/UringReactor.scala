@@ -9,10 +9,13 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import asyncio.Completion
+import asyncio.BlockingPool
+import asyncio.HostResolver
 import asyncio.Handles
 import asyncio.Reactor
 import asyncio.Repeatable
 import asyncio.kqueue.KqueueHandles
+import asyncio.unsafe.PosixResolver
 import uring.*
 import uringOps.*
 
@@ -27,7 +30,7 @@ import uringOps.*
   * and a result that raced the cancellation is discarded: an accepted or opened descriptor is closed, and bytes read
   * are lost.
   */
-final class UringReactor private (entries: Int) extends Reactor {
+final class UringReactor private (entries: Int, blockerPool: BlockingPool, resolver: HostResolver) extends Reactor {
 
   /** Every uring reactor runs the same kinds of op, so uring-specific code may build them directly. Code that only sees
     * the `Reactor` interface still cannot mix ops between reactors.
@@ -39,7 +42,7 @@ final class UringReactor private (entries: Int) extends Reactor {
 
   type BoxedHandle = Integer
 
-  private val opsBuilder: UringOps[this.type] = new UringOps[this.type]
+  private val opsBuilder: UringOps[this.type] = new UringOps[this.type](resolver)
 
   def ops: UringOps[this.type] = opsBuilder
 
@@ -49,15 +52,24 @@ final class UringReactor private (entries: Int) extends Reactor {
   def unbox(boxed: BoxedHandle): Handle = boxed.intValue()
 
   private final class Pending[C <: Op](val op: C, val completion: Completion[C]) {
+    private var isSettled = false
     def complete(): Unit = completion.onComplete(op)
     def fail(failure: Throwable): Unit = completion.onFailure(op, failure)
     def cancelled(): Unit = completion.onCancel(op)
+    def settled(): Unit = synchronized {
+      if !isSettled then {
+        isSettled = true
+        completion.onSettled(op)
+      }
+    }
   }
 
   /** One submission of a ring op, under its user data `id`. `pending` is null once cancelled, while the kernel may
     * still hold the op.
     */
-  private final class InFlight(val id: Long, val op: RingOp[?], var pending: Pending[?] | Null)
+  private final class InFlight(val id: Long, val op: RingOp[?], var pending: Pending[?] | Null) {
+    var cancelled: Pending[?] | Null = null
+  }
 
   private val ringStorage = new Array[Byte](sizeof[io_uring].toInt)
   private def ring: Ptr[io_uring] = ringStorage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[io_uring]]
@@ -73,6 +85,8 @@ final class UringReactor private (entries: Int) extends Reactor {
 
   private val inFlight = scala.collection.mutable.LongMap.empty[InFlight]
   private var unsubmitted = false
+  private var wakeInFlight = false
+  private var closing = false
 
   // CQEs reaped from the ring but not dispatched yet, so a completion that throws loses none of them.
   private val MaxBatch = 64
@@ -131,7 +145,14 @@ final class UringReactor private (entries: Int) extends Reactor {
         promise.pending = pending
         pendingPromises += promise
         promise match {
-          case blocking: UringBlocking[?] => Blockers.run(blocking)
+          case blocking: UringBlocking[?] =>
+            try Blockers.run(blocking, blockerPool)
+            catch {
+              case t: Throwable =>
+                promise.pending = null
+                pendingPromises -= promise
+                throw t
+            }
           case _                       => () // Completed by whoever holds it.
         }
     }
@@ -175,10 +196,12 @@ final class UringReactor private (entries: Int) extends Reactor {
 
   /** Keeps a read pending on the eventfd, so that a write to it completes a CQE and ends a waiting poll. */
   private def armWake(): Unit = {
+    if closing then return
     val sqe = nextSqe()
     io_uring_prep_read(sqe, wakeFd, wakeBuffer.asInstanceOf[ByteArray].at(0), 8.toUInt, 0.toULong)
     sqe.user_data = WakeId.toULong
     flush()
+    wakeInFlight = true
   }
 
   /** Interrupts a waiting `poll` or `run`. May be called from any thread. */
@@ -209,6 +232,7 @@ final class UringReactor private (entries: Int) extends Reactor {
         ran = true
         val p = pending.asInstanceOf[Pending[?]]
         val failure = promise.failure
+        p.settled()
         if failure != null then p.fail(failure.nn) else p.complete()
       }
       promise = if stoppable && stopped then null else resolvedQueue.poll()
@@ -233,7 +257,10 @@ final class UringReactor private (entries: Int) extends Reactor {
 
   /** Hands one CQE to the op it is for. The op stops being pending first, so the completion may submit it again. */
   private def dispatch(id: Long, res: Int): Unit =
-    if id == WakeId then armWake() // promises are delivered by the loop itself
+    if id == WakeId then {
+      wakeInFlight = false
+      armWake() // promises are delivered by the loop itself
+    }
     else if id != InternalId then
       inFlight.remove(id) match {
         case None         => ()
@@ -241,7 +268,10 @@ final class UringReactor private (entries: Int) extends Reactor {
           val op = flight.op
           if op.inFlight.asInstanceOf[AnyRef] eq flight then op.inFlight = null
           val pending = flight.pending
-          if pending == null then op.discard(res)
+          if pending == null then {
+            op.discard(res)
+            if flight.cancelled != null then flight.cancelled.nn.settled()
+          }
           else {
             // A failing op fails its own completion; an exception thrown by the completion itself still escapes.
             var failure: Throwable | Null = null
@@ -252,12 +282,21 @@ final class UringReactor private (entries: Int) extends Reactor {
                   failure = t
                   true
               }
-            if failure != null then pending.fail(failure.nn)
-            else if done then pending.complete()
+            if failure != null then {
+              pending.settled()
+              pending.fail(failure.nn)
+            } else if done then {
+              pending.settled()
+              pending.complete()
+            }
             else
               // Not finished: submit again, without the completion ever seeing it.
               try enqueue(op, pending)
-              catch case t: Throwable => pending.fail(t)
+              catch {
+                case t: Throwable =>
+                  pending.settled()
+                  pending.fail(t)
+              }
           }
       }
 
@@ -308,7 +347,9 @@ final class UringReactor private (entries: Int) extends Reactor {
           case flight: InFlight if flight.pending != null =>
             val p = flight.pending
             flight.pending = null
-            ring.inFlight = null
+            flight.cancelled = p
+            // Keep the op marked in flight until its CQE arrives. The kernel may still be using its buffers,
+            // even though its completion has already been detached from the caller.
             requestCancel(flight)
             p
           case _ => null
@@ -317,7 +358,13 @@ final class UringReactor private (entries: Int) extends Reactor {
     }
     if pending == null then false
     else {
-      pending.nn.cancelled()
+      try pending.nn.cancelled()
+      finally
+        pending.nn.op match {
+          case _: RingOp[?]      => () // The CQE confirms when the kernel has released its buffers.
+          case _: UringBlocking[?] => () // The worker settles after it stops writing the op's Slot.
+          case _                   => pending.nn.settled()
+        }
       true
     }
   }
@@ -338,7 +385,10 @@ final class UringReactor private (entries: Int) extends Reactor {
     pendingPromises -= promise
     if pending != null then
       promise match {
-        case blocking: UringBlocking[?] => blocking.interrupt() // skip it, or interrupt its worker
+        case blocking: UringBlocking[?] =>
+          val p = pending.asInstanceOf[Pending[?]]
+          blocking.whenSettled(() => p.settled())
+          blocking.interrupt() // skip it, or interrupt its worker
         case _                       => ()
       }
     pending.asInstanceOf[Pending[?] | Null]
@@ -349,28 +399,54 @@ final class UringReactor private (entries: Int) extends Reactor {
     */
   def close(): Unit = {
     if !closed then {
+      closing = true
       // Detach every pending op first, so nothing can be delivered while the reactor shuts down.
       val dropped = scala.collection.mutable.ArrayBuffer.empty[Pending[?]]
+      val settleAfterClose = scala.collection.mutable.ArrayBuffer.empty[Pending[?]]
       for flight <- inFlight.values do {
-        if flight.pending != null then dropped += flight.pending.nn
+        if flight.pending != null then {
+          val pending = flight.pending.nn
+          dropped += pending
+          settleAfterClose += pending
+          flight.cancelled = pending
+        } else if flight.cancelled != null then settleAfterClose += flight.cancelled.nn
         flight.pending = null
-        flight.op.inFlight = null
         requestCancel(flight)
       }
       for promise <- pendingPromises.toList do {
         val pending = detach(promise)
-        if pending != null then dropped += pending.nn
+        if pending != null then {
+          dropped += pending.nn
+          promise match {
+            case _: UringBlocking[?] => () // Its worker will settle once it can no longer write its Slot.
+            case _                   => settleAfterClose += pending.nn
+          }
+        }
       }
       resolvedQueue.clear()
-      // The kernel may still be writing into the ops' buffers: wait for their CQEs before the memory can go.
-      val deadline = System.nanoTime() + 1_000_000_000L
-      while inFlight.nonEmpty && System.nanoTime() < deadline do {
+      // Keep operation and wake buffers alive until the kernel has released them. queue_exit alone does not
+      // establish that guarantee.
+      if wakeInFlight then {
+        val sqe = nextSqe()
+        io_uring_prep_cancel64(sqe, WakeId.toULong, 0)
+        sqe.user_data = InternalId.toULong
+        try flush()
+        catch { case _: IOException => () }
+      }
+      while inFlight.nonEmpty || wakeInFlight do {
+        if unsubmitted then flush()
         while reapedCursor < reapedCount do {
           val i = reapedCursor
           reapedCursor += 1
-          inFlight.remove(reapedIds(i)).foreach(_.op.discard(reapedResults(i)))
+          val id = reapedIds(i)
+          if id == WakeId then wakeInFlight = false
+          else if id != InternalId then inFlight.remove(id).foreach { flight =>
+            flight.op.discard(reapedResults(i))
+            flight.op.inFlight = null
+            if flight.cancelled != null then flight.cancelled.nn.settled()
+          }
         }
-        if inFlight.nonEmpty then {
+        if inFlight.nonEmpty || wakeInFlight then {
           io_uring_wait_cqe_timeout(ring, cqeSlot, waitTimeout(10_000_000L))
           reap()
         }
@@ -390,6 +466,14 @@ final class UringReactor private (entries: Int) extends Reactor {
             else if callbackFailure.nn ne t then callbackFailure.nn.addSuppressed(t)
         }
       }
+      settleAfterClose.foreach { pending =>
+        try pending.settled()
+        catch {
+          case t: Throwable =>
+            if callbackFailure == null then callbackFailure = t
+            else if callbackFailure.nn ne t then callbackFailure.nn.addSuppressed(t)
+        }
+      }
       if callbackFailure != null then throw callbackFailure.nn
     }
   }
@@ -398,11 +482,19 @@ final class UringReactor private (entries: Int) extends Reactor {
 object UringReactor {
 
   /** Opens a reactor on a new ring with room for `entries` submissions at a time. Close it when done. */
-  def open(entries: Int = 256): UringReactor = new UringReactor(entries)
+  def open(
+      entries: Int = 256,
+      blockerPool: BlockingPool = BlockingPool.global,
+      resolver: HostResolver = PosixResolver
+  ): UringReactor = new UringReactor(entries, blockerPool, resolver)
 
   /** Opens a reactor for `body` and closes it afterwards. */
-  def scoped(entries: Int = 256)(body: UringReactor => Unit): Unit = {
-    val reactor = open(entries)
+  def scoped(
+      entries: Int = 256,
+      blockerPool: BlockingPool = BlockingPool.global,
+      resolver: HostResolver = PosixResolver
+  )(body: UringReactor => Unit): Unit = {
+    val reactor = open(entries, blockerPool, resolver)
     try body(reactor)
     finally reactor.close()
   }

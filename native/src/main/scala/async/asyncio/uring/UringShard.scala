@@ -1,6 +1,8 @@
 package gears.async.asyncio.uring
 
 import asyncio.uring.UringReactor
+import asyncio.BlockingPool
+import asyncio.HostResolver
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.scalanative.runtime.Continuations
@@ -9,8 +11,13 @@ import scala.util.control.NonFatal
 /** One OS thread of the scheduler: it runs gears tasks and drives its own [[UringReactor]] in between. A reactor is
   * single-threaded, so anything that touches it from another thread is hopped onto this one with [[onLoop]].
   */
-private[uring] final class UringShard(entries: Int, globalQueue: ConcurrentLinkedQueue[Runnable]):
-  val reactor: UringReactor = UringReactor.open(entries)
+private[uring] final class UringShard(
+    entries: Int,
+    globalQueue: ConcurrentLinkedQueue[Runnable],
+    blockerPool: BlockingPool,
+    resolver: HostResolver
+):
+  val reactor: UringReactor = UringReactor.open(entries, blockerPool, resolver)
 
   private val taskQueue = new ConcurrentLinkedQueue[Runnable]()
 

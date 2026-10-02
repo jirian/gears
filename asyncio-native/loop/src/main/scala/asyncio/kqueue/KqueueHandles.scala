@@ -18,6 +18,8 @@ import scala.scalanative.unsigned.*
 
 import asyncio.Address
 import asyncio.Handles
+import asyncio.Shutdown
+import asyncio.SocketOption
 import asyncio.unsafe.NonBlocking
 import asyncio.unsafe.PosixErr.cError
 import asyncio.unsafe.PosixFileOps
@@ -39,23 +41,23 @@ object KqueueHandles extends Handles[Int] {
     fd
   }
 
-  def connect(address: Address): Int =
-    socketFor(address, Transport.Stream)(fd => connectTo(fd, address))
+  def connect(address: Address, options: Seq[SocketOption]): Int =
+    socketFor(address, Transport.Stream, options)(fd => connectTo(fd, address))
 
-  def listen(address: Address): Int =
-    socketFor(address, Transport.Stream) { fd =>
+  def listen(address: Address, options: Seq[SocketOption]): Int =
+    socketFor(address, Transport.Stream, options) { fd =>
       bindTo(fd, address)
       PosixSockets.listen(fd, PosixSockets.maxConnections)
     }
 
-  def datagram(local: Address | Null, remote: Address | Null): Int = {
+  def datagram(local: Address | Null, remote: Address | Null, options: Seq[SocketOption]): Int = {
     val either = if local != null then local.nn else remote
     require(either != null, "A datagram socket needs a local or a remote address")
     require(
       local == null || remote == null || flavorOf(local.nn) == flavorOf(remote.nn),
       "Local and remote addresses must be of the same kind"
     )
-    socketFor(either.nn, Transport.Datagram) { fd =>
+    socketFor(either.nn, Transport.Datagram, options) { fd =>
       if local != null then bindTo(fd, local.nn)
       if remote != null then connectTo(fd, remote.nn) // assigns an IP socket an ephemeral local port
     }
@@ -78,6 +80,8 @@ object KqueueHandles extends Handles[Int] {
     if path != null then Zone.acquire { implicit z => PosixFileOps.safeUnlink(toCString(path, StandardCharsets.UTF_8)) }
   }
 
+  def shutdown(handle: Int, direction: Shutdown): Unit = PosixSockets.shutdown(handle, direction)
+
   private def flavorOf(address: Address): Flavor = address match {
     case Address.Unix(_)    => Flavor.Unix
     case Address.IPv4(_, _) => Flavor.IPv4
@@ -85,10 +89,11 @@ object KqueueHandles extends Handles[Int] {
   }
 
   /** Opens a non-blocking socket and runs `setup` on it, closing it again if `setup` fails. */
-  private def socketFor(address: Address, transport: Transport)(setup: Int => Unit): Int = {
+  private def socketFor(address: Address, transport: Transport, options: Seq[SocketOption])(setup: Int => Unit): Int = {
     val fd = PosixSockets.open(flavorOf(address), transport)
     try {
       PosixSockets.setNonBlocking(fd)
+      options.foreach(PosixSockets.setSocketOption(fd, _))
       setup(fd)
       fd
     } catch {

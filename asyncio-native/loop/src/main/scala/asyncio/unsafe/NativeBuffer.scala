@@ -3,6 +3,7 @@ package asyncio.unsafe
 import java.nio.ByteBuffer
 import scala.scalanative.memory.PointerBuffer
 import scala.scalanative.memory.PointerBufferOps.given
+import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
@@ -31,6 +32,15 @@ object NativeBuffer {
 
   /** The address of the buffer's current position. */
   def atPosition(buf: ByteBuffer): Ptr[Byte] = buf.pointer() + buf.position()
+
+  /** The address of the current position for heap or pointer-backed buffers. */
+  def nativeAtPosition(buf: ByteBuffer): Ptr[Byte] =
+    if buf.hasArray() then
+      val index = buf.arrayOffset() + buf.position()
+      if index < buf.array().length then buf.array().asInstanceOf[ByteArray].at(index) else null
+    else if buf.hasPointer() then buf.pointer() + buf.position()
+    else if buf.remaining() == 0 then null
+    else throw new IllegalArgumentException("Buffer must be array-backed or pointer-backed")
 
   /** Moves the position forward after the kernel filled or drained `n` bytes at it. */
   def advance(buf: ByteBuffer, n: Int): Unit = buf.position(buf.position() + n)

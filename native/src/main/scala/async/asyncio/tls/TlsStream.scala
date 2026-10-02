@@ -100,6 +100,20 @@ final class TlsStream private (
   override def localAddress: SocketAddress = underlying.localAddress
   override def remoteAddress: SocketAddress = underlying.remoteAddress
 
+  override def shutdownOutput()(using Async): Unit =
+    checkOpen()
+    val result = SSL_shutdown(ssl)
+    if result < 0 then
+      val error = SSL_get_error(ssl, result)
+      if error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE then
+        throw new IOException(s"TLS shutdown failed (SSL_get_error=$error): ${lastOpenSslError()}")
+    flushNetworkOut()
+    underlying.shutdownOutput()
+
+  override def shutdownInput()(using Async): Unit =
+    checkOpen()
+    underlying.shutdownInput()
+
   private var closed = false
   private def checkOpen(): Unit = if closed then throw new ClosedChannelException()
 

@@ -152,6 +152,14 @@ class UringTcpStream private[uring] (
       closed = true
       unistd.close(fd)
 
+  override def shutdownOutput()(using Async): Unit =
+    checkOpen()
+    PosixSockets.shutdown(fd, asyncio.Shutdown.Write)
+
+  override def shutdownInput()(using Async): Unit =
+    checkOpen()
+    PosixSockets.shutdown(fd, asyncio.Shutdown.Read)
+
   override def readBuf(buf: Buffer)(using Async): Result[Unit] = either:
     checkOpen()
     val before = buf.position()

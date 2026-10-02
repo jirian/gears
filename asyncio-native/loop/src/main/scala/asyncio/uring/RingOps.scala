@@ -97,6 +97,40 @@ private[uring] final class BufferRegion(buf: ByteBuffer) {
   def drained(n: Int): Unit = buf.position(buf.position() + n)
 }
 
+/** Retains the iovec array and translates a completed byte count into ordered buffer-position advances. */
+private[uring] final class VectorBufferRegion(bufs: Array[ByteBuffer]) {
+  require(bufs.length <= 1024, "A vector I/O operation may contain at most 1024 buffers")
+  private val vectors = new Array[Byte](math.max(1, sizeof[iovec].toInt * bufs.length))
+
+  def prepare(): Ptr[iovec] =
+    val base = vectors.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[iovec]]
+    var i = 0
+    while i < bufs.length do
+      val buf = bufs(i)
+      val ptr =
+        if buf.remaining() == 0 then null
+        else if buf.hasArray() then
+          buf.array().asInstanceOf[ByteArray].at(buf.arrayOffset() + buf.position())
+        else if buf.hasPointer() then buf.pointer() + buf.position()
+        else throw new IllegalArgumentException("Buffer must be array-backed or pointer-backed")
+      val vec = base + i
+      vec.iov_base = ptr
+      vec.iov_len = buf.remaining().toUSize
+      i += 1
+    base
+
+  def advance(count: Int): Unit =
+    var left = count
+    var i = 0
+    while i < bufs.length && left > 0 do
+      val buf = bufs(i)
+      val moved = math.min(left, buf.remaining())
+      buf.position(buf.position() + moved)
+      left -= moved
+      i += 1
+    if left != 0 then throw new IOException(s"Vector I/O returned $count bytes beyond the supplied buffers")
+}
+
 /** Socket addresses in the kernel's form, in storage that outlives the call that built them. */
 object SocketAddresses {
   final val storageSize = sizeOf[socket.sockaddr_storage].toInt
@@ -159,11 +193,15 @@ private[uring] final class MessageHeader {
     val iov = vector.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[iovec]]
     iov.iov_base = data
     iov.iov_len = length.toCSize
+    setIovecs(iov, 1, nameLength)
+  }
+
+  def setIovecs(iov: Ptr[iovec], count: Int, nameLength: Int): Unit = {
     val m = uringOps.msghdrOps(msg) // not posixlib's msghdr, whose fields are read-only
     m.msg_name = if nameLength > 0 then SocketAddresses.pointer(name).asInstanceOf[Ptr[Byte]] else null
     m.msg_namelen = nameLength.toUInt
     m.msg_iov = iov
-    m.msg_iovlen = 1.toCSize
+    m.msg_iovlen = count.toCSize
     m.msg_control = null
     m.msg_controllen = 0.toCSize
     m.msg_flags = 0
@@ -182,6 +220,23 @@ final class Read[Owner](val fd: Int, buf: ByteBuffer) extends RingOp[Owner] with
     else if res < 0 then throw failure(s"Failed to read from descriptor $fd", res)
     else {
       region.filled(res)
+      true
+    }
+}
+
+/** Fills the buffers in order, completing once at least one byte is read or EOF is reached. */
+final class ReadVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends RingOp[Owner] with Repeatable {
+  require(bufs.forall(buf => !buf.isReadOnly), "Read buffers must be writable")
+  private val region = new VectorBufferRegion(bufs)
+
+  private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit =
+    io_uring_prep_readv(sqe, fd, region.prepare(), bufs.length.toUInt, currentPosition)
+
+  private[uring] def finish(res: Int): Boolean =
+    if transient(res) then false
+    else if res < 0 then throw failure(s"Failed to read from descriptor $fd", res)
+    else {
+      region.advance(res)
       true
     }
 }
@@ -206,8 +261,37 @@ final class Write[Owner](val fd: Int, buf: ByteBuffer, private var plain: Boolea
       false
     } else if transient(res) then false
     else if res < 0 then throw failure(s"Failed to write to descriptor $fd", res)
+    else if res == 0 && buf.hasRemaining() then throw new IOException(s"Write to descriptor $fd made no progress")
     else {
       region.drained(res)
+      true
+    }
+}
+
+/** Drains the buffers in order; a partial completion advances only the bytes the kernel wrote. */
+final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends RingOp[Owner] with Repeatable {
+  private val region = new VectorBufferRegion(bufs)
+  private val header = new MessageHeader
+  private var plain = false
+
+  private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
+    val vectors = region.prepare()
+    if plain then io_uring_prep_writev(sqe, fd, vectors, bufs.length.toUInt, currentPosition)
+    else {
+      header.setIovecs(vectors, bufs.length, 0)
+      io_uring_prep_sendmsg(sqe, fd, header.msg, socket.MSG_NOSIGNAL)
+    }
+  }
+
+  private[uring] def finish(res: Int): Boolean =
+    if res == -errno.ENOTSOCK && !plain then {
+      plain = true
+      false
+    } else if transient(res) then false
+    else if res < 0 then throw failure(s"Failed to write to descriptor $fd", res)
+    else if res == 0 && bufs.exists(_.hasRemaining()) then throw new IOException(s"Vector write to descriptor $fd made no progress")
+    else {
+      region.advance(res)
       true
     }
 }

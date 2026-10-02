@@ -22,6 +22,14 @@ trait Completion[-C] {
     * the reactor is closing. By default it does nothing.
     */
   def onCancel(op: C): Unit = ()
+
+  /**
+    * The backend has released every resource it borrowed from this op, including buffers passed to it. This runs once
+    * per submission, before `onComplete`/`onFailure`. Cancellation is different: `onCancel` may run immediately while
+    * the backend is still draining the request, and `onSettled` runs later when the buffers are safe to reuse.
+    * Implementations should return quickly and must not throw.
+    */
+  def onSettled(op: C): Unit = ()
 }
 
 /** A single-threaded event loop. Every completion runs on the thread that called `run`, and apart from completing a
@@ -58,7 +66,8 @@ trait Reactor extends AutoCloseable {
   def submit[C <: Op](op: C, completion: Completion[C]): Unit
 
   /** Cancels a submitted op that has not finished. Its completion's `onCancel` runs before this returns, and its
-    * `onComplete` and `onFailure` never run. Returns false if the op already finished or was never submitted here.
+    * `onComplete` and `onFailure` never run. `onSettled` may follow later, after the backend releases the op's buffers.
+    * Returns false if the op already finished or was never submitted here.
     */
   def cancel(op: Op): Boolean
 
@@ -101,6 +110,23 @@ enum Interest {
   case Read, Write
 }
 
+/** Which direction of a bidirectional stream to close while keeping the handle open. */
+enum Shutdown {
+  case Read, Write, Both
+}
+
+/** Portable options applied when a stream or datagram socket is created. */
+sealed trait SocketOption
+object SocketOption {
+  final case class SendBufferSize(bytes: Int) extends SocketOption
+  final case class ReceiveBufferSize(bytes: Int) extends SocketOption
+  final case class KeepAlive(enabled: Boolean) extends SocketOption
+  final case class ReuseAddress(enabled: Boolean) extends SocketOption
+  final case class NoDelay(enabled: Boolean) extends SocketOption
+  /** -1 disables linger; non-negative values are seconds. */
+  final case class Linger(seconds: Int) extends SocketOption
+}
+
 /** Where a socket lives: a Unix domain path, or a numeric IPv4 or IPv6 address and port. */
 enum Address {
   case Unix(path: String)
@@ -109,7 +135,8 @@ enum Address {
 }
 
 /** Opening, closing, and waitless use of a reactor's handles. Every operation is synchronous and never blocks; failures
-  * throw `java.io.IOException`. Handles belong to the caller, who closes them with `close`.
+  * throw `java.io.IOException`. Handles belong to the caller, who closes them with `close`. Closing a handle does not
+  * cancel operations that use it: cancel and wait for their `onSettled` callbacks before closing or reusing the handle.
   */
 trait Handles[Handle] {
 
@@ -117,15 +144,19 @@ trait Handles[Handle] {
   def openFile(path: String, write: Boolean): Handle
 
   /** A stream socket whose connection to `address` has started; submit `ops.connect` to wait for it to finish. */
-  def connect(address: Address): Handle
+  def connect(address: Address, options: Seq[SocketOption] = Seq.empty): Handle
 
   /** A stream socket bound to `address` and listening for connections. */
-  def listen(address: Address): Handle
+  def listen(address: Address, options: Seq[SocketOption] = Seq.empty): Handle
 
   /** A datagram socket, bound to `local` and connected to `remote` where given. A Unix datagram client needs a `local`
     * path so that replies can reach it.
     */
-  def datagram(local: Address | Null, remote: Address | Null): Handle
+  def datagram(
+      local: Address | Null,
+      remote: Address | Null,
+      options: Seq[SocketOption] = Seq.empty
+  ): Handle
 
   /** A pipe, as its read end and its write end. */
   def pipe(): (Handle, Handle)
@@ -138,6 +169,9 @@ trait Handles[Handle] {
 
   /** Closes a handle. A Unix socket path that `listen` or `datagram` bound is removed with it. */
   def close(handle: Handle): Unit
+
+  /** Closes one or both directions of a connected stream without closing the handle. */
+  def shutdown(handle: Handle, direction: Shutdown): Unit
 }
 
 /** A mutable outcome of an operation. Contract: setting/clearing is atomic; additional set before a clear is forbidden.
@@ -178,8 +212,13 @@ enum AddressFamily {
 
 final case class ResolvedAddress(family: AddressFamily, host: String)
 
+/** Injectable hostname lookup policy; implementations may add caching or use a platform-specific resolver. */
+trait HostResolver {
+  def resolve(host: String): Either[String, List[ResolvedAddress]]
+}
+
 /** The ops a reactor can build, as values of its `Op` type, on I/O objects named by its `Handle` type. Buffers are used
-  * between position and limit, and belong to the reactor from submission until the op's completion.
+  * between position and limit, and are borrowed until `Completion.onSettled`.
   */
 trait Ops[Op, Handle, BoxedHandle <: AnyRef] {
 
@@ -188,8 +227,14 @@ trait Ops[Op, Handle, BoxedHandle <: AnyRef] {
     */
   def read(handle: Handle, buf: ByteBuffer): Op & Repeatable
 
+  /** Like `read`, filling buffers in order. Completes after any bytes arrive or EOF; advances positions by bytes read. */
+  def readv(handle: Handle, bufs: Array[ByteBuffer]): Op & Repeatable
+
   /** Drains `buf`. Completes once at least one byte has been written; resubmit while `buf` has bytes remaining. */
   def write(handle: Handle, buf: ByteBuffer): Op & Repeatable
+
+  /** Like `write`, draining buffers in order. Completes after progress; a completion may advance only part of the vector. */
+  def writev(handle: Handle, bufs: Array[ByteBuffer]): Op & Repeatable
 
   /** Accepts one connection on a listening socket. Completes after writing the new, non-blocking connection into
     * `into`, which must be empty.

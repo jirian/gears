@@ -13,6 +13,12 @@ abstract class TcpStream extends Reader, Writer, Closeable:
   def localAddress: SocketAddress
   def remoteAddress: SocketAddress
 
+  /** Sends end-of-stream to the peer while keeping reads available. */
+  def shutdownOutput()(using Async): Unit
+
+  /** Stops receiving from the peer while keeping writes available. */
+  def shutdownInput()(using Async): Unit
+
 // Represents a TCP server/listener.
 abstract class TcpListener extends Closeable:
   type Stream <: TcpStream

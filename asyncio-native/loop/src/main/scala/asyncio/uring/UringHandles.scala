@@ -28,6 +28,8 @@ object UringHandles extends Handles {
   }
 
   def readNow(handle: Int, buf: ByteBuffer): Int = {
+    // Checked first: reading into scratch and then failing to copy out would lose the bytes read.
+    if buf.isReadOnly() then throw new java.nio.ReadOnlyBufferException()
     val region = new BufferRegion(buf)
     val read = unistd.read(handle, region.toFill(), buf.remaining().toCSize)
     if read < 0 then

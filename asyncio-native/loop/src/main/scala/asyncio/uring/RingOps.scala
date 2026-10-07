@@ -29,13 +29,7 @@ import uring.*
 import uringOps.*
 
 private[uring] object Ring {
-
-  /** Linux values; Scala Native's posixlib does not expose them. */
-  final val SOCK_NONBLOCK = 0x800
-  final val SOCK_CLOEXEC = 0x80000
-  final val POLLIN = 0x001
-  final val POLLOUT = 0x004
-  final val ETIME = 62
+  export LinuxConstants.{ETIME, POLLIN, POLLOUT, SOCK_CLOEXEC, SOCK_NONBLOCK}
 
   /** Offset -1 makes a read or write use and advance the descriptor's own position, like `read(2)` and `write(2)`. */
   val currentPosition: __u64 = (-1L).toULong
@@ -98,25 +92,25 @@ private[uring] final class BufferRegion(buf: ByteBuffer) {
   def drained(n: Int): Unit = buf.position(buf.position() + n)
 }
 
-/** Retains the iovec array and translates a completed byte count into ordered buffer-position advances. */
+/** The iovec array for a vector of buffers, and the ordered position advances for a completed byte count. Each buffer
+  * is addressed like a `BufferRegion`: in place when it is a heap or pointer buffer, otherwise, such as a read-only
+  * buffer to drain, through its own scratch copy.
+  */
 private[uring] final class VectorBufferRegion(bufs: Array[ByteBuffer]) {
   require(bufs.length <= 1024, "A vector I/O operation may contain at most 1024 buffers")
   private val vectors = new Array[Byte](math.max(1, sizeof[iovec].toInt * bufs.length))
+  private val regions = bufs.map(new BufferRegion(_))
+  private var filling = false
 
-  def prepare(): Ptr[iovec] =
+  /** Points the iovecs at the buffers, for the kernel to fill them (`fill`) or drain them. */
+  def prepare(fill: Boolean): Ptr[iovec] =
+    filling = fill
     val base = vectors.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[iovec]]
     var i = 0
     while i < bufs.length do
-      val buf = bufs(i)
-      val ptr =
-        if buf.remaining() == 0 then null
-        else if buf.hasArray() then
-          buf.array().asInstanceOf[ByteArray].at(buf.arrayOffset() + buf.position())
-        else if buf.hasPointer() then buf.pointer() + buf.position()
-        else throw new IllegalArgumentException("Buffer must be array-backed or pointer-backed")
       val vec = base + i
-      vec.iov_base = ptr
-      vec.iov_len = buf.remaining().toUSize
+      vec.iov_base = if fill then regions(i).toFill() else regions(i).toDrain()
+      vec.iov_len = bufs(i).remaining().toUSize
       i += 1
     base
 
@@ -124,9 +118,8 @@ private[uring] final class VectorBufferRegion(bufs: Array[ByteBuffer]) {
     var left = count
     var i = 0
     while i < bufs.length && left > 0 do
-      val buf = bufs(i)
-      val moved = math.min(left, buf.remaining())
-      buf.position(buf.position() + moved)
+      val moved = math.min(left, bufs(i).remaining())
+      if filling then regions(i).filled(moved) else regions(i).drained(moved)
       left -= moved
       i += 1
     if left != 0 then throw new IOException(s"Vector I/O returned $count bytes beyond the supplied buffers")
@@ -231,7 +224,7 @@ final class ReadVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends Ring
   private val region = new VectorBufferRegion(bufs)
 
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit =
-    io_uring_prep_readv(sqe, fd, region.prepare(), bufs.length.toUInt, currentPosition)
+    io_uring_prep_readv(sqe, fd, region.prepare(fill = true), bufs.length.toUInt, currentPosition)
 
   private[uring] def finish(res: Int): Boolean =
     if transient(res) then false
@@ -276,7 +269,7 @@ final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends Rin
   private var plain = false
 
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
-    val vectors = region.prepare()
+    val vectors = region.prepare(fill = false)
     if plain then io_uring_prep_writev(sqe, fd, vectors, bufs.length.toUInt, currentPosition)
     else {
       header.setIovecs(vectors, bufs.length, 0)
@@ -290,7 +283,8 @@ final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends Rin
       false
     } else if transient(res) then false
     else if res < 0 then throw failure(s"Failed to write to descriptor $fd", res)
-    else if res == 0 && bufs.exists(_.hasRemaining()) then throw new IOException(s"Vector write to descriptor $fd made no progress")
+    else if res == 0 && bufs.exists(_.hasRemaining()) then
+      throw new IOException(s"Vector write to descriptor $fd made no progress")
     else {
       region.advance(res)
       true
@@ -338,12 +332,10 @@ final class WhenReady[Owner](val fd: Int, val interest: Interest, body: () => Bo
     else body()
 }
 
-/** Receives one packet into `buf`, left flipped for reading, and writes its sender into `from`. A packet larger than the
-  * buffer is truncated, as `recvmsg(2)` does.
+/** Receives one packet into `buf`, left flipped for reading, and writes its sender into `from`. A packet larger than
+  * the buffer is truncated, as `recvmsg(2)` does.
   */
-final class Receive[Owner](val fd: Int, buf: ByteBuffer, from: Slot[Address])
-    extends RingOp[Owner]
-    with Repeatable {
+final class Receive[Owner](val fd: Int, buf: ByteBuffer, from: Slot[Address]) extends RingOp[Owner] with Repeatable {
   private val region = new BufferRegion(buf)
   private val header = new MessageHeader
 

@@ -2,23 +2,24 @@
 
 package gears.async.asyncio
 
-import java.nio.ByteBuffer
-import scala.collection.mutable
+import gears.async.Async.OriginalSource
+import gears.async.Async.Source
+import gears.async.Listener
+import gears.async.{Async, Future}
 import gears.util.either
 import gears.util.either._
-import gears.async.{Async, Future}
-import gears.async.Async.Source
-import scala.util.boundary
-import scala.util.Success
+
+import java.nio.ByteBuffer
 import java.nio.channels.ReadPendingException
 import java.util.concurrent.atomic.AtomicBoolean
-import gears.async.Listener
-import scala.util.Failure
-import scala.util.Try
-import gears.async.Async.OriginalSource
 import java.util.concurrent.atomic.AtomicReference
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.mutable.ArraySeq
+import scala.util.Failure
+import scala.util.Success
+import scala.util.Try
+import scala.util.boundary
 
 /** The general buffer type of the traits. */
 type Buffer = java.nio.ByteBuffer
@@ -26,13 +27,10 @@ type Buffer = java.nio.ByteBuffer
 /** An asynchronous reader. */
 trait Reader:
   /** Writes to the [[buf]] asynchronously.
-    *   - **Data Race**: the buffer is effectively owned by the [[Reader]] from
-    *     the call to [[unsafeReadBuf]] until the returned [[Future]] is
-    *     resolved. Any attempt to read from/write to the given buffer is
-    *     considered a data race.
-    *   - **Concurrent reads**: [[Reader]] implementations that does not allow
-    *     multiple outstanding reads at the same time *must* throw
-    *     [[ReadPendingException]] when multiple outstanding reads are detected.
+    *   - **Data Race**: the buffer is effectively owned by the [[Reader]] from the call to [[unsafeReadBuf]] until the
+    *     returned [[Future]] is resolved. Any attempt to read from/write to the given buffer is considered a data race.
+    *   - **Concurrent reads**: [[Reader]] implementations that does not allow multiple outstanding reads at the same
+    *     time *must* throw [[ReadPendingException]] when multiple outstanding reads are detected.
     */
   def readBuf(buf: Buffer)(using Async): Result[Unit]
 
@@ -47,8 +45,7 @@ trait Writer:
 
 /** Wraps a reader and provides with with buffering capabilities.
   *
-  * A [[BufferedReader]] is *not* thread-safe, nor does it allow multiple
-  * outstanding reads.
+  * A [[BufferedReader]] is *not* thread-safe, nor does it allow multiple outstanding reads.
   */
 class BufferedReader(bufSize: Int)(reader: Reader) extends Reader:
   private inline def errReadPending = Failure(ReadPendingException())
@@ -58,9 +55,8 @@ class BufferedReader(bufSize: Int)(reader: Reader) extends Reader:
     assert(readPending.get == false)
     buffer
 
-  /** Returns whether the buffered reader has no more data to offer (i.e. any
-    * more read requests will result in an [[Error.EOF]]). Panics if there are
-    * any pending reads.
+  /** Returns whether the buffered reader has no more data to offer (i.e. any more read requests will result in an
+    * [[Error.EOF]]). Panics if there are any pending reads.
     */
   def isEOF =
     gotEOF && !buffer.hasRemaining()
@@ -121,8 +117,7 @@ class BufferedReader(bufSize: Int)(reader: Reader) extends Reader:
       override def poll(k: Listener): Boolean =
         withPending(k, true):
           if buffer.hasRemaining() then copyAndComplete(k)
-          else if gotEOF then
-            k.completeNow(Success(Left(Error.EOF)), src) || true
+          else if gotEOF then k.completeNow(Success(Left(Error.EOF)), src) || true
           else false
 
       override def dropListener(k: Listener): Unit =

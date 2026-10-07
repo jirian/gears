@@ -1,8 +1,8 @@
-import asyncio.uring.BlockingPool
-
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
+
+import asyncio.uring.BlockingPool
 import munit.FunSuite
 
 class BlockingPoolSuite extends FunSuite {

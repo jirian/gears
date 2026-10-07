@@ -1,10 +1,10 @@
 package gears.async.asyncio.examples
 
 import gears.async._
-import gears.async.net.TcpSupport
-import gears.async.http._
-import gears.async.asyncio.uring.UringPerThreadSupport
 import gears.async.asyncio.tls.NativeTlsSupport
+import gears.async.asyncio.uring.UringPerThreadSupport
+import gears.async.http._
+import gears.async.net.TcpSupport
 
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
@@ -59,5 +59,4 @@ private def runTlsServer(port: Int)(using Async, TcpSupport, AsyncOperations): U
     given support: UringPerThreadSupport = UringPerThreadSupport()
     given tcp: TcpSupport = support.tcpSupport
     Async.blocking(runTlsServer(port))
-  else
-    throw new UnsupportedOperationException("no TCP backend wired up for this platform")
+  else throw new UnsupportedOperationException("no TCP backend wired up for this platform")

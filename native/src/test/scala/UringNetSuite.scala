@@ -3,8 +3,9 @@ import gears.async.asyncio.Error
 import gears.async.asyncio.uring.{UnixSocketAddress, UringPerThreadSupport}
 import gears.async.net.{TcpStream, TcpSupport, UdpSupport}
 
-import java.net.InetSocketAddress
+import java.net.{InetSocketAddress, UnknownHostException}
 import java.nio.ByteBuffer
+import java.nio.channels.{AsynchronousCloseException, ClosedChannelException}
 import java.nio.charset.StandardCharsets
 
 /** The gears network layer on the uring backend, end to end: sockets created, bound and connected by
@@ -15,6 +16,8 @@ class UringNetSuite extends munit.FunSuite:
   private given UringPerThreadSupport = support
   private given TcpSupport = support.tcpSupport
   private given UdpSupport = support.udpSupport
+
+  override def afterAll(): Unit = support.close()
 
   private def bytes(s: String) = ByteBuffer.wrap(s.getBytes(StandardCharsets.UTF_8))
   private def text(buf: ByteBuffer) =
@@ -59,16 +62,73 @@ class UringNetSuite extends munit.FunSuite:
     Async.blocking:
       echo(UnixSocketAddress(s"/tmp/gears-uring-net-${scala.scalanative.posix.unistd.getpid()}.sock"))
 
-  test("UDP: a datagram and its reply carry the right senders"):
+  private def udpRoundTrip(host: String)(using Async): Unit =
+    val a = UdpSupport.bind(InetSocketAddress(host, 0)).toOption.get
+    val b = UdpSupport.bind(InetSocketAddress(host, 0)).toOption.get
+    try
+      a.sendTo(bytes("hello"), b.localAddress)
+      val got = ByteBuffer.allocate(64)
+      val from = b.receiveFrom(got).toOption.get
+      assertEquals(text(got), "hello")
+      assertEquals(from, a.localAddress)
+      b.sendTo(bytes("hello back"), from)
+      val reply = ByteBuffer.allocate(64)
+      assertEquals(a.receiveFrom(reply).toOption.get, b.localAddress)
+      assertEquals(text(reply), "hello back")
+    finally
+      a.close()
+      b.close()
+
+  test("TCP: the same over IPv6 loopback"):
     Async.blocking:
-      val a = UdpSupport.bind(InetSocketAddress("127.0.0.1", 0)).toOption.get
-      val b = UdpSupport.bind(InetSocketAddress("127.0.0.1", 0)).toOption.get
+      echo(InetSocketAddress("::1", 0))
+
+  test("UDP: a datagram and its reply carry the right senders, over IPv4"):
+    Async.blocking:
+      udpRoundTrip("127.0.0.1")
+
+  test("UDP: the same over IPv6"):
+    Async.blocking:
+      udpRoundTrip("::1")
+
+  test("closing a listener fails a pending accept instead of leaving it hanging"):
+    Async.blocking:
+      val listener = TcpSupport.listen(InetSocketAddress("127.0.0.1", 0)).toOption.get
+      val accepting = Future(listener.accept())
+      AsyncOperations.sleep(50) // let the accept reach the kernel
+      listener.close()
+      val outcome = accepting.awaitResult
+      assert(outcome.failed.toOption.exists(_.isInstanceOf[AsynchronousCloseException]), outcome)
+
+  test("closing a stream fails a pending read, and later I/O on it is refused"):
+    Async.blocking:
+      val listener = TcpSupport.listen(InetSocketAddress("127.0.0.1", 0)).toOption.get
       try
-        a.sendTo(bytes("hello"), b.localAddress)
-        val got = ByteBuffer.allocate(64)
-        val from = b.receiveFrom(got).toOption.get
-        assertEquals(text(got), "hello")
-        assertEquals(from, a.localAddress)
-      finally
-        a.close()
-        b.close()
+        val client = TcpSupport.connect(listener.localAddress).toOption.get
+        val server = listener.accept().toOption.get
+        try
+          val reading = Future(server.readBuf(ByteBuffer.allocate(16)))
+          AsyncOperations.sleep(50) // nothing is sent, so the read stays pending
+          server.close()
+          val outcome = reading.awaitResult
+          assert(outcome.failed.toOption.exists(_.isInstanceOf[AsynchronousCloseException]), outcome)
+          intercept[ClosedChannelException](server.writeBuf(bytes("too late")))
+          intercept[ClosedChannelException](server.shutdownOutput())
+        finally client.close()
+      finally listener.close()
+
+  test("host names resolve through the reactors, and an unknown one fails cleanly"):
+    Async.blocking:
+      val dns = support.dnsSupport
+      assert(dns.resolve("localhost").nonEmpty)
+      intercept[UnknownHostException](dns.resolve("this-host-does-not-exist.invalid"))
+
+  test("a scheduler can be closed, stopping its shards"):
+    val scheduler = UringPerThreadSupport(parallelism = 2)
+    given UringPerThreadSupport = scheduler
+    Async.blocking:
+      AsyncOperations.sleep(10) // a timer through a shard reactor
+    scheduler.close() // returns once both shard threads have finished
+    scheduler.close() // closing twice does nothing
+    // Opening a file is a reactor op, which a closed scheduler refuses.
+    intercept[IllegalStateException](Async.blocking(scheduler.fileSupport.openRead("build.sbt")))

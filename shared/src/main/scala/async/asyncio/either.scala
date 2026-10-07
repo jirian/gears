@@ -11,17 +11,15 @@ object either:
 
   inline def ok[T](v: T) = Right(v)
 
-  /** Starts a body that returns a `T` wrapped in an [[Either]]. Within this
-    * body, `.?` is available on [[Either]] values, short-circuiting back to
-    * this function's caller if a [[Left]] is seen.
+  /** Starts a body that returns a `T` wrapped in an [[Either]]. Within this body, `.?` is available on [[Either]]
+    * values, short-circuiting back to this function's caller if a [[Left]] is seen.
     */
   inline def apply[E, T](inline body: Label[E, T] ?=> T): Either[E, T] =
     boundary:
       Right(body)
 
   extension [E, T](e: Either[E, T])
-    /** Unwraps an [[Either]], short-circuiting to the matching [[either]] call
-      * if the value is a [[Left]].
+    /** Unwraps an [[Either]], short-circuiting to the matching [[either]] call if the value is a [[Left]].
       */
     inline def ?(using Label[E, Nothing]): T = e match
       case Left(ex)     => boundary.break(Left(ex))

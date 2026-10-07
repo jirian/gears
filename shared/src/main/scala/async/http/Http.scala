@@ -8,7 +8,7 @@ enum HttpMethod:
 
   def rendered: String = this match
     case Other(name) => name
-    case known        => known.toString
+    case known       => known.toString
 
 object HttpMethod:
   def parse(token: String): HttpMethod = token match
@@ -21,39 +21,58 @@ object HttpMethod:
     case "OPTIONS" => OPTIONS
     case "TRACE"   => TRACE
     case "PATCH"   => PATCH
-    case other      => Other(other)
+    case other     => Other(other)
 
 final case class HttpStatus(code: Int, reason: String)
 
 object HttpStatus:
-  val Ok                     = HttpStatus(200, "OK")
-  val Created                = HttpStatus(201, "Created")
-  val Accepted               = HttpStatus(202, "Accepted")
-  val NoContent               = HttpStatus(204, "No Content")
-  val MovedPermanently        = HttpStatus(301, "Moved Permanently")
-  val Found                   = HttpStatus(302, "Found")
-  val SeeOther                 = HttpStatus(303, "See Other")
-  val NotModified              = HttpStatus(304, "Not Modified")
-  val TemporaryRedirect         = HttpStatus(307, "Temporary Redirect")
-  val PermanentRedirect          = HttpStatus(308, "Permanent Redirect")
-  val BadRequest              = HttpStatus(400, "Bad Request")
-  val Unauthorized             = HttpStatus(401, "Unauthorized")
-  val Forbidden                 = HttpStatus(403, "Forbidden")
-  val NotFound                = HttpStatus(404, "Not Found")
-  val MethodNotAllowed        = HttpStatus(405, "Method Not Allowed")
-  val Conflict                 = HttpStatus(409, "Conflict")
-  val PayloadTooLarge         = HttpStatus(413, "Payload Too Large")
-  val UnsupportedMediaType      = HttpStatus(415, "Unsupported Media Type")
-  val TooManyRequests            = HttpStatus(429, "Too Many Requests")
-  val InternalServerError     = HttpStatus(500, "Internal Server Error")
-  val NotImplemented          = HttpStatus(501, "Not Implemented")
-  val BadGateway                = HttpStatus(502, "Bad Gateway")
-  val ServiceUnavailable         = HttpStatus(503, "Service Unavailable")
-  val GatewayTimeout             = HttpStatus(504, "Gateway Timeout")
+  val Ok = HttpStatus(200, "OK")
+  val Created = HttpStatus(201, "Created")
+  val Accepted = HttpStatus(202, "Accepted")
+  val NoContent = HttpStatus(204, "No Content")
+  val MovedPermanently = HttpStatus(301, "Moved Permanently")
+  val Found = HttpStatus(302, "Found")
+  val SeeOther = HttpStatus(303, "See Other")
+  val NotModified = HttpStatus(304, "Not Modified")
+  val TemporaryRedirect = HttpStatus(307, "Temporary Redirect")
+  val PermanentRedirect = HttpStatus(308, "Permanent Redirect")
+  val BadRequest = HttpStatus(400, "Bad Request")
+  val Unauthorized = HttpStatus(401, "Unauthorized")
+  val Forbidden = HttpStatus(403, "Forbidden")
+  val NotFound = HttpStatus(404, "Not Found")
+  val MethodNotAllowed = HttpStatus(405, "Method Not Allowed")
+  val Conflict = HttpStatus(409, "Conflict")
+  val PayloadTooLarge = HttpStatus(413, "Payload Too Large")
+  val UnsupportedMediaType = HttpStatus(415, "Unsupported Media Type")
+  val ExpectationFailed = HttpStatus(417, "Expectation Failed")
+  val TooManyRequests = HttpStatus(429, "Too Many Requests")
+  val InternalServerError = HttpStatus(500, "Internal Server Error")
+  val NotImplemented = HttpStatus(501, "Not Implemented")
+  val BadGateway = HttpStatus(502, "Bad Gateway")
+  val ServiceUnavailable = HttpStatus(503, "Service Unavailable")
+  val GatewayTimeout = HttpStatus(504, "Gateway Timeout")
   val HttpVersionNotSupported = HttpStatus(505, "HTTP Version Not Supported")
 
   private[http] def isRedirect(code: Int): Boolean =
     code == 301 || code == 302 || code == 303 || code == 307 || code == 308
+
+/** Header validity per RFC 9110: a name is a token, and a value has no CR, LF or NUL. Enforced wherever headers are
+  * built, so a value taken from untrusted input cannot inject extra header lines or a response body.
+  */
+object HeaderSyntax:
+  private val separators = "()<>@,;:\\\"/[]?={} \t"
+
+  def isValidName(name: String): Boolean =
+    name.nonEmpty && name.forall(c => c > ' ' && c < 127 && separators.indexOf(c) < 0)
+
+  def isValidValue(value: String): Boolean =
+    value.forall(c => c != '\r' && c != '\n' && c != '\u0000')
+
+  /** Throws `IllegalArgumentException` unless `name: value` is a valid header. */
+  def check(name: String, value: String): Unit =
+    if !isValidName(name) then throw new IllegalArgumentException(s"invalid header name: '$name'")
+    if !isValidValue(value) then throw new IllegalArgumentException(s"invalid value for header '$name'")
+
 final class Headers private (private val entries: Vector[(String, String)]):
   def get(name: String): Option[String] =
     entries.collectFirst { case (k, v) if k.equalsIgnoreCase(name) => v }
@@ -63,9 +82,14 @@ final class Headers private (private val entries: Vector[(String, String)]):
 
   def contains(name: String): Boolean = get(name).isDefined
 
-  def add(name: String, value: String): Headers = new Headers(entries :+ (name -> value))
+  /** Throws `IllegalArgumentException` for an invalid header; see [[HeaderSyntax]]. */
+  def add(name: String, value: String): Headers =
+    HeaderSyntax.check(name, value)
+    new Headers(entries :+ (name -> value))
 
+  /** Throws `IllegalArgumentException` for an invalid header; see [[HeaderSyntax]]. */
   def set(name: String, value: String): Headers =
+    HeaderSyntax.check(name, value)
     new Headers(entries.filterNot((k, _) => k.equalsIgnoreCase(name)) :+ (name -> value))
 
   def remove(name: String): Headers = new Headers(entries.filterNot((k, _) => k.equalsIgnoreCase(name)))
@@ -74,7 +98,9 @@ final class Headers private (private val entries: Vector[(String, String)]):
 
 object Headers:
   val empty: Headers = new Headers(Vector.empty)
-  def apply(pairs: (String, String)*): Headers = new Headers(pairs.toVector)
+  def apply(pairs: (String, String)*): Headers =
+    pairs.foreach((name, value) => HeaderSyntax.check(name, value))
+    new Headers(pairs.toVector)
 
 final class MutableHeaders:
   private val entries = scala.collection.mutable.ArrayBuffer[(String, String)]()
@@ -82,11 +108,15 @@ final class MutableHeaders:
   def get(name: String): Option[String] =
     entries.collectFirst { case (k, v) if k.equalsIgnoreCase(name) => v }
 
+  /** Throws `IllegalArgumentException` for an invalid header; see [[HeaderSyntax]]. */
   def add(name: String, value: String): this.type =
+    HeaderSyntax.check(name, value)
     entries += (name -> value)
     this
 
+  /** Throws `IllegalArgumentException` for an invalid header; see [[HeaderSyntax]]. */
   def set(name: String, value: String): this.type =
+    HeaderSyntax.check(name, value)
     entries.filterInPlace((k, _) => !k.equalsIgnoreCase(name))
     entries += (name -> value)
     this
@@ -137,7 +167,7 @@ object Cookie:
                 case "max-age"  => maxAge = v.flatMap(_.toIntOption)
                 case "secure"   => secure = true
                 case "httponly" => httpOnly = true
-                case _           => ()
+                case _          => ()
             }
             Some(Cookie(name, value, path, domain, maxAge, secure, httpOnly))
           case _ => None

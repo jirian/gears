@@ -1,55 +1,43 @@
 package gears.async.asyncio.uring
 
-import asyncio.HandleSlot
 import gears.async.Async
 import gears.async.asyncio.{Buffer, Error, Result}
 import gears.async.file.{FileReader, FileSupport, FileWriter}
 import gears.util.either
 
-import java.nio.channels.ClosedChannelException
 import scala.scalanative.posix.fcntl.{O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY}
 import scala.scalanative.posix.unistd
 
-/** `O_CLOEXEC` on Linux; Scala Native's posixlib does not expose it. */
-private final val O_CLOEXEC = 0x80000
+import _root_.asyncio.HandleSlot
+import _root_.asyncio.uring.LinuxConstants.O_CLOEXEC
 
 final class UringFileReader private[uring] (
     private val fd: Int,
     scheduler: UringPerThreadScheduler
 ) extends FileReader:
-  private var closed = false
-
-  private def checkOpen(): Unit = if closed then throw new ClosedChannelException()
+  // Closing cancels a pending read, which then fails with `AsynchronousCloseException`.
+  private val guard = IoGuard()
 
   /** Reads at the descriptor's own position, which each read advances. */
   override def readBuf(buf: Buffer)(using Async): Result[Unit] = either:
-    checkOpen()
     val before = buf.position()
-    scheduler.await(reactor => reactor.ops.read(fd, buf))
+    scheduler.await(guard)(reactor => reactor.ops.read(fd, buf))
     if buf.position() == before then either.error(Error.EOF)
 
-  override def close(): Unit = synchronized:
-    if !closed then
-      closed = true
-      unistd.close(fd)
+  override def close(): Unit = if guard.close() then unistd.close(fd)
 
 final class UringFileWriter private[uring] (
     private val fd: Int,
     scheduler: UringPerThreadScheduler
 ) extends FileWriter:
-  private var closed = false
-
-  private def checkOpen(): Unit = if closed then throw new ClosedChannelException()
+  // Closing cancels a pending write, which then fails with `AsynchronousCloseException`.
+  private val guard = IoGuard()
 
   /** Writes at the descriptor's own position, which each write advances. */
   override def writeBuf(buf: Buffer)(using Async): Result[Unit] = either:
-    checkOpen()
-    while buf.hasRemaining() do scheduler.await(reactor => reactor.ops.writeFile(fd, buf))
+    while buf.hasRemaining() do scheduler.await(guard)(reactor => reactor.ops.writeFile(fd, buf))
 
-  override def close(): Unit = synchronized:
-    if !closed then
-      closed = true
-      unistd.close(fd)
+  override def close(): Unit = if guard.close() then unistd.close(fd)
 
 trait UringFileSupport(scheduler: UringPerThreadScheduler) extends FileSupport:
   type File = UringFileReader
@@ -65,5 +53,5 @@ trait UringFileSupport(scheduler: UringPerThreadScheduler) extends FileSupport:
 
   private def open(path: String, flags: Int, mode: Int)(using Async): Int =
     val opened = HandleSlot()
-    scheduler.await(reactor => reactor.ops.openAt(path, flags, mode, opened))
+    scheduler.await(null)(reactor => reactor.ops.openAt(path, flags, mode, opened))
     opened.clear()

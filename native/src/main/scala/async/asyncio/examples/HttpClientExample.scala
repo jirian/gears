@@ -1,9 +1,9 @@
 package gears.async.asyncio.examples
 
 import gears.async._
-import gears.async.net.{DnsSupport, TcpSupport}
+import gears.async.asyncio.uring.UringPerThreadSupport
 import gears.async.http._
-import gears.async.asyncio.uring.{NativeDnsSupport, UringPerThreadSupport}
+import gears.async.net.{DnsSupport, TcpSupport}
 
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
@@ -14,7 +14,9 @@ private def clientDemoRouter(): Router =
     .get("/")(_ => HttpResponse.text("Hello from gears!\n"))
     .get("/redirect")(_ => HttpResponse.redirect("/", HttpStatus.Found))
     .post("/echo")(req => HttpResponse.text(new String(req.body, StandardCharsets.UTF_8)))
-    .get("/set-cookie")(_ => HttpResponse.text("cookie set\n").withHeader("Set-Cookie", "session=abc123; Path=/; HttpOnly"))
+    .get("/set-cookie")(_ =>
+      HttpResponse.text("cookie set\n").withHeader("Set-Cookie", "session=abc123; Path=/; HttpOnly")
+    )
     .get("/items/{id}")(req => HttpResponse.text(s"item ${req.pathValue("id").getOrElse("?")}\n"))
 
 private def runClientDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOperations): Unit =
@@ -30,13 +32,17 @@ private def runClientDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncO
     val base = s"http://127.0.0.1:$port"
 
     val getResp = client.get(s"$base/")
-    println(s"GET / -> ${getResp.status.code} ${getResp.status.reason}: ${new String(getResp.body, StandardCharsets.UTF_8).trim}")
+    println(
+      s"GET / -> ${getResp.status.code} ${getResp.status.reason}: ${new String(getResp.body, StandardCharsets.UTF_8).trim}"
+    )
 
     val postResp = client.post(s"$base/echo", "round trip!".getBytes(StandardCharsets.UTF_8), "text/plain")
     println(s"POST /echo -> ${postResp.status.code}: ${new String(postResp.body, StandardCharsets.UTF_8).trim}")
 
     val redirectResp = client.get(s"$base/redirect")
-    println(s"GET /redirect -> ${redirectResp.status.code} (after following redirect): ${new String(redirectResp.body, StandardCharsets.UTF_8).trim}")
+    println(
+      s"GET /redirect -> ${redirectResp.status.code} (after following redirect): ${new String(redirectResp.body, StandardCharsets.UTF_8).trim}"
+    )
 
     val cookieResp = client.get(s"$base/set-cookie")
     println(s"GET /set-cookie -> Set-Cookie parsed as: ${cookieResp.cookies}")
@@ -44,7 +50,8 @@ private def runClientDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncO
     val itemResp = client.get(s"$base/items/42")
     println(s"GET /items/42 -> ${new String(itemResp.body, StandardCharsets.UTF_8).trim}")
 
-    val headResp = client.send(ClientRequest(HttpMethod.HEAD, Url.parse(s"$base/"), Headers.empty, Array.emptyByteArray))
+    val headResp =
+      client.send(ClientRequest(HttpMethod.HEAD, Url.parse(s"$base/"), Headers.empty, Array.emptyByteArray))
     println(s"HEAD / -> ${headResp.status.code}, body bytes: ${headResp.body.length} (should be 0)")
 
     val notFoundResp = client.get(s"$base/does-not-exist")
@@ -58,7 +65,6 @@ private def runClientDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncO
   if LinktimeInfo.isLinux then
     given support: UringPerThreadSupport = UringPerThreadSupport()
     given tcp: TcpSupport = support.tcpSupport
-    given dns: DnsSupport = NativeDnsSupport
+    given dns: DnsSupport = support.dnsSupport
     Async.blocking(runClientDemo(port))
-  else
-    throw new UnsupportedOperationException("no TCP backend wired up for this platform")
+  else throw new UnsupportedOperationException("no TCP backend wired up for this platform")

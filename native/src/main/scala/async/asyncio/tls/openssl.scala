@@ -2,25 +2,19 @@ package gears.async.asyncio.tls
 
 import scala.scalanative.unsafe._
 
-/** Raw `@extern` bindings to libssl/libcrypto (OpenSSL), just enough of the
-  * API surface for [[TlsStream]]'s "BIO pair" design: a client or server
-  * TLS session driven entirely through two in-memory buffers, never
-  * touching a socket itself - see `TlsStream`'s own doc for why.
+/** Raw `@extern` bindings to libssl/libcrypto (OpenSSL), just enough of the API surface for [[TlsStream]]'s "BIO pair"
+  * design: a client or server TLS session driven entirely through two in-memory buffers, never touching a socket itself -
+  * see `TlsStream`'s own doc for why.
   *
-  * `SSL`/`SSL_CTX`/`BIO`/`SSL_METHOD` are opaque handles here - this
-  * backend never looks inside them, only ever holds `Ptr[_]`s to them and
-  * passes those back into the functions below, exactly as C code would.
+  * `SSL`/`SSL_CTX`/`BIO`/`SSL_METHOD` are opaque handles here - this backend never looks inside them, only ever holds
+  * `Ptr[_]`s to them and passes those back into the functions below, exactly as C code would.
   *
-  * A few real OpenSSL functions are C *macros* wrapping `SSL_ctrl`/
-  * `BIO_ctrl` (`SSL_set_tlsext_host_name`, `BIO_pending`) rather than
-  * linkable symbols - unlike `io_uring_get_sqe`/`io_uring_cq_advance`
-  * (which needed a small C shim, see the uring backend's own history),
-  * these don't need one: `SSL_ctrl`/`BIO_ctrl` themselves *are* real,
-  * linkable functions, so the macros are reproduced here as plain Scala
-  * calls to `SSL_ctrl`/`BIO_ctrl` with the same constants the headers
-  * `#define` them with (`ssl.h`, `tls1.h`, `bio.h` - values pinned by
-  * OpenSSL's own stable public ABI, checked against this machine's
-  * `/usr/include/openssl` headers when writing this).
+  * A few real OpenSSL functions are C *macros* wrapping `SSL_ctrl`/ `BIO_ctrl` (`SSL_set_tlsext_host_name`,
+  * `BIO_pending`) rather than linkable symbols - unlike `io_uring_get_sqe`/`io_uring_cq_advance` (which needed a small
+  * C shim, see the uring backend's own history), these don't need one: `SSL_ctrl`/`BIO_ctrl` themselves *are* real,
+  * linkable functions, so the macros are reproduced here as plain Scala calls to `SSL_ctrl`/`BIO_ctrl` with the same
+  * constants the headers `#define` them with (`ssl.h`, `tls1.h`, `bio.h` - values pinned by OpenSSL's own stable public
+  * ABI, checked against this machine's `/usr/include/openssl` headers when writing this).
   */
 @extern
 private[tls] object openssl:

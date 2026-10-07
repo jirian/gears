@@ -91,9 +91,8 @@ class EpollPoller(epfd: Int) extends Closeable, Poller:
     val handle = PollHandle(fd)
     Zone.acquire: zone =>
       val event = alloc[epoll_event]()(using zone)
-      event.events =
-        (EPOLLET | (if read then EPOLLIN else 0) | (if write then EPOLLOUT
-                                                    else 0)).toUInt
+      event.events = (EPOLLET | (if read then EPOLLIN else 0) | (if write then EPOLLOUT
+                                                                 else 0)).toUInt
       event.data = fromRawPtr(Intrinsics.castObjectToRawPtr(handle))
       // get the fd flags and modify it if needed
       val statusFlags = fcntl.fcntl(fd, fcntl.F_GETFL, 0)
@@ -105,8 +104,7 @@ class EpollPoller(epfd: Int) extends Closeable, Poller:
             (statusFlags | fcntl.O_NONBLOCK)
           ) < 0
         then throw IOException(errno.errno)
-      if epoll_ctl(epfd, EPOLL_CTL_ADD, fd, event) == -1 then
-        throw IOException(errno.errno)
+      if epoll_ctl(epfd, EPOLL_CTL_ADD, fd, event) == -1 then throw IOException(errno.errno)
       handles += handle
 
       val cancel: Cancellable = () =>
@@ -150,8 +148,7 @@ class MonitorChange() extends Source[Try[Int]], Cancellable:
       val ls = listeners.toSeq
       listeners.clear()
       ls
-    for listener <- toLoop do
-      listener.completeNow(Failure(CancellationException()), this)
+    for listener <- toLoop do listener.completeNow(Failure(CancellationException()), this)
 
   // Increment the counter and trigger the listener if it exists.
   def update() =

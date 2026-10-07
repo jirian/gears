@@ -18,7 +18,7 @@ import java.nio.file.{Files, Paths}
 
   Async.blocking:
     fs.openWrite(path) match
-      case Left(e) => println(s"FAILED to open for writing: $e")
+      case Left(e)     => println(s"FAILED to open for writing: $e")
       case Right(file) =>
         try
           val bytes = content.getBytes(StandardCharsets.UTF_8)
@@ -27,12 +27,12 @@ import java.nio.file.{Files, Paths}
             val chunk = math.min(37, bytes.length - offset) // small, to force several writeBuf calls
             file.writeBuf(ByteBuffer.wrap(bytes, offset, chunk)) match
               case Right(()) => offset += chunk
-              case Left(e)    => throw new RuntimeException(s"write failed: $e")
+              case Left(e)   => throw new RuntimeException(s"write failed: $e")
           println(s"wrote ${bytes.length} bytes to $path")
         finally file.close()
 
     fs.openRead(path) match
-      case Left(e) => println(s"FAILED to reopen for reading: $e")
+      case Left(e)     => println(s"FAILED to reopen for reading: $e")
       case Right(file) =>
         try
           val buf = ByteBuffer.allocate(4096)

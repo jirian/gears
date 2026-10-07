@@ -1,10 +1,10 @@
 package gears.async.asyncio.uring
 
-import asyncio.uring.{BlockingPool, HostResolver, UringReactor}
-
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.scalanative.runtime.Continuations
 import scala.util.control.NonFatal
+
+import _root_.asyncio.uring.{BlockingPool, HostResolver, UringReactor}
 
 /** One OS thread of the scheduler: it runs gears tasks and drives its own [[UringReactor]] in between. A reactor is
   * single-threaded, so anything that touches it from another thread is hopped onto this one with [[onLoop]].
@@ -63,13 +63,18 @@ private[uring] final class UringShard(
     val thread = Thread.currentThread()
     thread.getUncaughtExceptionHandler().uncaughtException(thread, e)
 
+  /** Runs a gears task. One that throws is reported, rather than taking down the shard and every fiber on it. */
+  private def runTask(task: Runnable): Unit =
+    Continuations.handlersReset()
+    try task.run()
+    catch case NonFatal(e) => report(e)
+    finally Continuations.handlersReset()
+
   private def drainTasks(): Boolean =
     val r = taskQueue.poll()
     if r == null then false
     else
-      Continuations.handlersReset()
-      try r.run()
-      finally Continuations.handlersReset()
+      runTask(r)
       true
 
   /** Runs the reactor's ready completions, waiting up to `timeoutNanos` for one. A completion that throws is reported
@@ -91,9 +96,7 @@ private[uring] final class UringShard(
     val task = if fromGlobal != null then fromGlobal else stealFromSibling()
     if task == null then false
     else
-      Continuations.handlersReset()
-      try task.run()
-      finally Continuations.handlersReset()
+      runTask(task)
       true
 
   private def stealFromSibling(): Runnable =
@@ -109,13 +112,25 @@ private[uring] final class UringShard(
         i += 1
       stolen
 
+  @volatile private var running = true
+
+  /** Makes [[loop]] finish its current step, close the reactor, and return. */
+  private[uring] def stop(): Unit =
+    running = false
+    wake()
+
   private[uring] def loop(): Unit =
     Continuations.handlersReset()
-    while true do
-      val ranLoopWork = drainLoopQueue()
-      val ranTasks = drainTasks()
-      val ranCompletions = pollReactor(0)
-      if !ranLoopWork && !ranTasks && !ranCompletions && !tryStealOrGlobal() then pollReactor(PollTimeoutNanos)
+    try
+      while running do
+        val ranLoopWork = drainLoopQueue()
+        val ranTasks = drainTasks()
+        val ranCompletions = pollReactor(0)
+        if !ranLoopWork && !ranTasks && !ranCompletions && !tryStealOrGlobal() then pollReactor(PollTimeoutNanos)
+    finally
+      // On this thread, since the reactor is single-threaded. Its pending ops are cancelled.
+      try reactor.close()
+      catch case NonFatal(e) => report(e)
 
 private[uring] final class UringShardThread(val shard: UringShard) extends Thread(() => shard.loop())
 

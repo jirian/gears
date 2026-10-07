@@ -71,16 +71,16 @@ final class Router extends Handler:
 
   def serveHTTP(w: ResponseWriter, request: HttpRequest)(using Async): Unit =
     candidates(request.path).sortBy(-_._1.pattern.length).headOption match
-      case None => dispatchTo(Handler.of(_ => HttpResponse.notFound(request.path)), w, request)
+      case None                    => dispatchTo(Handler.of(_ => HttpResponse.notFound(request.path)), w, request)
       case Some((reg, pathValues)) =>
         val matched = request.copy(pathValues = pathValues)
         reg.anyMethod match
           case Some(handler) => dispatchTo(handler, w, matched)
-          case None =>
+          case None          =>
             val lookupMethod = if request.method == HttpMethod.HEAD then HttpMethod.GET else request.method
             reg.handlers.get(lookupMethod) match
               case Some(handler) => dispatchTo(handler, w, matched)
-              case None =>
+              case None          =>
                 val allowed = reg.handlers.keys.toSeq
                 val withHead = if allowed.contains(HttpMethod.GET) then allowed :+ HttpMethod.HEAD else allowed
                 dispatchTo(Handler.of(_ => HttpResponse.methodNotAllowed(withHead)), w, matched)

@@ -17,8 +17,8 @@ import uring.*
 import uringOps.*
 
 /** Everything `UringReactor` can run: its `Op` member type. Uring-specific code may construct the classes below
-  * directly, or use the extra builders on `reactor.ops`; code that only knows the `Reactor` interface builds them through
-  * `reactor.ops`.
+  * directly, or use the extra builders on `reactor.ops`; code that only knows the `Reactor` interface builds them
+  * through `reactor.ops`.
   */
 sealed abstract class UringOp[Owner] {
 

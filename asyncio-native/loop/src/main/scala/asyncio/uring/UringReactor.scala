@@ -114,7 +114,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   def submit[C <: Op](op: C, completion: Completion[C]): Unit = {
     if closed then throw new IllegalStateException("The reactor is closed")
     op match {
-      case _: Repeatable => ()
+      case _: Repeatable   => ()
       case one: UringOp[?] =>
         if one.submitted then throw new IllegalStateException(s"$op is not Repeatable and was already submitted")
     }
@@ -142,7 +142,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
                 pendingPromises -= promise
                 throw t
             }
-          case _                       => () // Completed by whoever holds it.
+          case _ => () // Completed by whoever holds it.
         }
     }
     op.submitted = true
@@ -259,8 +259,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     if id == WakeId then {
       wakeInFlight = false
       armWake() // promises are delivered by the loop itself
-    }
-    else if id != InternalId then
+    } else if id != InternalId then
       inFlight.remove(id) match {
         case None         => ()
         case Some(flight) =>
@@ -273,8 +272,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
             val cancelled = flight.cancelled
             flight.cancelled = null
             if cancelled != null then cancelled.cancelled()
-          }
-          else {
+          } else {
             // A failing op fails its own completion; an exception thrown by the completion itself still escapes.
             var failure: Throwable | Null = null
             val done =
@@ -377,8 +375,9 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   }
 
   /** Cancels every pending op, then waits until the kernel has let go of every ring op and every running blocking task
-    * has returned, since until then they may still write to their ops' buffers and slots. Then it closes the eventfd and
-    * the ring, and only then runs the cancelled completions' `onCancel`.
+    * has returned, since until then they may still write to their ops' buffers and slots. Ring ops the kernel has not
+    * released after a few seconds are abandoned, kept reachable forever instead. Then it closes the eventfd and the
+    * ring, and only then runs the cancelled completions' `onCancel`.
     */
   def close(): Unit = {
     if !closed then {
@@ -419,23 +418,28 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         try flush()
         catch { case _: IOException => () }
       }
-      while inFlight.nonEmpty || wakeInFlight do {
+      val deadline = System.nanoTime() + UringReactor.CloseTimeoutNanos
+      while (inFlight.nonEmpty || wakeInFlight) && System.nanoTime() < deadline do {
         if unsubmitted then flush()
         while reapedCursor < reapedCount do {
           val i = reapedCursor
           reapedCursor += 1
           val id = reapedIds(i)
           if id == WakeId then wakeInFlight = false
-          else if id != InternalId then inFlight.remove(id).foreach { flight =>
-            flight.op.discard(reapedResults(i))
-            flight.op.inFlight = null
-          }
+          else if id != InternalId then
+            inFlight.remove(id).foreach { flight =>
+              flight.op.discard(reapedResults(i))
+              flight.op.inFlight = null
+            }
         }
         if inFlight.nonEmpty || wakeInFlight then {
           io_uring_wait_cqe_timeout(ring, cqeSlot, waitTimeout(10_000_000L))
           reap()
         }
       }
+      // An op the kernel could not cancel in time may still write to its buffers after the ring is gone. Rather than
+      // wait forever, keep this reactor, and with it those ops and their buffers, reachable for the rest of the process.
+      if inFlight.nonEmpty || wakeInFlight then UringReactor.abandoned.add(this)
       wakeLock.synchronized {
         closed = true
         unistd.close(wakeFd)
@@ -458,6 +462,12 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 }
 
 object UringReactor {
+
+  /** How long `close` waits for the kernel to release cancelled ops before abandoning them. */
+  private val CloseTimeoutNanos = 5_000_000_000L
+
+  /** Closed reactors whose ops the kernel had not released in time, kept reachable so their buffers are never freed. */
+  private val abandoned = java.util.concurrent.ConcurrentLinkedQueue[UringReactor]()
 
   /** Opens a reactor on a new ring with room for `entries` submissions at a time. Close it when done. */
   def open(

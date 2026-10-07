@@ -3,12 +3,13 @@
 package gears.async.asyncio
 
 import gears.async.{Async, Future, Listener}
-import scala.concurrent.Future as ScalaFuture
-import scala.util.Try
-import scala.concurrent.CanAwait
-import scala.concurrent.duration.Duration
-import scala.concurrent.ExecutionContext
+
 import java.util.concurrent.CancellationException
+import scala.concurrent.CanAwait
+import scala.concurrent.ExecutionContext
+import scala.concurrent.Future as ScalaFuture
+import scala.concurrent.duration.Duration
+import scala.util.Try
 
 extension [T](scalaFut: ScalaFuture[T])
   /** Convert the given [[ScalaFuture]] into a Gears [[Future]]. */
@@ -24,8 +25,8 @@ extension [T](scalaFut: ScalaFuture[T])
 extension [T](fut: Future[T])
   /** Convert the given [[Future]] into a Scala [[ScalaFuture]].
     *
-    * Note that if [[fut]] is cancelled, the resulting [[ScalaFuture]] will also
-    * be resolved with a [[CancellationException]].
+    * Note that if [[fut]] is cancelled, the resulting [[ScalaFuture]] will also be resolved with a
+    * [[CancellationException]].
     */
   def asScala =
     val p = scala.concurrent.Promise[T]()

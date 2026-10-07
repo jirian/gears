@@ -1,8 +1,8 @@
 package gears.async.asyncio.examples
 
 import gears.async._
-import gears.async.asyncio.{Error, Result}
 import gears.async.asyncio.uring.UringPerThreadSupport
+import gears.async.asyncio.{Error, Result}
 import gears.async.file.FileSupport
 
 import java.nio.ByteBuffer
@@ -34,7 +34,7 @@ import java.nio.file.{Files, Paths}
 
   Async.blocking:
     fs.openRead(path) match
-      case Left(e) => println(s"FAILED to open: $e")
+      case Left(e)     => println(s"FAILED to open: $e")
       case Right(file) =>
         try
           val text = readAll(file.readBuf)
@@ -42,7 +42,7 @@ import java.nio.file.{Files, Paths}
         finally file.close()
 
     fs.openRead(path) match
-      case Left(e) => println(s"FAILED to open (second time): $e")
+      case Left(e)     => println(s"FAILED to open (second time): $e")
       case Right(file) =>
         try
           // Wrap in the shared BufferedReader and read through *its*

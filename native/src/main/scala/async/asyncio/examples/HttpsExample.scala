@@ -1,10 +1,10 @@
 package gears.async.asyncio.examples
 
 import gears.async._
-import gears.async.net.{DnsSupport, TcpSupport}
-import gears.async.http._
-import gears.async.asyncio.uring.{NativeDnsSupport, UringPerThreadSupport}
 import gears.async.asyncio.tls.NativeTlsSupport
+import gears.async.asyncio.uring.UringPerThreadSupport
+import gears.async.http._
+import gears.async.net.{DnsSupport, TcpSupport}
 
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
@@ -17,7 +17,8 @@ private def generateSelfSignedCert(certFile: String, keyFile: String): Unit =
   val cmd =
     s"openssl req -x509 -newkey rsa:2048 -nodes -keyout $keyFile -out $certFile -days 1 -subj /CN=localhost >/dev/null 2>&1"
   val status = Zone.acquire(zone => stdlib.system(toCString(cmd)(using zone)))
-  if status != 0 then throw new RuntimeException(s"failed to generate a self-signed certificate (is 'openssl' on PATH?), exit=$status")
+  if status != 0 then
+    throw new RuntimeException(s"failed to generate a self-signed certificate (is 'openssl' on PATH?), exit=$status")
 
 private def deleteFile(path: String): Unit =
   val _ = Zone.acquire(zone => stdio.remove(toCString(path)(using zone)))
@@ -46,9 +47,13 @@ private def runHttpsDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOp
     // A client that trusts our throwaway certificate specifically (the CA
     // it was self-signed with, in this case the cert itself) - a real,
     // fully verified TLS handshake, not verification disabled.
-    val trustingClient = Client(Transport(tls = Some(NativeTlsSupport), tlsContext = _.clientContext(verify = true, caFile = Some(certFile))))
+    val trustingClient = Client(
+      Transport(tls = Some(NativeTlsSupport), tlsContext = _.clientContext(verify = true, caFile = Some(certFile)))
+    )
     val resp = trustingClient.get(s"https://localhost:$port/")
-    println(s"[trusting client]  GET / -> ${resp.status.code} ${resp.status.reason}: ${new String(resp.body, StandardCharsets.UTF_8).trim}")
+    println(
+      s"[trusting client]  GET / -> ${resp.status.code} ${resp.status.reason}: ${new String(resp.body, StandardCharsets.UTF_8).trim}"
+    )
 
     // A client using only the system trust store (the default, and what a
     // real browser would use) - must correctly reject this self-signed
@@ -57,7 +62,8 @@ private def runHttpsDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOp
     try
       strictClient.get(s"https://localhost:$port/")
       println("[strict client]    UNEXPECTEDLY SUCCEEDED - certificate verification is not being enforced!")
-    catch case e: Exception => println(s"[strict client]    correctly rejected the untrusted certificate: ${e.getMessage}")
+    catch
+      case e: Exception => println(s"[strict client]    correctly rejected the untrusted certificate: ${e.getMessage}")
 
     listener.close()
     deleteFile(certFile)
@@ -69,7 +75,6 @@ private def runHttpsDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOp
   if LinktimeInfo.isLinux then
     given support: UringPerThreadSupport = UringPerThreadSupport()
     given tcp: TcpSupport = support.tcpSupport
-    given dns: DnsSupport = NativeDnsSupport
+    given dns: DnsSupport = support.dnsSupport
     Async.blocking(runHttpsDemo(port))
-  else
-    throw new UnsupportedOperationException("no TCP backend wired up for this platform")
+  else throw new UnsupportedOperationException("no TCP backend wired up for this platform")

@@ -1,11 +1,11 @@
-import asyncio.*
-import asyncio.uring.{BlockingPool, HostResolver, UringReactor}
-import asyncio.unsafe.NativeBuffer
-
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import scala.collection.mutable.ArrayBuffer
 import scala.scalanative.unsafe.Zone
+
+import asyncio.*
+import asyncio.unsafe.NativeBuffer
+import asyncio.uring.{BlockingPool, HostResolver, UringReactor}
 
 /** The uring reactor, driven through the `asyncio.Reactor` interface wherever it can be: the tests on `Reactor.scoped`
   * would run unchanged on any reactor whose handles are POSIX descriptors, such as the kqueue one. The few that need
@@ -52,9 +52,11 @@ class UringReactorSuite extends munit.FunSuite:
             read,
             _ =>
               val got = received.position()
-              r.submit(read, _ => // repeatable: the same op reads again, and finds the end of the stream
-                assertEquals(received.position(), got, "nothing is added at end of stream")
-                r.stop()
+              r.submit(
+                read,
+                _ => // repeatable: the same op reads again, and finds the end of the stream
+                  assertEquals(received.position(), got, "nothing is added at end of stream")
+                  r.stop()
               )
           )
       )
@@ -105,14 +107,16 @@ class UringReactorSuite extends munit.FunSuite:
         _ =>
           serverHandle = accepted.clear()
           val read = r.ops.read(serverHandle, request)
-          r.submit(read, _ =>
-            if request.position() == 7 then
-              r.submit(
-                read,
-                _ =>
-                  sawEof = request.position() == 7
-                  r.submit(r.ops.write(serverHandle, bytes("reply")), _ => ())
-              )
+          r.submit(
+            read,
+            _ =>
+              if request.position() == 7 then
+                r.submit(
+                  read,
+                  _ =>
+                    sawEof = request.position() == 7
+                    r.submit(r.ops.write(serverHandle, bytes("reply")), _ => ())
+                )
           )
       )
       r.submit(
@@ -321,7 +325,10 @@ class UringReactorSuite extends munit.FunSuite:
           attempts += 1
           r.handles.readNow(in, buf) > 0
         r.submit(drain, _ => r.stop())
-        r.submit(r.ops.timer(20), _ => r.handles.writeNow(out, NativeBuffer.of("ready".getBytes(StandardCharsets.UTF_8))))
+        r.submit(
+          r.ops.timer(20),
+          _ => r.handles.writeNow(out, NativeBuffer.of("ready".getBytes(StandardCharsets.UTF_8)))
+        )
         r.run()
         assertEquals(text(buf), "ready")
         assert(attempts >= 1)
@@ -407,3 +414,27 @@ class UringReactorSuite extends munit.FunSuite:
       r.run()
       assertEquals(events.synchronized(events.toList), List("interrupted", "cancel"))
       intercept[IllegalStateException](result.clear()) // nothing is written after a cancel
+
+  test("readNow refuses a read-only buffer before consuming anything"):
+    Reactor.scoped: r =>
+      val (in, out) = r.handles.pipe()
+      r.handles.writeNow(out, bytes("kept"))
+      intercept[java.nio.ReadOnlyBufferException](r.handles.readNow(in, ByteBuffer.allocate(8).asReadOnlyBuffer()))
+      val buf = ByteBuffer.allocate(8)
+      assertEquals(r.handles.readNow(in, buf), 4, "the bytes are still there")
+      assertEquals(text(buf), "kept")
+      r.handles.close(in)
+      r.handles.close(out)
+
+  test("vectored writes drain read-only buffers too"):
+    UringReactor.scoped(): r =>
+      val (in, out) = r.handles.pipe()
+      val first = bytes("read").asReadOnlyBuffer()
+      val second = bytes("only").asReadOnlyBuffer()
+      val received = ByteBuffer.allocate(16)
+      r.submit(r.ops.writev(out, Array(first, second)), _ => r.submit(r.ops.read(in, received), _ => r.stop()))
+      r.run()
+      assertEquals(text(received), "readonly")
+      assert(!first.hasRemaining && !second.hasRemaining)
+      r.handles.close(in)
+      r.handles.close(out)

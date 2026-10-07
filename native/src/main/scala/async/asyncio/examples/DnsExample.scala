@@ -1,20 +1,18 @@
 package gears.async.asyncio.examples
 
 import gears.async._
+import gears.async.asyncio.uring.UringPerThreadSupport
 import gears.async.net.DnsSupport
-import gears.async.asyncio.uring.{NativeDnsSupport, UringPerThreadSupport}
 
-/** Live verification of the new async [[DnsSupport]]
-  * (`NativeDnsSupport`): resolves `localhost` (a real hostname, not an IP
-  * literal, so this genuinely exercises resolution rather than just
-  * parsing) concurrently with other work on the same shard, to prove it
-  * doesn't block the calling fiber's carrier thread - then, best-effort,
-  * a real external hostname too (skipped gracefully if this environment
-  * has no outbound network access, rather than treated as a failure).
+/** Live verification of the async [[DnsSupport]] (the scheduler's `dnsSupport`, which runs lookups as reactor `resolve`
+  * ops on the blocker pool): resolves `localhost` (a real hostname, not an IP literal, so this genuinely exercises
+  * resolution rather than just parsing) concurrently with other work on the same shard, to prove it doesn't block the
+  * calling fiber's carrier thread - then, best-effort, a real external hostname too (skipped gracefully if this
+  * environment has no outbound network access, rather than treated as a failure).
   */
 @main def dnsExample(): Unit =
   given support: UringPerThreadSupport = UringPerThreadSupport()
-  given dns: DnsSupport = NativeDnsSupport
+  given dns: DnsSupport = support.dnsSupport
 
   Async.blocking:
     Async.group:
@@ -27,7 +25,7 @@ import gears.async.asyncio.uring.{NativeDnsSupport, UringPerThreadSupport}
       val ticks = new java.util.concurrent.atomic.AtomicInteger(0)
       val ticker = Future:
         while running.get() do
-          Thread.sleep(2)
+          AsyncOperations.sleep(2) // suspends; Thread.sleep would block the shard thread itself
           ticks.incrementAndGet()
 
       val localhost = DnsSupport.resolve("localhost")
@@ -43,10 +41,14 @@ import gears.async.asyncio.uring.{NativeDnsSupport, UringPerThreadSupport}
       try
         DnsSupport.resolve("this-host-definitely-does-not-exist.invalid")
         println("UNEXPECTEDLY resolved a nonexistent hostname")
-      catch case e: java.net.UnknownHostException => println(s"correctly failed to resolve a nonexistent hostname: ${e.getMessage}")
+      catch
+        case e: java.net.UnknownHostException =>
+          println(s"correctly failed to resolve a nonexistent hostname: ${e.getMessage}")
 
       running.set(false)
       ticker.await
-      println(s"ticker fiber ran concurrently throughout: ${ticks.get()} total ticks (proves resolve() never blocked the shard thread)")
+      println(
+        s"ticker fiber ran concurrently throughout: ${ticks.get()} total ticks (proves resolve() never blocked the shard thread)"
+      )
 
   System.exit(0)

@@ -1,9 +1,9 @@
 package gears.async.asyncio.examples
 
 import gears.async._
-import gears.async.net.TcpSupport
-import gears.async.http.{HttpResponse, Router, serve}
 import gears.async.asyncio.uring.UringPerThreadSupport
+import gears.async.http.{HttpResponse, Router, serve}
+import gears.async.net.TcpSupport
 
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
@@ -28,5 +28,4 @@ private def runServer(port: Int, backendName: String)(using Async, TcpSupport, A
     given support: UringPerThreadSupport = UringPerThreadSupport()
     given tcp: TcpSupport = support.tcpSupport
     Async.blocking(runServer(port, "uring"))
-  else
-    throw new UnsupportedOperationException("no TCP backend wired up for this platform")
+  else throw new UnsupportedOperationException("no TCP backend wired up for this platform")

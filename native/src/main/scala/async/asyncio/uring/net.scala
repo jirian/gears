@@ -1,6 +1,5 @@
 package gears.async.asyncio.uring
 
-import asyncio.{Address, HandleSlot, Slot}
 import gears.async.Async
 import gears.async.asyncio.Buffer
 import gears.async.asyncio.Error
@@ -14,8 +13,8 @@ import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketAddress
-import java.nio.charset.StandardCharsets
 import java.nio.channels.ClosedChannelException
+import java.nio.charset.StandardCharsets
 import scala.scalanative.posix.arpa.inet._
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.netinet.in.IPPROTO_TCP
@@ -23,17 +22,15 @@ import scala.scalanative.posix.netinet.tcp.TCP_NODELAY
 import scala.scalanative.posix.string.{memcpy, strerror}
 import scala.scalanative.posix.sys.{socket => posixSocket}
 import scala.scalanative.posix.unistd
+import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
-import scala.scalanative.runtime.ByteArray
 
-import asyncio.unsafe.PosixSockets
-import asyncio.unsafe.PosixFileOps
-import asyncio.uring.SocketAddresses
-
-/** Linux values; Scala Native's posixlib does not expose them. */
-private[uring] final val SOCK_NONBLOCK = 0x800
-private[uring] final val SOCK_CLOEXEC = 0x80000
+import _root_.asyncio.unsafe.PosixFileOps
+import _root_.asyncio.unsafe.PosixSockets
+import _root_.asyncio.uring.LinuxConstants.{SOCK_CLOEXEC, SOCK_NONBLOCK}
+import _root_.asyncio.uring.SocketAddresses
+import _root_.asyncio.{Address, HandleSlot, Slot}
 
 /** A Unix domain socket address, for `TcpSupport` and `UdpSupport` on this backend. Scala Native's javalib has no
   * `java.net.UnixDomainSocketAddress`, so referring to it makes any program using these supports fail to link.
@@ -58,7 +55,7 @@ private[uring] def socketFamily(address: SocketAddress): Int =
       posixSocket.AF_INET6
     case inet: InetSocketAddress if inet.getAddress != null => posixSocket.AF_INET
     case inet: InetSocketAddress => throw IllegalArgumentException(s"Unresolved address: $inet")
-    case other => throw IllegalArgumentException(s"Unsupported socket address: $other")
+    case other                   => throw IllegalArgumentException(s"Unsupported socket address: $other")
 
 private[uring] def fillSockAddr(out: Ptr[Byte], addr: SocketAddress): posixSocket.socklen_t =
   val storage = SocketAddresses.storage()
@@ -110,9 +107,9 @@ private[uring] def fromAddress(address: Address): SocketAddress =
     case Address.Unix(path)       => UnixSocketAddress(path)
 
 private[uring] def toAddress(address: SocketAddress): Address = address match
-  case unix: UnixSocketAddress      => Address.Unix(unix.path)
-  case inet: InetSocketAddress       => toAddress(inet)
-  case other                         => throw IOException(s"Unsupported socket address: $other")
+  case unix: UnixSocketAddress => Address.Unix(unix.path)
+  case inet: InetSocketAddress => toAddress(inet)
+  case other                   => throw IOException(s"Unsupported socket address: $other")
 
 private[uring] def unlinkSocket(path: String): Unit =
   Zone.acquire { implicit z => PosixFileOps.safeUnlink(toCString(path, StandardCharsets.UTF_8)) }
@@ -125,11 +122,11 @@ private[uring] def applySocketOption(fd: Int, opt: SocketOption): Unit =
       if posixSocket.setsockopt(fd, level, name, p.asInstanceOf[Ptr[Byte]], sizeof[CInt].toUInt) < 0 then
         throw posixError("setsockopt failed")
     opt match
-      case SocketOption.sendBufSize(n) => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_SNDBUF, n)
-      case SocketOption.recvBufSize(n) => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_RCVBUF, n)
-      case SocketOption.keepAlive(k)   => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_KEEPALIVE, if k then 1 else 0)
-      case SocketOption.reuseAddr(r)   => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_REUSEADDR, if r then 1 else 0)
-      case SocketOption.noDelay(nd)    => setInt(IPPROTO_TCP, TCP_NODELAY, if nd then 1 else 0)
+      case SocketOption.sendBufSize(n)   => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_SNDBUF, n)
+      case SocketOption.recvBufSize(n)   => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_RCVBUF, n)
+      case SocketOption.keepAlive(k)     => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_KEEPALIVE, if k then 1 else 0)
+      case SocketOption.reuseAddr(r)     => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_REUSEADDR, if r then 1 else 0)
+      case SocketOption.noDelay(nd)      => setInt(IPPROTO_TCP, TCP_NODELAY, if nd then 1 else 0)
       case SocketOption.linger(interval) =>
         // Java convention: a negative value disables lingering.
         val p = alloc[posixSocket.linger]()(using zone)
@@ -151,33 +148,22 @@ class UringTcpStream private[uring] (
     override val remoteAddress: SocketAddress
 ) extends net.TcpStream:
 
-  private var closed = false
+  // Closing cancels pending reads and writes, which then fail with `AsynchronousCloseException`.
+  private val guard = IoGuard()
 
-  private def checkOpen(): Unit = synchronized:
-    if closed then throw new ClosedChannelException()
+  override def close(): Unit = if guard.close() then unistd.close(fd)
 
-  override def close(): Unit = synchronized:
-    if !closed then
-      closed = true
-      unistd.close(fd)
+  override def shutdownOutput()(using Async): Unit = guard.whileOpen(shutdownSocket(fd, posixSocket.SHUT_WR))
 
-  override def shutdownOutput()(using Async): Unit =
-    checkOpen()
-    shutdownSocket(fd, posixSocket.SHUT_WR)
-
-  override def shutdownInput()(using Async): Unit =
-    checkOpen()
-    shutdownSocket(fd, posixSocket.SHUT_RD)
+  override def shutdownInput()(using Async): Unit = guard.whileOpen(shutdownSocket(fd, posixSocket.SHUT_RD))
 
   override def readBuf(buf: Buffer)(using Async): Result[Unit] = either:
-    checkOpen()
     val before = buf.position()
-    scheduler.await(reactor => reactor.ops.read(fd, buf))
+    scheduler.await(guard)(reactor => reactor.ops.read(fd, buf))
     if buf.position() == before then either.error(Error.EOF)
 
   override def writeBuf(buf: Buffer)(using Async): Result[Unit] = either:
-    checkOpen()
-    while buf.hasRemaining() do scheduler.await(reactor => reactor.ops.write(fd, buf))
+    while buf.hasRemaining() do scheduler.await(guard)(reactor => reactor.ops.write(fd, buf))
 
 class UringTcpListener private[uring] (
     val fd: Int,
@@ -187,21 +173,17 @@ class UringTcpListener private[uring] (
 ) extends net.TcpListener:
   type Stream = UringTcpStream
 
-  private var closed = false
+  // Closing cancels a pending accept, which then fails with `AsynchronousCloseException`.
+  private val guard = IoGuard()
 
-  private def checkOpen(): Unit = synchronized:
-    if closed then throw new ClosedChannelException()
-
-  override def close(): Unit = synchronized:
-    if !closed then
-      closed = true
+  override def close(): Unit =
+    if guard.close() then
       unistd.close(fd)
       if unixPath != null then unlinkSocket(unixPath.nn)
 
   override def accept()(using Async): Result[Stream] = either:
-    checkOpen()
     val accepted = HandleSlot()
-    scheduler.await(reactor => reactor.ops.accept(fd, accepted))
+    scheduler.await(guard)(reactor => reactor.ops.accept(fd, accepted))
     val clientFd = accepted.clear()
     closeFdOnFailure(clientFd):
       UringTcpStream(clientFd, scheduler, localAddress, getPeerAddress(clientFd))
@@ -213,27 +195,22 @@ class UringUdpSocket private[uring] (
     private val unixPath: String | Null = null
 ) extends net.UdpSocket:
 
-  private var closed = false
+  // Closing cancels pending sends and receives, which then fail with `AsynchronousCloseException`.
+  private val guard = IoGuard()
 
-  private def checkOpen(): Unit = synchronized:
-    if closed then throw new ClosedChannelException()
-
-  override def close(): Unit = synchronized:
-    if !closed then
-      closed = true
+  override def close(): Unit =
+    if guard.close() then
       unistd.close(fd)
       if unixPath != null then unlinkSocket(unixPath.nn)
 
   override def sendTo(buf: Buffer, target: SocketAddress)(using Async): Result[Unit] = either:
-    checkOpen()
-    scheduler.await(reactor => reactor.ops.send(fd, buf, toAddress(target)))
+    scheduler.await(guard)(reactor => reactor.ops.send(fd, buf, toAddress(target)))
 
   override def receiveFrom(buf: Buffer)(using Async): Result[SocketAddress] = either:
-    checkOpen()
     // The op fills its buffer from the start and flips it, so give it the free part of `buf` only.
     val free = buf.slice()
     val sender = Slot[Address]()
-    scheduler.await(reactor => reactor.ops.receive(fd, free, sender))
+    scheduler.await(guard)(reactor => reactor.ops.receive(fd, free, sender))
     buf.position(buf.position() + free.remaining())
     fromAddress(sender.clear())
 
@@ -278,7 +255,8 @@ trait UringTcpSupport(scheduler: UringPerThreadScheduler) extends net.TcpSupport
         if posixSocket.connect(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize) < 0
           && errno.errno != errno.EINPROGRESS
         then throw posixError(s"Failed to connect to $address")
-      scheduler.await(reactor => reactor.ops.connect(fd)) // waits for the connection the call above started
+      // Waits for the connection the call above started. No guard yet: until the stream exists, closeFdOnFailure owns fd.
+      scheduler.await(null)(reactor => reactor.ops.connect(fd))
       UringTcpStream(fd, scheduler, localAddress = getLocalAddress(fd), remoteAddress = address)
 
   override def listen(address: SocketAddress, options: Seq[SocketOption])(using

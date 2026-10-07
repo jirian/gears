@@ -49,9 +49,7 @@ trait Poller:
   def wake(): Unit
 
 /** Spawns a single thread that does all the polling. */
-class ExecutorWithPollThread(val exec: ExecutionContext, val poller: Poller)
-    extends ExecutionContext
-    with Scheduler {
+class ExecutorWithPollThread(val exec: ExecutionContext, val poller: Poller) extends ExecutionContext with Scheduler {
   import scala.collection.mutable
   private case class Sleeper(wakeTime: Deadline, toRun: Runnable):
     var isCancelled = false

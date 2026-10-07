@@ -21,9 +21,9 @@ package asyncio.uring
 import scala.scalanative.libc.stddef._
 import scala.scalanative.posix.signal.sigset_t
 import scala.scalanative.posix.sys.socket._
+import scala.scalanative.runtime.Intrinsics._
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
-import scala.scalanative.runtime.Intrinsics._
 
 @extern
 private[uring] object uring {
@@ -180,7 +180,7 @@ private[uring] object uringOps {
       op: Int,
       sqe: Ptr[io_uring_sqe],
       fd: Int,
-      addr: Ptr[_],
+      addr: Ptr[?],
       len: CUnsignedInt,
       offset: __u64
   ): Unit = {
@@ -285,9 +285,8 @@ private[uring] object uringOps {
       offset: __u64
   ): Unit = io_uring_prep_rw(IORING_OP_WRITEV, sqe, fd, iovecs.asInstanceOf[Ptr[Byte]], count, offset)
 
-  /** `dfd`/`path`/`flags`/`mode` match `openat(2)` exactly - pass
-    * `AT_FDCWD` for `dfd` to resolve a relative `path` against the
-    * process's current working directory the way plain `open(2)` would.
+  /** `dfd`/`path`/`flags`/`mode` match `openat(2)` exactly - pass `AT_FDCWD` for `dfd` to resolve a relative `path`
+    * against the process's current working directory the way plain `open(2)` would.
     */
   def io_uring_prep_openat(
       sqe: Ptr[io_uring_sqe],
@@ -417,8 +416,7 @@ private[uring] object uringOps {
     inline def flags_=(flags: __u32): Unit = !io_uring_cqe.at3 = flags
   }
 
-  implicit final class __kernel_timespecOps(val __kernel_timespec: Ptr[__kernel_timespec])
-      extends AnyVal {
+  implicit final class __kernel_timespecOps(val __kernel_timespec: Ptr[__kernel_timespec]) extends AnyVal {
     inline def tv_sec: __kernel_time64_t = __kernel_timespec._1
     inline def tv_sec_=(tv_sec: __kernel_time64_t): Unit = !__kernel_timespec.at1 = tv_sec
     inline def tv_nsec: CLongLong = __kernel_timespec._2

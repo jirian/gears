@@ -5,22 +5,22 @@ import gears.async.asyncio.Buffer
 import gears.async.asyncio.Error
 import gears.async.asyncio.Result
 import gears.async.net
+import gears.async.net.SocketOption
 import gears.util.either
 
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.SocketAddress
+import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.nio.channels.Channels
+import scala.annotation.tailrec
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.sys.{socket => posixSocket}
 import scala.scalanative.posix.unistd
 import scala.scalanative.runtime._
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
-import scala.annotation.tailrec
-import java.net.SocketException
-import java.io.InputStream
-import java.net.SocketTimeoutException
-import gears.async.net.SocketOption
 
 class EpollTcpStream private[epoll] (
     socket: java.net.Socket,
@@ -56,8 +56,7 @@ class EpollTcpStream private[epoll] (
         loop(handle.read.counter)
         // )
     }
-    if Channels.newChannel(inputStream).read(buf) == -1 then
-      either.error(Error.EOF)
+    if Channels.newChannel(inputStream).read(buf) == -1 then either.error(Error.EOF)
 
   override def writeBuf(buf: Buffer)(using Async): Result[Unit] = either:
     val outputStream = new OutputStream:
@@ -114,8 +113,7 @@ class EpollTcpListener private[epoll] (
         val conn = socket.accept()
         either.ok(EpollTcpStream(conn, poller))
       catch
-        case _: SocketException
-            if errno.errno == errno.EAGAIN || errno.errno == errno.EWOULDBLOCK =>
+        case _: SocketException if errno.errno == errno.EAGAIN || errno.errno == errno.EWOULDBLOCK =>
           loop(handle.read.onUpdate(current))
         case e => throw e
     loop(handle.read.counter)

@@ -3,8 +3,7 @@ package asyncio.kqueue
 import java.nio.ByteBuffer
 
 import asyncio.Address
-import asyncio.BlockingPool
-import asyncio.HostResolver
+import asyncio.HandleSlot
 import asyncio.Interest
 import asyncio.Ops
 import asyncio.Repeatable
@@ -14,50 +13,45 @@ import asyncio.Slot
 /** Everything `KqueueReactor` can run: its `Op` member type. Kqueue-specific code may construct the classes below
   * directly; code that only knows the `Reactor` interface builds them through `reactor.ops`.
   */
-sealed trait KqueueOp[Owner] {
+sealed trait KqueueOp {
 
   /** Whether this op has been submitted before, so the reactor can refuse to run a one-shot op twice. */
   @volatile private[kqueue] var submitted = false
 }
 
 /** Builds the ops `KqueueReactor` understands. */
-final class KqueueOps[Owner](resolver: HostResolver) extends Ops[KqueueOp[Owner], Int, Integer] {
-  def read(fd: Int, buf: ByteBuffer): ReadIntoBuffer[Owner] = ReadIntoBuffer(fd, buf)
-  def readv(fd: Int, bufs: Array[ByteBuffer]): ReadVector[Owner] = new ReadVector(fd, bufs)
-  def write(fd: Int, buf: ByteBuffer): WriteFromBuffer[Owner] = WriteFromBuffer(fd, buf)
-  def writev(fd: Int, bufs: Array[ByteBuffer]): WriteVector[Owner] = new WriteVector(fd, bufs)
-  def accept(fd: Int, into: Slot[Integer]): Accept[Owner] = Accept(fd, into)
-  def connect(fd: Int): KqueueOp[Owner] = Connect(fd)
-  def receive(fd: Int, buf: ByteBuffer, from: Slot[Address]): ReceiveFrom[Owner] = new ReceiveFrom(fd, buf, from)
-  def send(fd: Int, buf: ByteBuffer, to: Address | Null): SendTo[Owner] = new SendTo(fd, buf, to)
-  def timer(milliseconds: Int): KqueueTimer[Owner] = new KqueueTimer(milliseconds)
-  def whenReady(fd: Int, interest: Interest)(perform: () => Boolean): WhenReady[Owner] =
-    new WhenReady(fd, interest, perform)
-  def blocking(body: () => Unit): KqueueBlocking[Owner] = new BlockingTask(body)
-  def blocking[A <: AnyRef](body: () => A, into: Slot[A]): KqueueBlocking[Owner] =
-    new BlockingTask(() => into.set(body()))
-  def promise(): KqueueSignal[Owner] = new KqueueSignal
-  def promise[A <: AnyRef](into: Slot[A]): KqueueValuePromise[Owner, A] = new KqueueValuePromise(into)
-  def resolve(host: String, into: Slot[List[ResolvedAddress]]): Resolve[Owner] = new Resolve(host, into, resolver)
+object KqueueOps extends Ops[KqueueOp] {
+  def read(fd: Int, buf: ByteBuffer): ReadIntoBuffer = ReadIntoBuffer(fd, buf)
+  def write(fd: Int, buf: ByteBuffer): WriteFromBuffer = WriteFromBuffer(fd, buf)
+  def accept(fd: Int, into: HandleSlot): Accept = Accept(fd, into)
+  def connect(fd: Int): KqueueOp = Connect(fd)
+  def receive(fd: Int, buf: ByteBuffer, from: Slot[Address]): ReceiveFrom = new ReceiveFrom(fd, buf, from)
+  def send(fd: Int, buf: ByteBuffer, to: Address | Null): SendTo = new SendTo(fd, buf, to)
+  def timer(milliseconds: Int): KqueueTimer = new KqueueTimer(milliseconds)
+  def whenReady(fd: Int, interest: Interest)(perform: () => Boolean): WhenReady = new WhenReady(fd, interest, perform)
+  def blocking(body: () => Unit): KqueueBlocking = new BlockingTask(body)
+  def blocking[A <: AnyRef](body: () => A, into: Slot[A]): KqueueBlocking = new BlockingResultTask(body, into)
+  def promise[A](): KqueueValuePromise[A] = new KqueueValuePromise[A]
+  def resolve(host: String, into: Slot[List[ResolvedAddress]]): Resolve = new Resolve(host, into)
 }
 
 /** What to do with a descriptor once kqueue reports it ready. `perform` runs a non-blocking operation on the reactor
   * thread; its return value is the result, and an exception it throws is the op's failure. Commands are `Repeatable`:
   * waiting for readiness again and performing again is always meaningful.
   */
-trait Command[Owner] extends KqueueOp[Owner] with Repeatable {
+trait Command extends KqueueOp with Repeatable {
   def fd: Int
   def interest: Interest
   def perform(): Boolean
 }
 
 /** A command built from a function, for `Ops.whenReady`. */
-final class WhenReady[Owner](val fd: Int, val interest: Interest, body: () => Boolean) extends Command[Owner] {
+final class WhenReady(val fd: Int, val interest: Interest, body: () => Boolean) extends Command {
   def perform(): Boolean = body()
 }
 
 /** A one-shot kqueue timer. `id` is the `EVFILT_TIMER` identifier assigned on submission, or -1 before it. */
-final class KqueueTimer[Owner](val milliseconds: Int) extends KqueueOp[Owner] with Repeatable {
+final class KqueueTimer(val milliseconds: Int) extends KqueueOp with Repeatable {
   require(milliseconds >= 0, "Timer duration must not be negative")
   @volatile private var _id = -1
   def id: Int = _id
@@ -65,41 +59,52 @@ final class KqueueTimer[Owner](val milliseconds: Int) extends KqueueOp[Owner] wi
 }
 
 /** The reactor's side of a promise: completed from any thread, after which the reactor runs its completion on the loop
-  * thread. `KqueueSignal` and `KqueueValuePromise` are the kinds callers complete; `KqueueBlocking` completes itself.
+  * thread. `KqueueValuePromise` is the kind callers complete; `KqueueBlocking` completes itself.
   */
-abstract class KqueuePromise[Owner] extends KqueueOp[Owner] {
-  @volatile private var _failure: Throwable | Null = null
+abstract class KqueuePromise extends KqueueOp {
+  // `Unsettled` until the first completion or failure wins the compare-and-set; later ones are refused.
+  private val outcome = new java.util.concurrent.atomic.AtomicReference[Any](KqueuePromise.Unsettled)
   @volatile private[kqueue] var reactor: KqueueReactor | Null = null
 
   /** The reactor's record of the pending completion; null once delivered or cancelled. */
   @volatile private[kqueue] var pending: AnyRef | Null = null
 
-  private[kqueue] def failure: Throwable | Null = _failure
+  private[kqueue] def failure: Throwable | Null = outcome.get() match {
+    case KqueuePromise.Failed(failure) => failure
+    case _                             => null
+  }
 
   /** Completes the promise with a failure instead. */
-  def fail(failure: Throwable): Unit = {
-    _failure = failure
-    signal()
-  }
+  def fail(failure: Throwable): Unit = settle(KqueuePromise.Failed(failure))
 
-  /** Tells the reactor this promise has finished. */
-  private[kqueue] def signal(): Unit = {
+  /** Tells the reactor this promise has finished, without a value. */
+  private[kqueue] def signal(): Unit = settle(())
+
+  /** Records the outcome, if this is the first, and tells the reactor this promise has finished. */
+  protected final def settle(value: Any): Unit = {
     val owner = reactor
     if owner == null then throw new IllegalStateException("A promise must be submitted before it is completed")
+    if !outcome.compareAndSet(KqueuePromise.Unsettled, value) then
+      throw new IllegalStateException("A promise can only be completed once")
     owner.resolved(this)
   }
+
+  protected final def settled: Any = outcome.get()
 }
 
-/** A promise that carries no value. */
-final class KqueueSignal[Owner] extends KqueuePromise[Owner] with asyncio.Promise[Unit] {
-  def complete(value: Unit): Unit = signal()
+object KqueuePromise {
+  private[kqueue] object Unsettled
+  private[kqueue] final case class Failed(failure: Throwable)
 }
 
-/** A promise whose completer supplies a value, written into `into` before the completion runs. */
-final class KqueueValuePromise[Owner, A <: AnyRef](into: Slot[A]) extends KqueuePromise[Owner] with asyncio.Promise[A] {
-  def complete(value: A): Unit = {
-    into.set(value)
-    signal()
+/** A promise whose completer supplies a value, which it then holds as its result. */
+final class KqueueValuePromise[A] extends KqueuePromise with asyncio.Promise[A] {
+  def complete(value: A): Unit = settle(value)
+
+  def result: A = settled match {
+    case KqueuePromise.Unsettled       => throw new IllegalStateException("The promise has not been completed")
+    case KqueuePromise.Failed(failure) => throw new IllegalStateException("The promise failed", failure)
+    case value                         => value.asInstanceOf[A]
   }
 }
 
@@ -109,16 +114,22 @@ final class KqueueValuePromise[Owner, A <: AnyRef](into: Slot[A]) extends Kqueue
   * Cancelling it skips `block` if it has not started, and interrupts the worker thread if it is running. Interruption
   * is cooperative: blocking JDK calls such as `Thread.sleep` throw `InterruptedException`, and long computations should
   * check `Thread.interrupted()`. Native calls like `getaddrinfo` cannot be interrupted and run to the end, with their
-  * result discarded.
+  * result discarded. Either way the completion's `onCancel` waits until `block` has returned, since until then it may
+  * still write to the op's buffers and slots.
+  *
+  * Writes made before the cancel are allowed, as with a partly filled buffer, but none may follow it: a subclass must
+  * write its final result into its slot through `publish`, which skips the write once cancelled.
   */
-abstract class KqueueBlocking[Owner] extends KqueuePromise[Owner] {
+abstract class KqueueBlocking extends KqueuePromise {
   def block(): Unit
 
-  // Guarded by `this`: the worker running `block`, and whether the task was cancelled.
+  // Guarded by `this`: the worker running `block`, whether the task was cancelled, and whether `block` has returned.
   private var runner: Thread | Null = null
   private var cancelled = false
-  private var finished = false
-  private var settledCallback: (() => Unit) | Null = null
+  private var ended = false
+
+  /** The cancelled submission whose `onCancel` waits for `block` to return. Loop thread only. */
+  private[kqueue] var cancelling: AnyRef | Null = null
 
   /** Called by the worker before `block`; false if the task was cancelled before it started. */
   private[kqueue] def begin(): Boolean = synchronized {
@@ -133,59 +144,87 @@ abstract class KqueueBlocking[Owner] extends KqueuePromise[Owner] {
     * raced in is cleared and cannot leak into the worker's next task.
     */
   private[kqueue] def end(): Unit = {
-    synchronized { runner = null }
+    synchronized {
+      runner = null
+      ended = true
+      notifyAll()
+    }
     Thread.interrupted()
   }
 
-  /** Runs after the worker has stopped touching this op's result slot. */
-  private[kqueue] def whenSettled(callback: () => Unit): Unit = {
-    val runNow = synchronized {
-      if finished then true
-      else {
-        settledCallback = callback
-        false
-      }
-    }
-    if runNow then callback()
-  }
-
-  private[kqueue] def finish(): Unit = {
-    val callback = synchronized {
-      finished = true
-      val current = settledCallback
-      settledCallback = null
-      current
-    }
-    if callback != null then callback.nn()
-  }
-
-  /** Marks the task cancelled and interrupts its worker if it is running. */
-  private[kqueue] def interrupt(): Unit = synchronized {
+  /** Marks the task cancelled and interrupts its worker if it is running. Returns true if it was running, so `block`
+    * may still touch the op's buffers and slots until it returns: the worker reports that through the reactor, like an
+    * outcome, and `awaitEnd` waits for it.
+    */
+  private[kqueue] def interrupt(): Boolean = synchronized {
     cancelled = true
-    if runner != null then runner.nn.interrupt()
+    val running = runner
+    if running != null then running.interrupt()
+    running != null
+  }
+
+  /** Writes `value` into `into` unless the task has been cancelled. It holds the lock `interrupt` takes, so the write
+    * either happens entirely before the cancel or not at all.
+    */
+  protected final def publish[A <: AnyRef](into: Slot[A], value: A): Unit = synchronized {
+    if !cancelled then into.set(value)
+  }
+
+  /** Waits until a running `block` has returned. An interrupt of the waiting thread is kept for later. */
+  private[kqueue] def awaitEnd(): Unit = {
+    var interrupted = false
+    synchronized {
+      while !ended do
+        try wait()
+        catch case _: InterruptedException => interrupted = true
+    }
+    if interrupted then Thread.currentThread().interrupt()
   }
 }
 
 /** A blocking task built from a function, for `Ops.blocking`. */
-final class BlockingTask[Owner](body: () => Unit) extends KqueueBlocking[Owner] {
+final class BlockingTask(body: () => Unit) extends KqueueBlocking {
   def block(): Unit = body()
+}
+
+/** A blocking task whose function's value is written into `into`, for `Ops.blocking`. */
+final class BlockingResultTask[A <: AnyRef](body: () => A, into: Slot[A]) extends KqueueBlocking {
+  def block(): Unit = {
+    publish(into, body())
+  }
 }
 
 /** The blocker pool: a few daemon threads that run blocking tasks off the reactor thread. */
 object Blockers {
+  private val queue = new java.util.concurrent.LinkedBlockingQueue[Runnable]()
+  private lazy val threads = (1 to 4).map { i =>
+    val thread = new Thread(
+      () =>
+        while true do {
+          Thread.interrupted() // Never start a task with a stale interrupt.
+          try queue.take().run()
+          catch case _: InterruptedException => () // A late interrupt must not end the worker.
+        },
+      s"reactor-blocker-$i"
+    )
+    thread.setDaemon(true)
+    thread.start()
+    thread
+  }
+
   /** Runs `blocking` on the pool and completes it with the outcome, unless it is cancelled first. */
-  def run(blocking: KqueueBlocking[?], pool: BlockingPool): Unit =
-    pool.execute(() => {
-      val started = blocking.begin()
-      try
-        if started then {
-          var failure: Throwable | Null = null
-          try blocking.block()
-          catch case t: Throwable => failure = t
-          finally blocking.end()
-          // A cancelled task is detached, so neither outcome reaches its completion.
-          if failure != null then blocking.fail(failure.nn) else blocking.signal()
-        }
-      finally blocking.finish()
-    })
+  def run(blocking: KqueueBlocking): Unit = {
+    threads
+    queue.put { () =>
+      if blocking.begin() then {
+        var failure: Throwable | Null = null
+        try blocking.block()
+        catch case t: Throwable => failure = t
+        finally blocking.end()
+        // A cancelled task is detached, so neither outcome reaches its completion, but the reactor learns from it that
+        // `block` has returned, which is when its `onCancel` runs.
+        if failure != null then blocking.fail(failure.nn) else blocking.signal()
+      }
+    }
+  }
 }

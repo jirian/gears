@@ -7,12 +7,9 @@ class ReactorSuite extends FunSuite {
   /** A reactor that only records whether it was closed. */
   private final class ClosingReactor extends Reactor {
     type Op = AnyRef
-    type Handle = Int
-    type BoxedHandle = Integer
     var closed = false
-    def unbox(boxed: BoxedHandle): Handle = boxed.intValue
-    def ops: Ops[Op, Handle, BoxedHandle] = throw new UnsupportedOperationException
-    def handles: Handles[Handle] = throw new UnsupportedOperationException
+    def ops: Ops[Op] = throw new UnsupportedOperationException
+    def handles: Handles = throw new UnsupportedOperationException
     def submit[C <: Op](op: C, completion: Completion[C]): Unit = ()
     def cancel(op: Op): Boolean = false
     def run(): Unit = ()
@@ -46,20 +43,13 @@ class ReactorSuite extends FunSuite {
     assert(errors.contains("a.Op"), errors)
   }
 
-  test("a handle is only a descriptor when the reactor says so") {
-    val errors = compileErrors("def read(a: Reactor): Unit = a.ops.read(3, java.nio.ByteBuffer.allocate(1))")
-    assert(errors.contains("a.Handle"), errors)
-    val posix = compileErrors("def read(a: Reactor.Posix): Unit = a.ops.read(3, java.nio.ByteBuffer.allocate(1))")
-    assertEquals(posix, "")
-  }
-
   test("only ops marked Repeatable promise they can be resubmitted") {
     assertEquals(
-      compileErrors("def repeat(a: Reactor)(h: a.Handle): Repeatable = a.ops.accept(h, Slot[a.BoxedHandle]())"),
+      compileErrors("def repeat(a: Reactor)(h: Int): Repeatable = a.ops.accept(h, HandleSlot())"),
       ""
     )
     assertEquals(compileErrors("def repeat(a: Reactor): Repeatable = a.ops.timer(1)"), "")
-    assert(compileErrors("def repeat(a: Reactor): Repeatable = a.ops.promise()").nonEmpty)
+    assert(compileErrors("def repeat(a: Reactor): Repeatable = a.ops.promise[Unit]()").nonEmpty)
     assert(compileErrors("def repeat(a: Reactor): Repeatable = a.ops.blocking(() => ())").nonEmpty)
   }
 

@@ -1,6 +1,6 @@
 package gears.async.asyncio.uring
 
-import asyncio.Slot
+import asyncio.HandleSlot
 import gears.async.Async
 import gears.async.asyncio.{Buffer, Error, Result}
 import gears.async.file.{FileReader, FileSupport, FileWriter}
@@ -64,6 +64,6 @@ trait UringFileSupport(scheduler: UringPerThreadScheduler) extends FileSupport:
     UringFileWriter(open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode), scheduler)
 
   private def open(path: String, flags: Int, mode: Int)(using Async): Int =
-    val opened = Slot[Integer]()
+    val opened = HandleSlot()
     scheduler.await(reactor => reactor.ops.openAt(path, flags, mode, opened))
-    opened.clear().intValue
+    opened.clear()

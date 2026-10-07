@@ -9,13 +9,9 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import asyncio.Completion
-import asyncio.BlockingPool
-import asyncio.HostResolver
 import asyncio.Handles
 import asyncio.Reactor
 import asyncio.Repeatable
-import asyncio.kqueue.KqueueHandles
-import asyncio.unsafe.PosixResolver
 import uring.*
 import uringOps.*
 
@@ -25,10 +21,9 @@ import uringOps.*
   * Besides `run`, a driver that interleaves the reactor with its own work, such as a scheduler running tasks on the
   * same thread, calls `poll` instead, and `wake` from other threads to interrupt a waiting `poll`.
   *
-  * Cancelling a ring op runs its `onCancel` right away, as `Reactor.cancel` requires, but the kernel only lets go of
-  * the op when the cancellation's CQE arrives. Until then the reactor keeps the op, and with it its buffers, reachable,
-  * and a result that raced the cancellation is discarded: an accepted or opened descriptor is closed, and bytes read
-  * are lost.
+  * Cancelling a ring op asks the kernel to cancel it, but the kernel only lets go of the op, and its buffers, when the
+  * op's own CQE arrives, so its `onCancel` runs then, from `poll` or `run`, as `Reactor.cancel` allows. A result that
+  * raced the cancellation is discarded: an accepted or opened descriptor is closed, and bytes read are lost.
   */
 final class UringReactor private (entries: Int, blockerPool: BlockingPool, resolver: HostResolver) extends Reactor {
 
@@ -37,35 +32,21 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     */
   type Op = UringOp[this.type]
 
-  /** Io_uring works on POSIX file descriptors. */
-  type Handle = Int
-
-  type BoxedHandle = Integer
-
   private val opsBuilder: UringOps[this.type] = new UringOps[this.type](resolver)
 
   def ops: UringOps[this.type] = opsBuilder
 
-  /** The handles are plain non-blocking POSIX descriptors, the same as kqueue's. */
-  def handles: Handles[Handle] = KqueueHandles
-
-  def unbox(boxed: BoxedHandle): Handle = boxed.intValue()
+  /** The handles are plain non-blocking POSIX descriptors. */
+  def handles: Handles = UringHandles
 
   private final class Pending[C <: Op](val op: C, val completion: Completion[C]) {
-    private var isSettled = false
     def complete(): Unit = completion.onComplete(op)
     def fail(failure: Throwable): Unit = completion.onFailure(op, failure)
     def cancelled(): Unit = completion.onCancel(op)
-    def settled(): Unit = synchronized {
-      if !isSettled then {
-        isSettled = true
-        completion.onSettled(op)
-      }
-    }
   }
 
-  /** One submission of a ring op, under its user data `id`. `pending` is null once cancelled, while the kernel may
-    * still hold the op.
+  /** One submission of a ring op, under its user data `id`. Once cancelled, `pending` is null and `cancelled` holds the
+    * submission whose `onCancel` waits for the op's CQE, while the kernel may still hold the op.
     */
   private final class InFlight(val id: Long, val op: RingOp[?], var pending: Pending[?] | Null) {
     var cancelled: Pending[?] | Null = null
@@ -122,6 +103,9 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   // Promises submitted here whose completion has not run, so `close` can cancel them. Loop thread only.
   private val pendingPromises = scala.collection.mutable.HashSet.empty[UringPromise[?]]
 
+  // Cancelled blockers whose `block` was still running, so their `onCancel` waits for it to return. Loop thread only.
+  private val cancellingBlockers = scala.collection.mutable.HashSet.empty[UringBlocking[?]]
+
   // Guards the eventfd against a blocker finishing after `close`, when its descriptor number may already be reused.
   private object wakeLock {}
   @volatile private var closed = false
@@ -141,6 +125,11 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         enqueue(ring, pending)
       case promise: UringPromise[?] =>
         if promise.pending != null then throw new IllegalStateException(s"$op is already pending")
+        promise match {
+          case blocking: UringBlocking[?] if blocking.cancelling != null =>
+            throw new IllegalStateException(s"$op is still running after being cancelled")
+          case _ => ()
+        }
         promise.reactor = this
         promise.pending = pending
         pendingPromises += promise
@@ -228,12 +217,22 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       val pending = promise.pending
       promise.pending = null
       pendingPromises -= promise
-      if pending != null then {
-        ran = true
-        val p = pending.asInstanceOf[Pending[?]]
-        val failure = promise.failure
-        p.settled()
-        if failure != null then p.fail(failure.nn) else p.complete()
+      promise match {
+        case blocking: UringBlocking[?] if blocking.cancelling != null =>
+          // A cancelled blocker's `block` has returned, so its op's buffers and slots are the caller's again. Its
+          // outcome is dropped: `cancel` detached it before deferring, and `submit` refuses it until now.
+          ran = true
+          val cancelled = blocking.cancelling.asInstanceOf[Pending[?]]
+          blocking.cancelling = null
+          cancellingBlockers -= blocking
+          cancelled.cancelled()
+        case _ =>
+          if pending != null then {
+            ran = true
+            val p = pending.asInstanceOf[Pending[?]]
+            val failure = promise.failure
+            if failure != null then p.fail(failure.nn) else p.complete()
+          }
       }
       promise = if stoppable && stopped then null else resolvedQueue.poll()
     }
@@ -269,8 +268,11 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
           if op.inFlight.asInstanceOf[AnyRef] eq flight then op.inFlight = null
           val pending = flight.pending
           if pending == null then {
+            // A cancelled submission: the kernel has let go of the op, so its `onCancel` runs now.
             op.discard(res)
-            if flight.cancelled != null then flight.cancelled.nn.settled()
+            val cancelled = flight.cancelled
+            flight.cancelled = null
+            if cancelled != null then cancelled.cancelled()
           }
           else {
             // A failing op fails its own completion; an exception thrown by the completion itself still escapes.
@@ -282,21 +284,12 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
                   failure = t
                   true
               }
-            if failure != null then {
-              pending.settled()
-              pending.fail(failure.nn)
-            } else if done then {
-              pending.settled()
-              pending.complete()
-            }
+            if failure != null then pending.fail(failure.nn)
+            else if done then pending.complete()
             else
               // Not finished: submit again, without the completion ever seeing it.
               try enqueue(op, pending)
-              catch {
-                case t: Throwable =>
-                  pending.settled()
-                  pending.fail(t)
-              }
+              catch case t: Throwable => pending.fail(t)
           }
       }
 
@@ -336,37 +329,34 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     wake()
   }
 
-  /** A pending ring op is detached and the kernel asked to cancel it; a promise is detached, so completing it later
-    * does nothing, and a blocking task is skipped or interrupted. The completion's `onCancel` then runs before this
-    * returns.
+  /** A pending ring op is detached and the kernel asked to cancel it; its `onCancel` runs once its CQE arrives, when
+    * the kernel has let go of its buffers. A promise is detached, so completing it later does nothing, and its
+    * `onCancel` runs before this returns, except for a blocking task that is running: it is interrupted, and its
+    * `onCancel` waits until `block` returns.
     */
-  def cancel(op: Op): Boolean = {
-    val pending: Pending[?] | Null = op match {
-      case ring: RingOp[?] =>
-        ring.inFlight match {
-          case flight: InFlight if flight.pending != null =>
-            val p = flight.pending
-            flight.pending = null
-            flight.cancelled = p
-            // Keep the op marked in flight until its CQE arrives. The kernel may still be using its buffers,
-            // even though its completion has already been detached from the caller.
-            requestCancel(flight)
-            p
-          case _ => null
+  def cancel(op: Op): Boolean = op match {
+    case ring: RingOp[?] =>
+      ring.inFlight match {
+        case flight: InFlight if flight.pending != null =>
+          flight.cancelled = flight.pending
+          flight.pending = null
+          // The op stays marked in flight until its CQE arrives, so it cannot be resubmitted before `onCancel`.
+          requestCancel(flight)
+          true
+        case _ => false
+      }
+    case promise: UringPromise[?] =>
+      val pending = detach(promise)
+      if pending == null then false
+      else {
+        promise match {
+          case blocking: UringBlocking[?] if blocking.interrupt() =>
+            blocking.cancelling = pending
+            cancellingBlockers += blocking
+          case _ => pending.nn.cancelled()
         }
-      case promise: UringPromise[?] => detach(promise)
-    }
-    if pending == null then false
-    else {
-      try pending.nn.cancelled()
-      finally
-        pending.nn.op match {
-          case _: RingOp[?]      => () // The CQE confirms when the kernel has released its buffers.
-          case _: UringBlocking[?] => () // The worker settles after it stops writing the op's Slot.
-          case _                   => pending.nn.settled()
-        }
-      true
-    }
+        true
+      }
   }
 
   /** Asks the kernel to cancel a submission. Its CQE still arrives, and then `discard` releases what it produced. */
@@ -378,51 +368,47 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       flush()
     } catch case _: IOException => () // The op then finishes on its own, and is discarded all the same.
 
-  /** Detaches a pending promise so its outcome is never delivered, skipping or interrupting a blocking task. */
+  /** Detaches a pending promise so its outcome is never delivered. */
   private def detach(promise: UringPromise[?]): Pending[?] | Null = {
     val pending = promise.pending
     promise.pending = null
     pendingPromises -= promise
-    if pending != null then
-      promise match {
-        case blocking: UringBlocking[?] =>
-          val p = pending.asInstanceOf[Pending[?]]
-          blocking.whenSettled(() => p.settled())
-          blocking.interrupt() // skip it, or interrupt its worker
-        case _                       => ()
-      }
     pending.asInstanceOf[Pending[?] | Null]
   }
 
-  /** Cancels every pending op, waits a little for the kernel to let go of the ring ops, then closes the eventfd and the
-    * ring.
+  /** Cancels every pending op, then waits until the kernel has let go of every ring op and every running blocking task
+    * has returned, since until then they may still write to their ops' buffers and slots. Then it closes the eventfd and
+    * the ring, and only then runs the cancelled completions' `onCancel`.
     */
   def close(): Unit = {
     if !closed then {
       closing = true
       // Detach every pending op first, so nothing can be delivered while the reactor shuts down.
       val dropped = scala.collection.mutable.ArrayBuffer.empty[Pending[?]]
-      val settleAfterClose = scala.collection.mutable.ArrayBuffer.empty[Pending[?]]
       for flight <- inFlight.values do {
-        if flight.pending != null then {
-          val pending = flight.pending.nn
-          dropped += pending
-          settleAfterClose += pending
-          flight.cancelled = pending
-        } else if flight.cancelled != null then settleAfterClose += flight.cancelled.nn
+        if flight.pending != null then dropped += flight.pending.nn
+        else if flight.cancelled != null then dropped += flight.cancelled.nn
         flight.pending = null
+        flight.cancelled = null
         requestCancel(flight)
       }
+      val running = scala.collection.mutable.ArrayBuffer.empty[UringBlocking[?]]
       for promise <- pendingPromises.toList do {
         val pending = detach(promise)
         if pending != null then {
           dropped += pending.nn
           promise match {
-            case _: UringBlocking[?] => () // Its worker will settle once it can no longer write its Slot.
-            case _                   => settleAfterClose += pending.nn
+            case blocking: UringBlocking[?] if blocking.interrupt() => running += blocking
+            case _                                                  => ()
           }
         }
       }
+      for blocking <- cancellingBlockers do {
+        dropped += blocking.cancelling.asInstanceOf[Pending[?]]
+        blocking.cancelling = null
+        running += blocking
+      }
+      cancellingBlockers.clear()
       resolvedQueue.clear()
       // Keep operation and wake buffers alive until the kernel has released them. queue_exit alone does not
       // establish that guarantee.
@@ -443,7 +429,6 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
           else if id != InternalId then inFlight.remove(id).foreach { flight =>
             flight.op.discard(reapedResults(i))
             flight.op.inFlight = null
-            if flight.cancelled != null then flight.cancelled.nn.settled()
           }
         }
         if inFlight.nonEmpty || wakeInFlight then {
@@ -456,18 +441,11 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         unistd.close(wakeFd)
       }
       io_uring_queue_exit(ring)
+      running.foreach(_.awaitEnd()) // Until then they may still write to their ops' buffers and slots.
       // Only now tell the completions, so one that throws cannot leak the reactor's resources.
       var callbackFailure: Throwable | Null = null
       dropped.foreach { pending =>
         try pending.cancelled()
-        catch {
-          case t: Throwable =>
-            if callbackFailure == null then callbackFailure = t
-            else if callbackFailure.nn ne t then callbackFailure.nn.addSuppressed(t)
-        }
-      }
-      settleAfterClose.foreach { pending =>
-        try pending.settled()
         catch {
           case t: Throwable =>
             if callbackFailure == null then callbackFailure = t
@@ -485,14 +463,14 @@ object UringReactor {
   def open(
       entries: Int = 256,
       blockerPool: BlockingPool = BlockingPool.global,
-      resolver: HostResolver = PosixResolver
+      resolver: HostResolver = PosixHostResolver
   ): UringReactor = new UringReactor(entries, blockerPool, resolver)
 
   /** Opens a reactor for `body` and closes it afterwards. */
   def scoped(
       entries: Int = 256,
       blockerPool: BlockingPool = BlockingPool.global,
-      resolver: HostResolver = PosixResolver
+      resolver: HostResolver = PosixHostResolver
   )(body: UringReactor => Unit): Unit = {
     val reactor = open(entries, blockerPool, resolver)
     try body(reactor)

@@ -1,6 +1,6 @@
 package gears.async.asyncio.uring
 
-import asyncio.{Address, Slot}
+import asyncio.{Address, HandleSlot, Slot}
 import gears.async.Async
 import gears.async.asyncio.Buffer
 import gears.async.asyncio.Error
@@ -14,7 +14,6 @@ import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketAddress
-import java.net.UnixDomainSocketAddress
 import java.nio.charset.StandardCharsets
 import java.nio.channels.ClosedChannelException
 import scala.scalanative.posix.arpa.inet._
@@ -36,6 +35,12 @@ import asyncio.uring.SocketAddresses
 private[uring] final val SOCK_NONBLOCK = 0x800
 private[uring] final val SOCK_CLOEXEC = 0x80000
 
+/** A Unix domain socket address, for `TcpSupport` and `UdpSupport` on this backend. Scala Native's javalib has no
+  * `java.net.UnixDomainSocketAddress`, so referring to it makes any program using these supports fail to link.
+  */
+final case class UnixSocketAddress(path: String) extends SocketAddress:
+  override def toString: String = path
+
 private[uring] def posixError(what: String, err: Int = errno.errno): IOException =
   IOException(s"$what: ${fromCString(strerror(err))}")
 
@@ -48,7 +53,7 @@ private[uring] def closeFdOnFailure[A](fd: Int)(body: => A): A =
 
 private[uring] def socketFamily(address: SocketAddress): Int =
   address match
-    case _: UnixDomainSocketAddress => posixSocket.AF_UNIX
+    case _: UnixSocketAddress => posixSocket.AF_UNIX
     case inet: InetSocketAddress if inet.getAddress != null && inet.getAddress.isInstanceOf[Inet6Address] =>
       posixSocket.AF_INET6
     case inet: InetSocketAddress if inet.getAddress != null => posixSocket.AF_INET
@@ -72,9 +77,13 @@ private[uring] def getLocalAddress(fd: Int): SocketAddress =
     !addrLen = sizeof[posixSocket.sockaddr_storage].toUInt
     if posixSocket.getsockname(fd, addr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrLen) < 0 then
       throw posixError("getsockname failed")
-    if addrLen.toLong > sizeof[posixSocket.sockaddr_storage].toLong then
-      throw IOException(s"getsockname returned oversized address: ${addrLen.toLong} bytes")
+    if (!addrLen).toLong > sizeof[posixSocket.sockaddr_storage].toLong then
+      throw IOException(s"getsockname returned oversized address: ${(!addrLen).toLong} bytes")
     parseSockAddr(addr, !addrLen)
+
+/** `shutdown(2)` with `how` one of `SHUT_RD`, `SHUT_WR`, `SHUT_RDWR`. */
+private[uring] def shutdownSocket(fd: Int, how: CInt): Unit =
+  if posixSocket.shutdown(fd, how) < 0 then throw posixError("Failed to shut down socket")
 
 private[uring] def getPeerAddress(fd: Int): SocketAddress =
   Zone.acquire: zone =>
@@ -83,8 +92,8 @@ private[uring] def getPeerAddress(fd: Int): SocketAddress =
     !addrLen = sizeof[posixSocket.sockaddr_storage].toUInt
     if posixSocket.getpeername(fd, addr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrLen) < 0 then
       throw posixError("getpeername failed")
-    if addrLen.toLong > sizeof[posixSocket.sockaddr_storage].toLong then
-      throw IOException(s"getpeername returned oversized address: ${addrLen.toLong} bytes")
+    if (!addrLen).toLong > sizeof[posixSocket.sockaddr_storage].toLong then
+      throw IOException(s"getpeername returned oversized address: ${(!addrLen).toLong} bytes")
     parseSockAddr(addr, !addrLen)
 
 /** The reactor's numeric form of an IP socket address. An IPv6 scope id is dropped. */
@@ -98,10 +107,10 @@ private[uring] def fromAddress(address: Address): SocketAddress =
   address match
     case Address.IPv4(host, port) => InetSocketAddress(InetAddress.getByName(host), port)
     case Address.IPv6(host, port) => InetSocketAddress(InetAddress.getByName(host), port)
-    case Address.Unix(path)       => UnixDomainSocketAddress.of(path)
+    case Address.Unix(path)       => UnixSocketAddress(path)
 
 private[uring] def toAddress(address: SocketAddress): Address = address match
-  case unix: UnixDomainSocketAddress => Address.Unix(unix.getPath.toString)
+  case unix: UnixSocketAddress      => Address.Unix(unix.path)
   case inet: InetSocketAddress       => toAddress(inet)
   case other                         => throw IOException(s"Unsupported socket address: $other")
 
@@ -154,11 +163,11 @@ class UringTcpStream private[uring] (
 
   override def shutdownOutput()(using Async): Unit =
     checkOpen()
-    PosixSockets.shutdown(fd, asyncio.Shutdown.Write)
+    shutdownSocket(fd, posixSocket.SHUT_WR)
 
   override def shutdownInput()(using Async): Unit =
     checkOpen()
-    PosixSockets.shutdown(fd, asyncio.Shutdown.Read)
+    shutdownSocket(fd, posixSocket.SHUT_RD)
 
   override def readBuf(buf: Buffer)(using Async): Result[Unit] = either:
     checkOpen()
@@ -191,9 +200,9 @@ class UringTcpListener private[uring] (
 
   override def accept()(using Async): Result[Stream] = either:
     checkOpen()
-    val accepted = Slot[Integer]()
+    val accepted = HandleSlot()
     scheduler.await(reactor => reactor.ops.accept(fd, accepted))
-    val clientFd = accepted.clear().intValue
+    val clientFd = accepted.clear()
     closeFdOnFailure(clientFd):
       UringTcpStream(clientFd, scheduler, localAddress, getPeerAddress(clientFd))
 
@@ -240,8 +249,8 @@ trait UringUdpSupport(scheduler: UringPerThreadScheduler) extends net.UdpSupport
     closeFdOnFailure(fd):
       options.foreach(applySocketOption(fd, _))
       val unixPath = address match
-        case unix: UnixDomainSocketAddress => unix.getPath.toString
-        case _                             => null
+        case unix: UnixSocketAddress => unix.path
+        case _                       => null
       if unixPath != null then PosixSockets.bindUnixAddr(fd, unixPath.nn, removeExisting = true)
       else
         Zone.acquire: zone =>
@@ -281,8 +290,8 @@ trait UringTcpSupport(scheduler: UringPerThreadScheduler) extends net.TcpSupport
     closeFdOnFailure(fd):
       options.foreach(applySocketOption(fd, _))
       val unixPath = address match
-        case unix: UnixDomainSocketAddress => unix.getPath.toString
-        case _                             => null
+        case unix: UnixSocketAddress => unix.path
+        case _                       => null
       if unixPath != null then PosixSockets.bindUnixAddr(fd, unixPath.nn, removeExisting = true)
       else
         Zone.acquire: zone =>

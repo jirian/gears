@@ -1,10 +1,7 @@
 package gears.async.asyncio.uring
 
 import asyncio.Completion
-import asyncio.BlockingPool
-import asyncio.HostResolver
-import asyncio.uring.{UringOp, UringReactor}
-import asyncio.unsafe.PosixResolver
+import asyncio.uring.{BlockingPool, HostResolver, PosixHostResolver, UringOp, UringReactor}
 import gears.async._
 import gears.async.native
 
@@ -14,7 +11,7 @@ class UringPerThreadScheduler(
     parallelism: Int = Runtime.getRuntime().availableProcessors(),
     entriesPerShard: Int = 256,
     blockerPool: BlockingPool = BlockingPool.global,
-    resolver: HostResolver = PosixResolver
+    resolver: HostResolver = PosixHostResolver
 ) extends Scheduler:
 
   private val globalQueue = new java.util.concurrent.ConcurrentLinkedQueue[Runnable]()
@@ -82,7 +79,7 @@ class UringPerThreadSupport(
     parallelism: Int = Runtime.getRuntime().availableProcessors(),
     entriesPerShard: Int = 256,
     blockerPool: BlockingPool = BlockingPool.global,
-    resolver: HostResolver = PosixResolver
+    resolver: HostResolver = PosixHostResolver
 ) extends UringPerThreadScheduler(parallelism, entriesPerShard, blockerPool, resolver)
     with AsyncSupport
     with AsyncOperations

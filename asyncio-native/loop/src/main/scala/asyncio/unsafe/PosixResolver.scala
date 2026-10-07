@@ -9,13 +9,10 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import asyncio.AddressFamily
-import asyncio.HostResolver
 import asyncio.ResolvedAddress
 
 /** Host name resolution with POSIX `getaddrinfo`. It blocks, so a reactor runs it off its own thread. */
-object PosixResolver extends HostResolver {
-
-  override def resolve(host: String): Either[String, List[ResolvedAddress]] = lookup(host)
+object PosixResolver {
 
   /** Every stream address for `host`, in numeric form, IPv4 and IPv6, or the resolver's error message. Blocks. */
   def lookup(host: String): Either[String, List[ResolvedAddress]] = Zone.acquire { implicit z =>

@@ -20,6 +20,7 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import asyncio.Address
+import asyncio.HandleSlot
 import asyncio.Interest
 import asyncio.Repeatable
 import asyncio.Slot
@@ -297,7 +298,7 @@ final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends Rin
 }
 
 /** Accepts one connection on a listening socket, writing its non-blocking descriptor into `into`. */
-final class Accept[Owner](val fd: Int, into: Slot[Integer]) extends RingOp[Owner] with Repeatable {
+final class Accept[Owner](val fd: Int, into: HandleSlot) extends RingOp[Owner] with Repeatable {
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit =
     io_uring_prep_accept(sqe, fd, null, null, SOCK_NONBLOCK | SOCK_CLOEXEC)
 
@@ -305,7 +306,7 @@ final class Accept[Owner](val fd: Int, into: Slot[Integer]) extends RingOp[Owner
     if transient(res) || res == -errno.ECONNABORTED then false
     else if res < 0 then throw failure("Failed to accept connection", res)
     else {
-      into.set(Integer.valueOf(res))
+      into.set(res)
       true
     }
 
@@ -405,7 +406,7 @@ final class UringTimer[Owner](val nanoseconds: Long) extends RingOp[Owner] with 
 }
 
 /** `openat(2)` relative to the working directory, writing the new descriptor into `into`. */
-final class OpenAt[Owner](val path: String, flags: Int, mode: Int, into: Slot[Integer]) extends RingOp[Owner] {
+final class OpenAt[Owner](val path: String, flags: Int, mode: Int, into: HandleSlot) extends RingOp[Owner] {
   private val cPath = {
     val utf8 = path.getBytes(StandardCharsets.UTF_8)
     java.util.Arrays.copyOf(utf8, utf8.length + 1) // NUL-terminated
@@ -425,7 +426,7 @@ final class OpenAt[Owner](val path: String, flags: Int, mode: Int, into: Slot[In
     else if res == -errno.ENOENT then throw new FileNotFoundException(path)
     else if res < 0 then throw failure(s"Failed to open $path", res)
     else {
-      into.set(Integer.valueOf(res))
+      into.set(res)
       true
     }
 

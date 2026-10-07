@@ -1,8 +1,6 @@
 package gears.async.asyncio.uring
 
-import asyncio.uring.UringReactor
-import asyncio.BlockingPool
-import asyncio.HostResolver
+import asyncio.uring.{BlockingPool, HostResolver, UringReactor}
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.scalanative.runtime.Continuations

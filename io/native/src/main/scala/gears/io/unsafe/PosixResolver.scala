@@ -1,7 +1,7 @@
-package gears.asyncio.unsafe
+package gears.io.unsafe
 
-import gears.asyncio.AddressFamily
-import gears.asyncio.ResolvedAddress
+import gears.io.reactor.AddressFamily
+import gears.io.reactor.ResolvedAddress
 
 import scala.scalanative.posix.arpa.inet
 import scala.scalanative.posix.netdb

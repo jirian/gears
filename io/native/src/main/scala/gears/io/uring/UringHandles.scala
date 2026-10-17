@@ -1,12 +1,12 @@
-package gears.asyncio.uring
+package gears.io.uring
 
-import gears.asyncio.Address
-import gears.asyncio.Handles
-import gears.asyncio.unsafe.PosixErr.cError
-import gears.asyncio.unsafe.PosixFileOps
-import gears.asyncio.unsafe.PosixSockets
-import gears.asyncio.unsafe.Sockets.Flavor
-import gears.asyncio.unsafe.Sockets.Transport
+import gears.io.reactor.Address
+import gears.io.reactor.Handles
+import gears.io.unsafe.PosixErr.cError
+import gears.io.unsafe.PosixFileOps
+import gears.io.unsafe.PosixSockets
+import gears.io.unsafe.Sockets.Flavor
+import gears.io.unsafe.Sockets.Transport
 
 import java.io.IOException
 import java.nio.ByteBuffer

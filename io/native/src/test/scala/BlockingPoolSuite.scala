@@ -1,4 +1,4 @@
-import gears.asyncio.uring.BlockingPool
+import gears.io.uring.BlockingPool
 
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.RejectedExecutionException

@@ -1,5 +1,5 @@
 // from https://github.com/armanbilge/fs2-io_uring/blob/main/uring/src/main/scala/fs2/io/uring/unsafe/uring.scala
-// Modified for gears: moved to package gears.asyncio.uring, linked with @link("uring"), shim symbols renamed to gears_*, and
+// Modified for gears: moved to package gears.io.uring, linked with @link("uring"), shim symbols renamed to gears_*, and
 // io_uring_sq_ready added.
 
 /*
@@ -18,7 +18,7 @@
  * limitations under the License.
  */
 
-package gears.asyncio.uring
+package gears.io.uring
 
 import scala.scalanative.libc.stddef._
 import scala.scalanative.posix.signal.sigset_t

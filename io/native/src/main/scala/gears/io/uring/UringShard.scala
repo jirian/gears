@@ -1,7 +1,7 @@
 package gears.io.uring
 
-import gears.asyncio.uring.{BlockingPool, HostResolver, UringReactor}
 import gears.io.reactor.SharedJob
+import gears.io.uring.{BlockingPool, HostResolver, UringReactor}
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.scalanative.runtime.Continuations

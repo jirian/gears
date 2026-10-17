@@ -1,8 +1,8 @@
 package gears.io.reactor
 
 import gears.async.Async
-import gears.asyncio.{ResolvedAddress, Slot}
 import gears.io.net.DnsSupport
+import gears.io.reactor.{ResolvedAddress, Slot}
 
 import java.io.IOException
 import java.net.{InetAddress, UnknownHostException}

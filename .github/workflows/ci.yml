@@ -38,7 +38,7 @@ jobs:
         java-version: 21
     - uses: sbt/setup-sbt@v1
     - name: Test
-      run: sbt 'rootJVM/testOnly *; ioJVM/testOnly *; asyncioJVM/testOnly *'
+      run: sbt 'rootJVM/testOnly *; ioJVM/testOnly *'
   test-native:
     strategy:
       fail-fast: false
@@ -58,7 +58,7 @@ jobs:
       run: sudo apt-get install clang libstdc++-12-dev libgc-dev liburing-dev libssl-dev
     - name: Test
       # Restart the server so the next invocation picks up GC_MAXIMUM_HEAP_SIZE.
-      run: sbt 'asyncioNative/testOnly *; rootNative/testOnly *; ioNative/testOnly *; shutdown'
+      run: sbt 'rootNative/testOnly *; ioNative/testOnly *; shutdown'
     - name: Stress Test with Lower Memory
       run: env GC_MAXIMUM_HEAP_SIZE=140M sbt 'rootNative/testOnly StressTest'
     - name: Examples

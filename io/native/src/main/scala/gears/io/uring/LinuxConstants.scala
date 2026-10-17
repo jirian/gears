@@ -1,4 +1,4 @@
-package gears.asyncio.uring
+package gears.io.uring
 
 object LinuxConstants {
   final val SOCK_NONBLOCK = 0x800

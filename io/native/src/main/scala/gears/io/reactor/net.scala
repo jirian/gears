@@ -1,16 +1,16 @@
 package gears.io.reactor
 
 import gears.async.Async
-import gears.asyncio.unsafe.PosixFileOps
-import gears.asyncio.unsafe.PosixSockets
-import gears.asyncio.uring.SocketAddresses
-import gears.asyncio.{Address, Slot}
 import gears.io.Buffer
 import gears.io.Error
 import gears.io.Result
 import gears.io.either
 import gears.io.net
 import gears.io.net.SocketOption
+import gears.io.reactor.{Address, Slot}
+import gears.io.unsafe.PosixFileOps
+import gears.io.unsafe.PosixSockets
+import gears.io.uring.SocketAddresses
 
 import java.io.IOException
 import java.net.Inet6Address

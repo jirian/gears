@@ -1,11 +1,11 @@
-package gears.asyncio.uring
+package gears.io.uring
 
-import gears.asyncio.Address
-import gears.asyncio.HandleSlot
-import gears.asyncio.Interest
-import gears.asyncio.Repeatable
-import gears.asyncio.Slot
-import gears.asyncio.unsafe.PosixSockets
+import gears.io.reactor.Address
+import gears.io.reactor.HandleSlot
+import gears.io.reactor.Interest
+import gears.io.reactor.Repeatable
+import gears.io.reactor.Slot
+import gears.io.unsafe.PosixSockets
 
 import java.io.FileNotFoundException
 import java.io.IOException

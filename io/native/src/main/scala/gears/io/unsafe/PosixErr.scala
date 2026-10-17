@@ -1,4 +1,4 @@
-package gears.asyncio.unsafe
+package gears.io.unsafe
 
 import scala.scalanative.unsafe.*
 import scala.scalanative.posix.string

@@ -1,4 +1,4 @@
-package gears.asyncio
+package gears.io.reactor
 
 import munit.FunSuite
 

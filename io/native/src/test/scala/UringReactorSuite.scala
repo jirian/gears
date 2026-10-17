@@ -1,6 +1,6 @@
-import gears.asyncio.*
-import gears.asyncio.unsafe.NativeBuffer
-import gears.asyncio.uring.{BlockingPool, HostResolver, UringReactor}
+import gears.io.reactor.*
+import gears.io.unsafe.NativeBuffer
+import gears.io.uring.{BlockingPool, HostResolver, UringReactor}
 
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets

@@ -1,7 +1,7 @@
-package gears.asyncio.uring
+package gears.io.uring
 
-import gears.asyncio.ResolvedAddress
-import gears.asyncio.unsafe.PosixResolver
+import gears.io.reactor.ResolvedAddress
+import gears.io.unsafe.PosixResolver
 
 trait HostResolver {
 

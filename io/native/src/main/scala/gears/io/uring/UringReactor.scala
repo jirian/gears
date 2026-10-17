@@ -1,9 +1,9 @@
-package gears.asyncio.uring
+package gears.io.uring
 
-import gears.asyncio.Completion
-import gears.asyncio.Handles
-import gears.asyncio.Reactor
-import gears.asyncio.Repeatable
+import gears.io.reactor.Completion
+import gears.io.reactor.Handles
+import gears.io.reactor.Reactor
+import gears.io.reactor.Repeatable
 
 import java.io.IOException
 import scala.scalanative.linux.eventfd

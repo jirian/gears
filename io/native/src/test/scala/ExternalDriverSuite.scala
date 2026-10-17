@@ -2,9 +2,9 @@ package consumer.driver
 
 import gears.async.*
 import gears.async.default.given
-import gears.asyncio.Reactor
 import gears.io.Error
 import gears.io.net.TcpSupport
+import gears.io.reactor.Reactor
 import gears.io.reactor.{IoGuard, ReactorDriver, SingleReactorDriver, tcpSupport}
 
 import java.net.InetSocketAddress
@@ -21,7 +21,7 @@ final class CountingDriver(inner: ReactorDriver) extends ReactorDriver:
 
 class ExternalDriverSuite extends munit.FunSuite:
   test("a driver implemented outside gears runs the network layer"):
-    val inner = SingleReactorDriver(() => gears.asyncio.uring.UringReactor.open())
+    val inner = SingleReactorDriver(() => gears.io.uring.UringReactor.open())
     try
       val driver = CountingDriver(inner)
       given TcpSupport = driver.tcpSupport

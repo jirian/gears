@@ -1,7 +1,7 @@
 package gears.io.reactor
 
 import gears.async.{Async, Future}
-import gears.asyncio.Reactor
+import gears.io.reactor.Reactor
 
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch}
 import scala.util.control.NonFatal

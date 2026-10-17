@@ -1,5 +1,5 @@
-import gears.asyncio.Reactor
-import gears.asyncio.uring.UringReactor
+import gears.io.reactor.Reactor
+import gears.io.uring.UringReactor
 
 object TestReactor:
   def open(): Reactor = UringReactor.open()

@@ -1,9 +1,9 @@
 package gears.io.reactor
 
 import gears.async.{Async, Semaphore}
-import gears.asyncio.Slot
 import gears.io.either
 import gears.io.file.{FileHandle, FileInfo, FileReader, FileSupport, FileWriter, WriteOptions}
+import gears.io.reactor.Slot
 import gears.io.{Buffer, Error, IoConcurrency, Result}
 
 import scala.scalanative.posix.sys.stat

@@ -1,4 +1,4 @@
-package gears.asyncio.uring
+package gears.io.uring
 
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException

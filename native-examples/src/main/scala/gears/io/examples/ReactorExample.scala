@@ -1,7 +1,7 @@
 package gears.io.examples
 
-import gears.asyncio.uring.UringReactor
-import gears.asyncio.{Completion, Reactor, ResolvedAddress, Slot}
+import gears.io.reactor.{Completion, Reactor, ResolvedAddress, Slot}
+import gears.io.uring.UringReactor
 
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets

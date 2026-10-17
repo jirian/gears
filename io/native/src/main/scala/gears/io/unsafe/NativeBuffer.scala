@@ -1,4 +1,4 @@
-package gears.asyncio.unsafe
+package gears.io.unsafe
 
 import java.nio.ByteBuffer
 import scala.scalanative.memory.PointerBuffer

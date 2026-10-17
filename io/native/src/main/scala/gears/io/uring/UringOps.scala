@@ -1,11 +1,11 @@
-package gears.asyncio.uring
+package gears.io.uring
 
-import gears.asyncio.Address
-import gears.asyncio.HandleSlot
-import gears.asyncio.Interest
-import gears.asyncio.Ops
-import gears.asyncio.ResolvedAddress
-import gears.asyncio.Slot
+import gears.io.reactor.Address
+import gears.io.reactor.HandleSlot
+import gears.io.reactor.Interest
+import gears.io.reactor.Ops
+import gears.io.reactor.ResolvedAddress
+import gears.io.reactor.Slot
 
 import java.io.IOException
 import java.nio.ByteBuffer

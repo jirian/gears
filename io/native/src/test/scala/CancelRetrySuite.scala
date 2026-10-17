@@ -1,6 +1,6 @@
-package gears.asyncio.uring
+package gears.io.uring
 
-import gears.asyncio.{Completion, Repeatable}
+import gears.io.reactor.{Completion, Repeatable}
 
 import java.io.IOException
 import java.nio.ByteBuffer

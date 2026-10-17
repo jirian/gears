@@ -25,7 +25,7 @@ object Main:
     ("http-streaming", "streamed uploads, chunked responses and path parameters", httpStreamingExample),
     ("https", "HTTPS with certificate verification", httpsExample),
     ("websocket", "a WebSocket endpoint and client: text, binary, ping and close", webSocketExample),
-    ("reactor", "the gears.asyncio.Reactor interface used directly: ops, runOnce and wakeup", reactorExample),
+    ("reactor", "the gears.io.reactor.Reactor interface used directly: ops, runOnce and wakeup", reactorExample),
     ("driver", "the gears network layer on any reactor through SingleReactorDriver", driverExample),
     ("http-server", "a long-running HTTP server on port 8080", httpServer),
     ("https-server", "a long-running HTTPS server on port 8443", httpsServer)

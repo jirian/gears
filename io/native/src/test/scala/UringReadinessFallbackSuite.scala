@@ -1,6 +1,6 @@
-package gears.asyncio.uring
+package gears.io.uring
 
-import gears.asyncio.HandleSlot
+import gears.io.reactor.HandleSlot
 
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.fcntl

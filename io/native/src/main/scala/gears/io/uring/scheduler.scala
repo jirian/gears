@@ -2,8 +2,7 @@ package gears.io.uring
 
 import gears.async._
 import gears.async.native
-import gears.asyncio.Reactor
-import gears.asyncio.uring.{BlockingPool, HostResolver, PosixHostResolver, UringReactor}
+import gears.io.reactor.Reactor
 import gears.io.reactor.{
   IoGuard,
   ReactorDnsSupport,
@@ -13,6 +12,7 @@ import gears.io.reactor.{
   ReactorUdpSupport,
   SharedJob
 }
+import gears.io.uring.{BlockingPool, HostResolver, PosixHostResolver, UringReactor}
 
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -99,7 +99,7 @@ class UringPerThreadScheduler(
     ReactorDriver.waitFor(pending)
 
   override def openFile(path: String, flags: Int, mode: Int)(using Async): Int =
-    val closeOnExec = gears.asyncio.uring.LinuxConstants.O_CLOEXEC
+    val closeOnExec = gears.io.uring.LinuxConstants.O_CLOEXEC
     awaitHandle(null)((r, opened) => uring(r).ops.openAt(path, flags | closeOnExec, mode, opened).asInstanceOf[r.Op])
 
   override def acceptsHeapBuffers: Boolean = true

@@ -80,24 +80,23 @@ See [LICENSE](./LICENSE) for more details.
 
 ## Scala Native async I/O
 
-The `io` module (`gears-io`, package `gears.io`, not yet published) adds direct-style I/O on top of Gears:
-TCP, UDP and Unix sockets, files, DNS, TLS, an HTTP/1.1 client and server, and WebSockets.
-Its API is cross-built; the backend is Scala Native on Linux. It runs on an io_uring
-implementation of the `gears.asyncio.Reactor` interface (`gears.asyncio.uring` in
-`asyncio/native`) through `UringPerThreadSupport`, a multi-threaded Gears scheduler with
-one reactor per thread. `SingleReactorDriver` runs the same layer on any reactor whose
-handles are POSIX descriptors. It needs liburing, OpenSSL and Linux 5.11 or later; see
-[CONTRIBUTING.md](./CONTRIBUTING.md).
+The `io` module (`gears-io`, package `gears.io`, not yet published) adds direct-style I/O
+on top of Gears: TCP, UDP and Unix sockets, files, DNS, TLS, an HTTP/1.1 client and server,
+and WebSockets. Its API is cross-built; the backend is Scala Native on Linux. It needs
+liburing, OpenSSL and Linux 5.11 or later; see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-The `asyncio` module (package `gears.asyncio`) holds the reactor interface in
-`asyncio/shared`, and the io_uring reactor in `asyncio/native`. The interface is `Op`, `Completion`, the `Reactor` trait with `Reactor.Factory`, and the `Ops` factory
-that each reactor exposes as `reactor.ops` for building reads, writes, accepts, connects,
-timers, custom readiness ops, blocking tasks, and name resolution. A scheduler drives the
-loop with `runOnce`, and other threads wake it with `wakeup`.
+On Native the API runs on a reactor. `gears.io.reactor` defines the reactor interface, the
+same on every platform: `Op`, `Completion`, the `Reactor` trait with `Reactor.Factory`, and
+the `Ops` factory that each reactor exposes as `reactor.ops` for building reads, writes,
+accepts, connects, timers, custom readiness ops, blocking tasks, and name resolution. A
+scheduler drives the loop with `runOnce`, and other threads wake it with `wakeup`.
+`SingleReactorDriver` runs the API on any reactor whose handles are POSIX descriptors.
+`gears.io.uring` holds the io_uring reactor and `UringPerThreadSupport`, a multi-threaded
+Gears scheduler with one reactor per thread.
 
 `native-examples` holds runnable examples of the io_uring backend, one per feature:
 TCP, UDP and Unix sockets, DNS, files and positioned file I/O, cancellation, the HTTP
-client and server with streaming, HTTPS, WebSockets, the `gears.asyncio.Reactor` interface
+client and server with streaming, HTTPS, WebSockets, the `gears.io.reactor.Reactor` interface
 used directly, and the gears network layer on any reactor through `SingleReactorDriver`.
 Run one from the repository root with `sbt 'nativeExamples/run tcp-echo'`, or name several;
 without a name it lists them all. They need liburing, OpenSSL and the `openssl` CLI, as the

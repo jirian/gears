@@ -1,7 +1,7 @@
-package gears.asyncio.uring
+package gears.io.uring
 
-import gears.asyncio.Address
-import gears.asyncio.unsafe.PosixSockets
+import gears.io.reactor.Address
+import gears.io.unsafe.PosixSockets
 
 import java.io.IOException
 import java.nio.charset.StandardCharsets

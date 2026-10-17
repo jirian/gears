@@ -1,4 +1,4 @@
-package gears.asyncio
+package gears.io.reactor
 
 import java.nio.ByteBuffer
 
@@ -165,7 +165,7 @@ final class Slot[A <: AnyRef] {
     v.nn
   }
 
-  private[asyncio] def set(outcome: A): Unit = {
+  private[io] def set(outcome: A): Unit = {
     if value != null then throw new IllegalStateException("Slot was already set")
     value = outcome.nn
   }
@@ -184,7 +184,7 @@ final class HandleSlot {
     h
   }
 
-  private[asyncio] def set(handle: Int): Unit = {
+  private[io] def set(handle: Int): Unit = {
     require(handle >= 0, s"Not a handle: $handle")
     if this.handle != HandleSlot.Empty then throw new IllegalStateException("Slot was already set")
     this.handle = handle

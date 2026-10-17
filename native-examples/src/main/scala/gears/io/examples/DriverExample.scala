@@ -2,9 +2,9 @@ package gears.io.examples
 
 import gears.async.*
 import gears.async.default.given
-import gears.asyncio.uring.UringReactor
 import gears.io.net.{DnsSupport, TcpSupport}
 import gears.io.reactor.{SingleReactorDriver, dnsSupport, tcpSupport}
+import gears.io.uring.UringReactor
 
 import java.net.InetSocketAddress
 

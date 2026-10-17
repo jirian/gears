@@ -1,7 +1,7 @@
 package gears.io.reactor
 
 import gears.async.{Async, Future, uninterruptible}
-import gears.asyncio.{Completion, HandleSlot, Reactor}
+import gears.io.reactor.{Completion, HandleSlot, Reactor}
 
 import java.io.FileNotFoundException
 import java.nio.ByteBuffer

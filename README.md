@@ -80,11 +80,29 @@ See [LICENSE](./LICENSE) for more details.
 
 ## Scala Native async I/O demos
 
-The cross-built `asyncio` project (JVM and Native) is interface only: `Op`, `Completion`,
+The `io` module (`gears-io`, not yet published) adds direct-style I/O on top of Gears:
+TCP, UDP and Unix sockets, files, DNS, TLS, an HTTP/1.1 client and server, and WebSockets.
+Its API is cross-built; the backend is Scala Native only. On Linux it runs on an io_uring
+implementation of the `gears.asyncio.Reactor` interface below (`gears.asyncio.uring` in
+`nativeAsyncioLoop`) through `UringPerThreadSupport`, a multi-threaded Gears scheduler with
+one reactor per thread. `SingleReactorDriver` runs the same layer on any reactor whose
+handles are POSIX descriptors, such as the kqueue one. It needs liburing, OpenSSL and Linux
+5.11 or later; see [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+`native-examples` holds runnable examples of the Linux io_uring backend, one per feature:
+TCP, UDP and Unix sockets, DNS, files and positioned file I/O, cancellation, the HTTP
+client and server with streaming, HTTPS, WebSockets, the `gears.asyncio.Reactor` interface used
+directly, and the gears network layer on any reactor through `SingleReactorDriver`. Run one
+from the repository root with `sbt 'nativeExamples/run tcp-echo'`, or name several; without a
+name it lists them all. They need liburing, OpenSSL and the `openssl` CLI, as the native tests do.
+
+The cross-built `asyncio` project (package `gears.asyncio`) (JVM and Native) is interface only: `Op`, `Completion`,
 the `Reactor` trait with `Reactor.Factory`, and the `Ops` factory that each reactor exposes
 as `reactor.ops` for building reads, writes, accepts, connects, timers, custom readiness
-ops, blocking tasks, promises, and name resolution. `nativeAsyncioLoop` implements it in
-`asyncio.kqueue`: `KqueueReactor`, `KqueueOps`, the concrete op classes, and the blocker
+ops, blocking tasks, and name resolution. The reactor has no promise op: code written
+against it uses gears promises. A scheduler drives the loop with `runOnce`, and other
+threads wake it with `wakeup`. `nativeAsyncioLoop` implements it in
+`gears.asyncio.kqueue`: `KqueueReactor`, `KqueueOps`, the concrete op classes, and the blocker
 pool. The kqueue demos use those internals directly. The gears demos use only the interface,
 including `reactor.handles` for opening files, sockets, and pipes by `Address`, so they
 work with any reactor's handle type; they receive a `Reactor.Factory` from their `Main`,
@@ -182,9 +200,26 @@ run by putting `gears` before the command, for example `kqueueDemo/run gears kv-
 the caller until the op finishes, so the code reads sequentially; wrapping a call in a
 `Future` runs the op alongside other work. Reactors are thread-owned: `ReactorFutures.run` makes the calling
 thread the reactor thread, running the program as a future under a scheduler bound to
-that thread and the reactor's loop as its event loop, so futures submit to the reactor
+that thread, and alternating between the scheduler's queued tasks and turns of the
+reactor's loop, blocking only when no task is queued. So futures submit to the reactor
 directly and everything a program spawns stays on that thread (there is no work stealing
 or balancing yet). The test suites run against both versions.
+
+`kqueueDemo/run gears bench` is a stress test to measure reactor changes against: an
+echo server and its clients run on two reactor threads in one process, through five
+scenarios that each stress a different cost (one message in flight; the same with a
+timeout armed and cancelled per round trip; many connections at once; full-duplex
+pipelining with a write per message; and blocking tasks completing on worker threads).
+`kqueueDemo/run bench` runs the same scenarios written against `KqueueLoop` directly,
+with no reactor, as a reference for what a hand-written loop costs.
+`kqueue-demo/bench/compare.py before=<old executable> after=<new executable>` runs saved
+builds alternately and reports each scenario's median microseconds per operation and the
+change (add `raw=<executable>@raw` for the reference).
+`kqueue-demo/bench/build.sh <commit> <output>` builds an executable to compare: the commit
+linked in release-fast mode against a Scala Native nightly, because 0.5.12's GC can crash
+multithreaded release builds of the gears demos (scala-native#5080). Setting
+`SCALA_NATIVE_NIGHTLY=1` when starting sbt builds against the nightly too; otherwise the
+build uses Scala Native 0.5.12.
 
 Stop the long-running servers with Ctrl+C. Use `sbt 'show kqueueDemo/nativeLink'`
 to build and locate the executable for running directly.
@@ -199,3 +234,4 @@ clients only. The suites skip themselves on other operating systems.
 ```bash
 sbt kqueueDemoTests/test
 ```
+

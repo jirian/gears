@@ -38,6 +38,8 @@
               llvm
               clang
               boehmgc
+              liburing
+              openssl
               libunwind
               zlib
               # Scala.js deps

@@ -38,7 +38,7 @@ jobs:
         java-version: 21
     - uses: sbt/setup-sbt@v1
     - name: Test
-      run: sbt rootJVM/test
+      run: sbt 'rootJVM/testOnly *; ioJVM/testOnly *; asyncioJVM/testOnly *'
   test-native:
     strategy:
       fail-fast: false
@@ -55,12 +55,33 @@ jobs:
         java-version: 21
     - uses: sbt/setup-sbt@v1
     - name: Install scala-native dependencies
-      run: sudo apt-get install clang libstdc++-12-dev libgc-dev
+      run: sudo apt-get install clang libstdc++-12-dev libgc-dev liburing-dev libssl-dev
     - name: Test
       # Restart the server so the next invocation picks up GC_MAXIMUM_HEAP_SIZE.
-      run: sbt 'rootNative/test; shutdown'
+      run: sbt 'asyncioNative/testOnly *; rootNative/testOnly *; ioNative/testOnly *; shutdown'
     - name: Stress Test with Lower Memory
       run: env GC_MAXIMUM_HEAP_SIZE=140M sbt 'rootNative/testOnly StressTest'
+    - name: Examples
+      run: >-
+        sbt 'nativeExamples/run tcp-echo udp unix-socket dns file-read file-write file-positioned cancellation
+        http-client http-streaming https websocket reactor driver'
+  test-native-macos:
+    strategy:
+      fail-fast: false
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+    - uses: coursier/cache-action@v6
+    - uses: actions/setup-java@v3
+      with:
+        distribution: temurin
+        java-version: 21
+    - uses: sbt/setup-sbt@v1
+    - name: Test
+      run: sbt 'asyncioNative/testOnly *; rootNative/testOnly *; ioNative/testOnly *; kqueueDemoTests/testOnly *'
   test-js:
     strategy:
       fail-fast: false
@@ -80,4 +101,4 @@ jobs:
           node-version: '26'
     - uses: sbt/setup-sbt@v1
     - name: Test
-      run: sbt rootJS/test
+      run: sbt 'rootJS/testOnly *; ioJS/testOnly *'

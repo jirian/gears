@@ -73,11 +73,11 @@ class SourceBehavior extends munit.FunSuite {
     val timeBefore = System.currentTimeMillis()
     Async.fromSync:
       val f = Future {
-        Future { sleep(300) }
+        Future { sleep(2000) }
         1
       }.await
       val timeAfter = System.currentTimeMillis()
-      assert(timeAfter - timeBefore < 290)
+      assert(timeAfter - timeBefore < 1500)
   }
 
   test("poll()") {

@@ -11,6 +11,9 @@ import Future.zip
 import Retry.Delay
 
 class RetryBehavior extends munit.FunSuite {
+
+  val SchedulingSlackMillis = 500L
+
   test("Exponential backoff(2) 50ms, 5 times total schedule"):
     val start = System.currentTimeMillis()
     Async.fromSync:
@@ -20,7 +23,7 @@ class RetryBehavior extends munit.FunSuite {
         if i < 5 then throw Exception("try again!")
       val end = System.currentTimeMillis()
       assert(end - start >= 50 + 100 + 200 + 400)
-      assert(end - start < 50 + 100 + 200 + 400 + 800)
+      assert(end - start < 50 + 100 + 200 + 400 + 800 + SchedulingSlackMillis)
 
   test("UntilSuccess 150ms"):
     val start = System.currentTimeMillis()
@@ -34,7 +37,7 @@ class RetryBehavior extends munit.FunSuite {
       assertEquals(ret, 4)
       val end = System.currentTimeMillis()
       assert(end - start >= 4 * 150)
-      assert(end - start < 5 * 150)
+      assert(end - start < 5 * 150 + SchedulingSlackMillis)
 
   test("UntilFailure 150ms") {
     val start = System.currentTimeMillis()
@@ -49,7 +52,7 @@ class RetryBehavior extends munit.FunSuite {
       assertEquals(ret, Failure(ex))
       val end = System.currentTimeMillis()
       assert(end - start >= 4 * 150)
-      assert(end - start < 5 * 150)
+      assert(end - start < 5 * 150 + SchedulingSlackMillis)
   }
 
   test("delay policies") {

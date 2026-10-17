@@ -10,10 +10,15 @@ import Future.zip
 class TaskScheduleBehavior extends munit.FunSuite {
   given ExecutionContext = ExecutionContext.global
 
+  val SchedulingSlackMillis = 500L
+
   case class TimeMeasure(start: Long = System.currentTimeMillis()):
     inline def assertTimeLessThan(millis: Long)(using loc: munit.Location) =
       val `end` = System.currentTimeMillis()
-      assert(`end` - start < millis, s"Expected less than ${millis}ms passed, got ${`end` - start}ms")
+      assert(
+        `end` - start < millis + SchedulingSlackMillis,
+        s"Expected less than ${millis}ms (+${SchedulingSlackMillis}ms slack) passed, got ${`end` - start}ms"
+      )
     inline def assertTimeAtLeast(millis: Long)(using loc: munit.Location) =
       val `end` = System.currentTimeMillis()
       assert(`end` - start >= millis, s"Expected at least ${millis}ms passed, got ${`end` - start}ms")

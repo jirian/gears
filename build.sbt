@@ -13,6 +13,7 @@ LocalRootProject / publish / skip := true
 val MUnitFramework = new TestFramework("munit.Framework")
 
 lazy val isLinux = System.getProperty("os.name").toLowerCase.contains("linux")
+lazy val isMac = System.getProperty("os.name").toLowerCase.contains("mac")
 
 // Common publishing settings for all platforms.
 organization := "ch.epfl.lamp"
@@ -70,6 +71,36 @@ lazy val root =
       )
     )
 
+// ported from https://github.com/bishabosha/scala-native-async-io/commit/6e8320d36c71f75c9daf85065f5c89729f0825c0
+lazy val kqueueDemo =
+  (project in file("kqueue-demo"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(
+      publish / skip := true,
+      Compile / mainClass := Some("example.Main"),
+      libraryDependencies += "com.lihaoyi" %% "mainargs" % "0.7.8",
+      // The gears mirrors in src/main/scala/gears-example run futures on gears' fork-join pool.
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    .dependsOn(io.native)
+
+// JVM tests that drive the linked kqueueDemo executable as a subprocess (macOS only)
+lazy val kqueueDemoTests =
+  (project in file("kqueue-demo/tests"))
+    .settings(
+      publish / skip := true,
+      libraryDependencies += "org.scalameta" %% "munit" % "1.3.6" % Test,
+      testFrameworks += MUnitFramework,
+      Test / fork := true,
+      Test / javaOptions ++= Def.taskDyn {
+        if (isMac) Def.task {
+          val binary = fileConverter.value.toPath((kqueueDemo / Compile / nativeLink).value)
+          Seq(s"-Dkqueue.demo.binary=${binary.toAbsolutePath}")
+        }
+        else Def.task(Seq.empty[String])
+      }.value
+    )
+
 // The native POSIX helpers in gears.io.unsafe were ported from
 // https://github.com/bishabosha/scala-native-async-io/commit/6e8320d36c71f75c9daf85065f5c89729f0825c0
 lazy val io =
@@ -90,8 +121,7 @@ lazy val io =
         else
           default || "UringReactorSuite.scala" || "UringNetSuite.scala" || "HttpSuite.scala" ||
           "UringFileSuite.scala" || "DriverLifecycleSuite.scala" || "CancelRetrySuite.scala" ||
-          "UringReadinessFallbackSuite.scala" || "BlockingPoolSuite.scala" || "TestReactor.scala" ||
-          "ReactorDriverNetSuite.scala" || "ReactorDriverHttpSuite.scala" || "FileSuite.scala" || "ExternalDriverSuite.scala"
+          "UringReadinessFallbackSuite.scala" || "BlockingPoolSuite.scala"
       },
       nativeConfig ~= { _.withMultithreading(true) }
     )

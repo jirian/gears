@@ -21,7 +21,10 @@ final class CountingDriver(inner: ReactorDriver) extends ReactorDriver:
 
 class ExternalDriverSuite extends munit.FunSuite:
   test("a driver implemented outside gears runs the network layer"):
-    val inner = SingleReactorDriver(() => gears.io.uring.UringReactor.open())
+    val inner = SingleReactorDriver(() =>
+      if scala.scalanative.meta.LinktimeInfo.isLinux then gears.io.uring.UringReactor.open()
+      else gears.io.kqueue.KqueueReactor.open()
+    )
     try
       val driver = CountingDriver(inner)
       given TcpSupport = driver.tcpSupport

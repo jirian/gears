@@ -1,10 +1,10 @@
-package gears.async.asyncio.reactor
+package gears.io.reactor
 
 import gears.async.*
-import gears.async.asyncio.uring.UringPerThreadSupport
 import gears.async.default.given
 import gears.asyncio.Reactor
 import gears.asyncio.uring.UringReactor
+import gears.io.uring.UringPerThreadSupport
 
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{CancellationException, CountDownLatch}

@@ -1,8 +1,8 @@
 import gears.async.*
-import gears.async.asyncio.Error
-import gears.async.asyncio.reactor.{ReactorDriver, SingleReactorDriver, fileSupport}
 import gears.async.default.given
-import gears.async.file.{FileSupport, WriteOptions}
+import gears.io.Error
+import gears.io.file.{FileSupport, WriteOptions}
+import gears.io.reactor.{ReactorDriver, SingleReactorDriver, fileSupport}
 
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets.UTF_8

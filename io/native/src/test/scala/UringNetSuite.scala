@@ -1,6 +1,6 @@
 import gears.async.*
-import gears.async.asyncio.uring.UringPerThreadSupport
-import gears.async.net.{DnsSupport, TcpSupport, UdpSupport}
+import gears.io.net.{DnsSupport, TcpSupport, UdpSupport}
+import gears.io.uring.UringPerThreadSupport
 
 import scala.concurrent.duration.*
 

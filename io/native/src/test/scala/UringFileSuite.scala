@@ -1,5 +1,5 @@
-import gears.async.asyncio.reactor.ReactorDriver
-import gears.async.asyncio.uring.UringPerThreadSupport
+import gears.io.reactor.ReactorDriver
+import gears.io.uring.UringPerThreadSupport
 
 class UringFileSuite extends FileBehavior:
   private lazy val support = UringPerThreadSupport(parallelism = 2)

@@ -1,8 +1,8 @@
 import gears.async.*
-import gears.async.asyncio.Error
-import gears.async.asyncio.tls.NativeTlsSupport
-import gears.async.http.*
-import gears.async.net.{DnsSupport, TcpStream, TcpSupport, TlsContext, TlsSupport}
+import gears.io.Error
+import gears.io.http.*
+import gears.io.net.{DnsSupport, TcpStream, TcpSupport, TlsContext, TlsSupport}
+import gears.io.tls.NativeTlsSupport
 
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
@@ -540,9 +540,9 @@ abstract class HttpBehavior extends munit.FunSuite:
       val client = Client(Transport(maxConnections = 1))
       try
         for length <- Seq(Some(100000L), None) do
-          val source = new gears.async.asyncio.Reader:
+          val source = new gears.io.Reader:
             private var remaining = 100000
-            def readBuf(buf: ByteBuffer)(using Async): gears.async.asyncio.Result[Unit] =
+            def readBuf(buf: ByteBuffer)(using Async): gears.io.Result[Unit] =
               if remaining == 0 then Left(Error.EOF)
               else
                 val n = math.min(remaining, buf.remaining())
@@ -568,8 +568,8 @@ abstract class HttpBehavior extends munit.FunSuite:
   test("early final responses cancel a blocked upload and release its reader before scope exit"):
     withServer(Server(router, maxBodySize = 8, errorLog = _ => ())): port =>
       val stopped = new java.util.concurrent.atomic.AtomicBoolean(false)
-      val source = new gears.async.asyncio.Reader:
-        def readBuf(buf: ByteBuffer)(using Async): gears.async.asyncio.Result[Unit] =
+      val source = new gears.io.Reader:
+        def readBuf(buf: ByteBuffer)(using Async): gears.io.Result[Unit] =
           try
             Future.Promise[Unit]().await
             Left(Error.EOF)
@@ -599,9 +599,9 @@ abstract class HttpBehavior extends munit.FunSuite:
       while input.readBuf(buffer) != Left(Error.EOF) do buffer.clear()
       writer.write("done")
     withServer(Server(handler, errorLog = _ => ())): port =>
-      val source = new gears.async.asyncio.Reader:
+      val source = new gears.io.Reader:
         private var sent = false
-        def readBuf(buf: ByteBuffer)(using Async): gears.async.asyncio.Result[Unit] =
+        def readBuf(buf: ByteBuffer)(using Async): gears.io.Result[Unit] =
           continueUpload.await
           if sent then Left(Error.EOF)
           else
@@ -625,8 +625,8 @@ abstract class HttpBehavior extends munit.FunSuite:
     withServer(Server(Handler.of(_ => HttpResponse.text("a" * 100000)), errorLog = _ => ())): port =>
       val client = Client(Transport(maxConnections = 1))
       try
-        val empty = new gears.async.asyncio.Reader:
-          def readBuf(buf: ByteBuffer)(using Async): gears.async.asyncio.Result[Unit] = Left(Error.EOF)
+        val empty = new gears.io.Reader:
+          def readBuf(buf: ByteBuffer)(using Async): gears.io.Result[Unit] = Left(Error.EOF)
         val request =
           StreamingRequest(HttpMethod.GET, Url.parse(s"http://127.0.0.1:$port/"), Headers.empty, empty, Some(0))
         val response = client.sendStreaming(request)
@@ -711,14 +711,14 @@ abstract class HttpBehavior extends munit.FunSuite:
       val counted = new TcpSupport:
         type Stream = underlying.Stream
         type Listener = underlying.Listener
-        def connect(address: java.net.SocketAddress, options: Seq[gears.async.net.SocketOption])(using
+        def connect(address: java.net.SocketAddress, options: Seq[gears.io.net.SocketOption])(using
             Async
-        ): gears.async.asyncio.Result[Stream] =
+        ): gears.io.Result[Stream] =
           connects.incrementAndGet()
           underlying.connect(address, options)
-        def listen(address: java.net.SocketAddress, options: Seq[gears.async.net.SocketOption])(using
+        def listen(address: java.net.SocketAddress, options: Seq[gears.io.net.SocketOption])(using
             Async
-        ): gears.async.asyncio.Result[Listener] =
+        ): gears.io.Result[Listener] =
           underlying.listen(address, options)
       val client = Client(new Transport(idleTimeout = 40.millis)(using counted, dns))
       val url = s"http://127.0.0.1:$port/"
@@ -745,8 +745,8 @@ abstract class HttpBehavior extends munit.FunSuite:
       Async.group:
         val client = Client(Transport(maxConnections = 1))
         val url = s"http://127.0.0.1:$port/"
-        val empty = new gears.async.asyncio.Reader:
-          def readBuf(buf: ByteBuffer)(using Async): gears.async.asyncio.Result[Unit] = Left(Error.EOF)
+        val empty = new gears.io.Reader:
+          def readBuf(buf: ByteBuffer)(using Async): gears.io.Result[Unit] = Left(Error.EOF)
         val response =
           client.sendStreaming(StreamingRequest(HttpMethod.GET, Url.parse(url), Headers.empty, empty, Some(0)))
         val waiting = Future(client.get(url))

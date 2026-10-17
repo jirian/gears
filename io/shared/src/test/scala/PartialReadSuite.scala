@@ -1,9 +1,9 @@
-package gears.async.http
+package gears.io.http
 
 import gears.async.Async
-import gears.async.asyncio.{Error, Reader, Result}
 import gears.async.default.given
-import gears.async.net.TcpStream
+import gears.io.net.TcpStream
+import gears.io.{Error, Reader, Result}
 
 import java.net.{InetSocketAddress, SocketAddress}
 import java.nio.ByteBuffer

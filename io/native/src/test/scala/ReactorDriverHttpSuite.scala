@@ -1,7 +1,7 @@
 import gears.async.*
-import gears.async.asyncio.reactor.{SingleReactorDriver, dnsSupport, tcpSupport}
 import gears.async.default.given
-import gears.async.net.{DnsSupport, TcpSupport}
+import gears.io.net.{DnsSupport, TcpSupport}
+import gears.io.reactor.{SingleReactorDriver, dnsSupport, tcpSupport}
 
 class ReactorDriverHttpSuite extends HttpBehavior:
   private lazy val driver = SingleReactorDriver(() => TestReactor.open())

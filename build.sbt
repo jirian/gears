@@ -117,7 +117,7 @@ lazy val nativeExamples =
     .enablePlugins(ScalaNativePlugin)
     .settings(
       publish / skip := true,
-      Compile / mainClass := Some("gears.async.asyncio.examples.Main"),
+      Compile / mainClass := Some("gears.io.examples.Main"),
       nativeConfig ~= { _.withMultithreading(true) }
     )
     .dependsOn(io.native)

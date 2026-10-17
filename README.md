@@ -80,7 +80,7 @@ See [LICENSE](./LICENSE) for more details.
 
 ## Scala Native async I/O
 
-The `io` module (`gears-io`, not yet published) adds direct-style I/O on top of Gears:
+The `io` module (`gears-io`, package `gears.io`, not yet published) adds direct-style I/O on top of Gears:
 TCP, UDP and Unix sockets, files, DNS, TLS, an HTTP/1.1 client and server, and WebSockets.
 Its API is cross-built; the backend is Scala Native on Linux. It runs on an io_uring
 implementation of the `gears.asyncio.Reactor` interface (`gears.asyncio.uring` in

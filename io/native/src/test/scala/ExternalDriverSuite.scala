@@ -1,11 +1,11 @@
 package consumer.driver
 
 import gears.async.*
-import gears.async.asyncio.Error
-import gears.async.asyncio.reactor.{IoGuard, ReactorDriver, SingleReactorDriver, tcpSupport}
 import gears.async.default.given
-import gears.async.net.TcpSupport
 import gears.asyncio.Reactor
+import gears.io.Error
+import gears.io.net.TcpSupport
+import gears.io.reactor.{IoGuard, ReactorDriver, SingleReactorDriver, tcpSupport}
 
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer

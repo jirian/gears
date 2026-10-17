@@ -1,7 +1,7 @@
 import gears.async.*
-import gears.async.asyncio.Error
-import gears.async.asyncio.reactor.UnixSocketAddress
-import gears.async.net.{DnsSupport, TcpStream, TcpSupport, UdpSupport}
+import gears.io.Error
+import gears.io.net.{DnsSupport, TcpStream, TcpSupport, UdpSupport}
+import gears.io.reactor.UnixSocketAddress
 
 import java.net.{InetSocketAddress, UnknownHostException}
 import java.nio.ByteBuffer
@@ -54,7 +54,7 @@ abstract class NetBehavior(driverName: String) extends munit.FunSuite:
     run:
       val listener = TcpSupport.listen(InetSocketAddress("127.0.0.1", 0)).toOption.get
       try
-        val reset = TcpSupport.connect(listener.localAddress, gears.async.net.SocketOption.linger(0)).toOption.get
+        val reset = TcpSupport.connect(listener.localAddress, gears.io.net.SocketOption.linger(0)).toOption.get
         reset.close()
         AsyncOperations.sleep(50)
         val client = TcpSupport.connect(listener.localAddress).toOption.get
@@ -144,7 +144,7 @@ abstract class NetBehavior(driverName: String) extends munit.FunSuite:
       try
         val first = Future(server.readBuf(ByteBuffer.allocate(8)))
         AsyncOperations.sleep(30)
-        intercept[gears.async.asyncio.ConcurrentReadException](server.readBuf(ByteBuffer.allocate(1)))
+        intercept[gears.io.ConcurrentReadException](server.readBuf(ByteBuffer.allocate(1)))
         server.writeBuf(bytes("duplex"))
         val got = ByteBuffer.allocate(16)
         client.readBuf(got)

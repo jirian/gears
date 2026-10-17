@@ -1,6 +1,6 @@
 import gears.async.*
-import gears.async.asyncio.uring.UringPerThreadSupport
-import gears.async.net.{DnsSupport, TcpSupport}
+import gears.io.net.{DnsSupport, TcpSupport}
+import gears.io.uring.UringPerThreadSupport
 
 class HttpSuite extends HttpBehavior:
   private lazy val support = UringPerThreadSupport(parallelism = 2)

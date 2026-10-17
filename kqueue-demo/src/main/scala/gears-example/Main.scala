@@ -1,9 +1,10 @@
 package gearsexample
 
+import gears.asyncio.Address
+import gears.asyncio.Reactor
+import gears.asyncio.kqueue.KqueueReactor
+
 import mainargs.{ParserForMethods, arg, main}
-import asyncio.Address
-import asyncio.Reactor
-import asyncio.kqueue.KqueueReactor
 
 /** The gears mirrors, run as `kqueuedemo gears <command>` with the same commands and flags as the plain demos.
   *
@@ -123,6 +124,19 @@ object Main {
   @main
   def resolve(@arg host: String = "localhost"): Unit = {
     GearsWhois.resolve(host)
+  }
+  @main(doc = "Stress tests to measure reactor changes against; see kqueue-demo/bench/compare.py")
+  def bench(
+      @arg(doc = "comma-separated scenarios to run, or all of them when empty") scenarios: String = "",
+      @arg(doc = "multiplies every scenario's operation count") scale: Double = 1.0,
+      @arg(doc = "connections in the concurrent scenario") connections: Int = 64,
+      @arg(doc = "use TCP on 127.0.0.1 at --port instead of a Unix socket") tcp: mainargs.Flag,
+      @arg port: Int = 19876
+  ): Unit = {
+    val address =
+      if tcp.value then Address.IPv4("127.0.0.1", port)
+      else Address.Unix(s"/tmp/gears-bench-${System.nanoTime() % 1_000_000}.sock")
+    GearsBench.run(scenarios.split(',').toSeq.map(_.trim).filter(_.nonEmpty), scale, connections, address)
   }
   def main(args: Array[String]): Unit = {
     ParserForMethods(this).runOrExit(args.toIndexedSeq)

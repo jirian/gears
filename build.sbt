@@ -4,9 +4,16 @@ import sbtcrossproject.CrossPlugin.autoImport.{CrossType, crossProject}
 
 scalaVersion := "3.9.0"
 
+// The Scala Native nightly selected in project/plugins.sbt brings its libraries from the snapshot repository.
+ThisBuild / resolvers ++= (if (sys.env.get("SCALA_NATIVE_NIGHTLY").contains("1")) Seq(Resolver.sonatypeCentralSnapshots)
+                           else Nil)
+
 LocalRootProject / publish / skip := true
 
 val MUnitFramework = new TestFramework("munit.Framework")
+
+lazy val isLinux = System.getProperty("os.name").toLowerCase.contains("linux")
+lazy val isMac = System.getProperty("os.name").toLowerCase.contains("mac")
 
 // Common publishing settings for all platforms.
 organization := "ch.epfl.lamp"
@@ -37,17 +44,7 @@ lazy val root =
     .nativeSettings(
       Seq(
         nativeConfig ~= { c =>
-          val withLinking = c.withMultithreading(true)
-            .withLinkingOptions(c.linkingOptions ++ Seq("-luring", "-lssl", "-lcrypto"))
-          // Debug mode (the sbt-scala-native default) skips LLVM's optimizer
-          // and Scala Native's own whole-program NIR optimizer (inlining,
-          // devirtualization, dead-code elimination) entirely, favoring link
-          // speed over runtime performance. Opt into full optimization with
-          // `RELEASE=1 sbt run` / `nativeLink` when what matters is measuring
-          // or shipping optimized code, not iteration speed.
-          if (sys.env.contains("RELEASE"))
-            withLinking.withMode(scala.scalanative.build.Mode.releaseFast)
-          else withLinking
+          c.withMultithreading(true)
         }
       )
     )
@@ -73,8 +70,6 @@ lazy val root =
         }
       )
     )
-    // The uring-backed gears scheduler is built on the uring `asyncio.Reactor`.
-    .nativeConfigure(_.dependsOn(nativeAsyncioLoop))
 
 // The platform-independent reactor model: ops, completions, the Reactor trait, and the blocker pool.
 lazy val asyncio =
@@ -115,8 +110,50 @@ lazy val kqueueDemoTests =
       libraryDependencies += "org.scalameta" %% "munit" % "1.3.6" % Test,
       testFrameworks += MUnitFramework,
       Test / fork := true,
-      Test / javaOptions += {
-        val binary = fileConverter.value.toPath((kqueueDemo / Compile / nativeLink).value)
-        s"-Dkqueue.demo.binary=${binary.toAbsolutePath}"
-      }
+      Test / javaOptions ++= Def.taskDyn {
+        if (isMac) Def.task {
+          val binary = fileConverter.value.toPath((kqueueDemo / Compile / nativeLink).value)
+          Seq(s"-Dkqueue.demo.binary=${binary.toAbsolutePath}")
+        }
+        else Def.task(Seq.empty[String])
+      }.value
     )
+
+lazy val io =
+  crossProject(JSPlatform, JVMPlatform, NativePlatform)
+    .crossType(CrossType.Full)
+    .in(file("io"))
+    .settings(
+      name := "gears-io",
+      publish / skip := true,
+      libraryDependencies += "org.scalameta" %% "munit" % "1.3.6" % Test,
+      testFrameworks += MUnitFramework
+    )
+    .jvmSettings(scalacOptions += "-release:21")
+    .nativeSettings(
+      Test / unmanagedSources / excludeFilter := {
+        val default = (Test / unmanagedSources / excludeFilter).value
+        if (isLinux) default
+        else
+          default || "UringReactorSuite.scala" || "UringNetSuite.scala" || "HttpSuite.scala" ||
+          "UringFileSuite.scala" || "DriverLifecycleSuite.scala" || "CancelRetrySuite.scala" ||
+          "UringReadinessFallbackSuite.scala" || "BlockingPoolSuite.scala"
+      },
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    .jsSettings(
+      scalaJSLinkerConfig := (root.js / scalaJSLinkerConfig).value,
+      jsEnv := Def.uncached((root.js / jsEnv).value)
+    )
+    .dependsOn(root)
+    .nativeConfigure(_.dependsOn(nativeAsyncioLoop))
+
+lazy val nativeExamples =
+  (project in file("native-examples"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(
+      publish / skip := true,
+      Compile / mainClass := Some("gears.async.asyncio.examples.Main"),
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    .dependsOn(io.native)

@@ -2,15 +2,15 @@ package gearsexample
 
 import gears.async.Async
 import gears.async.Future
+import gears.asyncio.Address
+import gears.asyncio.Reactor
+import gears.asyncio.Slot
+import gears.asyncio.unsafe.NativeBuffer
 
 import java.io.IOException
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.Zone
 
-import asyncio.Address
-import asyncio.Reactor
-import asyncio.Slot
-import asyncio.unsafe.NativeBuffer
 import example.KQueueExampleIO.text
 import ReactorFutures.*
 

@@ -1,14 +1,15 @@
 package gearsexample
 
+import gears.asyncio.Address
+import gears.asyncio.AddressFamily
+import gears.asyncio.Reactor
+import gears.asyncio.ResolvedAddress
+import gears.asyncio.Slot
+import gears.asyncio.unsafe.NativeBuffer
+
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.Zone
 
-import asyncio.Address
-import asyncio.AddressFamily
-import asyncio.Reactor
-import asyncio.ResolvedAddress
-import asyncio.Slot
-import asyncio.unsafe.NativeBuffer
 import example.KQueueExampleIO.text
 import ReactorFutures.*
 

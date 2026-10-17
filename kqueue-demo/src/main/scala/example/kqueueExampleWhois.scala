@@ -1,21 +1,22 @@
 package example
 
+import gears.asyncio.AddressFamily
+import gears.asyncio.Completion
+import gears.asyncio.ResolvedAddress
+import gears.asyncio.Slot
+import gears.asyncio.kqueue.Connect
+import gears.asyncio.kqueue.KqueueOp
+import gears.asyncio.kqueue.KqueueReactor
+import gears.asyncio.kqueue.ReadIntoBuffer
+import gears.asyncio.kqueue.Resolve
+import gears.asyncio.kqueue.WriteFromBuffer
+import gears.asyncio.unsafe.NativeBuffer
+import gears.asyncio.unsafe.PosixSockets
+import gears.asyncio.unsafe.Sockets.Transport
+
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.Zone
 
-import asyncio.AddressFamily
-import asyncio.Completion
-import asyncio.ResolvedAddress
-import asyncio.Slot
-import asyncio.kqueue.Connect
-import asyncio.kqueue.KqueueOp
-import asyncio.kqueue.KqueueReactor
-import asyncio.kqueue.ReadIntoBuffer
-import asyncio.kqueue.Resolve
-import asyncio.kqueue.WriteFromBuffer
-import asyncio.unsafe.NativeBuffer
-import asyncio.unsafe.PosixSockets
-import asyncio.unsafe.Sockets.Transport
 import KQueueExampleIO.*
 
 /** Pulls a real reply off the internet with the WHOIS protocol (RFC 3912): resolve the host, connect to port 43, send

@@ -1,14 +1,15 @@
 package example
 
+import gears.asyncio.Completion
+import gears.asyncio.Interest
+import gears.asyncio.kqueue.Command
+import gears.asyncio.kqueue.KqueueReactor
+import gears.asyncio.unsafe.NativeBuffer
+
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.Zone
 
-import asyncio.Completion
-import asyncio.Interest
-import asyncio.kqueue.Command
-import asyncio.kqueue.KqueueReactor
-import asyncio.unsafe.NativeBuffer
 import KQueueExampleIO.*
 
 /** actually useless for "real" files, it always blocks, so use with a FIFO for example

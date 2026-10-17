@@ -1,12 +1,13 @@
 package gearsexample
 
+import gears.asyncio.Address
+import gears.asyncio.Reactor
+import gears.asyncio.unsafe.NativeBuffer
+
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.Zone
 
-import asyncio.Address
-import asyncio.Reactor
-import asyncio.unsafe.NativeBuffer
 import example.KQueueExampleIO.{StreamProtocol, drainTo}
 import ReactorFutures.*
 

@@ -1,14 +1,14 @@
 package example
 
+import gears.asyncio.unsafe.Bracket
+import gears.asyncio.unsafe.Bracket.FileOperation
+import gears.asyncio.unsafe.PosixFileOps
+import gears.asyncio.unsafe.PosixSockets
+import gears.asyncio.unsafe.Sockets.Flavor
+import gears.asyncio.unsafe.Sockets.Transport
+
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.*
-
-import asyncio.unsafe.Bracket
-import asyncio.unsafe.Bracket.FileOperation
-import asyncio.unsafe.PosixFileOps
-import asyncio.unsafe.PosixSockets
-import asyncio.unsafe.Sockets.Flavor
-import asyncio.unsafe.Sockets.Transport
 
 enum KQueueExampleAddress {
   case Unix(sock: String)

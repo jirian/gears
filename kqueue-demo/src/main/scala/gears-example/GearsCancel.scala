@@ -1,6 +1,11 @@
 package gearsexample
 
 import gears.async.Future
+import gears.asyncio.Completion
+import gears.asyncio.Interest
+import gears.asyncio.Reactor
+import gears.asyncio.Slot
+import gears.asyncio.unsafe.NativeBuffer
 
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CancellationException
@@ -9,17 +14,13 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.scalanative.unsafe.Zone
 import scala.util.Failure
 
-import asyncio.Completion
-import asyncio.Interest
-import asyncio.Reactor
-import asyncio.Slot
-import asyncio.unsafe.NativeBuffer
 import example.KQueueExampleIO.text
 import ReactorFutures.*
 
 /** Mirror of `example.KQueueExampleCancel`. Cancellation is just `Future.cancel()`: the bridge asks the reactor to
   * cancel the op, and the future is rejected when the reactor confirms through the completion's `onCancel`. Cancelling
-  * in the reactor is also what frees the read slot for the fresh read afterwards.
+  * in the reactor is also what frees the read slot for the fresh read afterwards. The reactor has no promise op here:
+  * code written against `Reactor` uses gears promises, which do not involve the reactor.
   */
 object GearsCancel {
 
@@ -65,17 +66,16 @@ object GearsCancel {
         // Everything below runs on the thread that owns `r`, so ops go straight to the reactor.
         val (readFd, writeFd) = r.handles.pipe()
         try {
-          val promise = r.ops.promise[Unit]() // nobody will complete it before it is cancelled
           val sleeperInterrupted = new AtomicBoolean()
           val readPerforms = new AtomicInteger() // shows the cancelled read is never performed
           val read = r.ops.whenReady(readFd, Interest.Read) { () =>
             readPerforms.incrementAndGet()
             r.handles.readNow(readFd, buf) != 0
           }
+          val blocking = r.ops.blocking(sleeper(1000, sleeperInterrupted))
           val pending = Seq(
             "read" -> Future(perform(r, read)), // nothing has been written yet
-            "blocking" -> Future(perform(r, r.ops.blocking(sleeper(1000, sleeperInterrupted)))),
-            "promise" -> Future(perform(r, promise)),
+            "blocking" -> Future(perform(r, blocking)),
             "timer" -> Future(perform(r, r.ops.timer(300)))
           )
           // Submitted straight to the reactor, with no future to cancel it: only closing the reactor can stop it.
@@ -94,7 +94,7 @@ object GearsCancel {
           val stubbornFinished = new AtomicBoolean()
           val stubbornResult = Slot[String]()
           val stubbornTask = Future(perform(r, r.ops.blocking(stubborn(300, stubbornFinished), stubbornResult)))
-          println("submitted a read, a blocking task, a promise, and a timer")
+          println("submitted a read, a blocking task, and a timer")
 
           perform(r, r.ops.timer(100))
           stubbornTask.cancel()
@@ -104,13 +104,13 @@ object GearsCancel {
             println(s"$name cancelled: ${isCancelled(future)}")
           }
 
-          // A promise is not Repeatable, so the reactor refuses it a second time, which `perform` throws.
+          // A blocking op is not Repeatable, so the reactor refuses it a second time, which `perform` throws.
           val refused =
             try {
-              perform(r, promise)
+              perform(r, blocking)
               false
             } catch case _: IllegalStateException => true
-          println(s"resubmitting the cancelled promise: ${if refused then "refused" else "accepted"}")
+          println(s"resubmitting the cancelled blocking task: ${if refused then "refused" else "accepted"}")
 
           // Closing a handle may remove what the reactor watches, so a read still pending on it must stay cancellable.
           val (orphanRead, orphanWrite) = r.handles.pipe()
@@ -125,18 +125,6 @@ object GearsCancel {
           stubbornTask.awaitResult
           println(s"a running blocking task had stopped before onCancel: ${stubbornFinished.get()}")
           println(s"the cancelled task left its slot empty: ${example.KQueueExampleCancel.isEmpty(stubbornResult)}")
-
-          // Completing the cancelled promise from another thread must not run its completion.
-          val completer = new Thread(() => promise.complete(()))
-          completer.start()
-          completer.join()
-          // Only the first completion counts.
-          val again =
-            try {
-              promise.complete(())
-              "accepted"
-            } catch case _: IllegalStateException => "refused"
-          println(s"completing the promise again: $again")
 
           // Data arrives only now; the cancelled read must not see it, and its slot takes a fresh read.
           r.handles.writeNow(writeFd, NativeBuffer.of("hello".getBytes(StandardCharsets.UTF_8)))

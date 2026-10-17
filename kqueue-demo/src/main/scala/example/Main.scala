@@ -137,6 +137,21 @@ object Main {
       s"release: ${scalanative.meta.LinktimeInfo.releaseMode}"
     ).productIterator.foreach(println)
   }
+  @main(doc =
+    "The gears bench scenarios against KqueueLoop directly, with no reactor; see kqueue-demo/bench/compare.py"
+  )
+  def bench(
+      @arg(doc = "comma-separated scenarios to run, or all of them when empty") scenarios: String = "",
+      @arg(doc = "multiplies every scenario's operation count") scale: Double = 1.0,
+      @arg(doc = "connections in the concurrent scenario") connections: Int = 64,
+      @arg(doc = "use TCP on 127.0.0.1 at --port instead of a Unix socket") tcp: mainargs.Flag,
+      @arg port: Int = 19876
+  ): Unit = {
+    val address =
+      if tcp.value then gears.asyncio.Address.IPv4("127.0.0.1", port)
+      else gears.asyncio.Address.Unix(s"/tmp/kqueue-bench-${System.nanoTime() % 1_000_000}.sock")
+    KQueueExampleBench.run(scenarios.split(',').toSeq.map(_.trim).filter(_.nonEmpty), scale, connections, address)
+  }
   def main(args: Array[String]): Unit = {
     // `gears <command> ...` runs the gears mirror of a demo from src/main/scala/gears-example.
     if args.headOption.contains("gears") then gearsexample.Main.main(args.tail)

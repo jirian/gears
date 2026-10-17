@@ -5,9 +5,9 @@ import munit.FunSuite
 /** Lives outside `asyncio`, where callers of the interface live. */
 class SlotAccessSuite extends FunSuite {
   test("callers can take a slot's value but not write to it") {
-    assertEquals(compileErrors("def read(slot: asyncio.Slot[Integer]): Integer = slot.clear()"), "")
-    assert(compileErrors("def write(slot: asyncio.Slot[Integer]): Unit = slot.set(Integer.valueOf(1))").nonEmpty)
-    assertEquals(compileErrors("def read(slot: asyncio.HandleSlot): Int = slot.clear()"), "")
-    assert(compileErrors("def write(slot: asyncio.HandleSlot): Unit = slot.set(1)").nonEmpty)
+    assertEquals(compileErrors("def read(slot: gears.asyncio.Slot[Integer]): Integer = slot.clear()"), "")
+    assert(compileErrors("def write(slot: gears.asyncio.Slot[Integer]): Unit = slot.set(Integer.valueOf(1))").nonEmpty)
+    assertEquals(compileErrors("def read(slot: gears.asyncio.HandleSlot): Int = slot.clear()"), "")
+    assert(compileErrors("def write(slot: gears.asyncio.HandleSlot): Unit = slot.set(1)").nonEmpty)
   }
 }

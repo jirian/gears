@@ -1,5 +1,11 @@
 package example
 
+import gears.asyncio.unsafe.Bracket
+import gears.asyncio.unsafe.Bracket.FileOperation
+import gears.asyncio.unsafe.NativeBuffer
+import gears.asyncio.unsafe.PosixErr.cError
+import gears.asyncio.unsafe.PosixSockets
+
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -9,12 +15,6 @@ import scala.scalanative.posix.sys.socket
 import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
-
-import asyncio.unsafe.Bracket
-import asyncio.unsafe.Bracket.FileOperation
-import asyncio.unsafe.NativeBuffer
-import asyncio.unsafe.PosixErr.cError
-import asyncio.unsafe.PosixSockets
 
 /** Building blocks shared by the kqueue demos: pointer-backed buffers, the stream framing, non-blocking I/O that
   * reports would-block and EOF as values instead of exceptions, and datagram peers.
@@ -114,7 +114,7 @@ object KQueueExampleIO {
   }
 
   // Non-blocking I/O, now provided by the loop project under the names the demos used.
-  export asyncio.unsafe.NonBlocking.{EOF, accept as nioAccept, read as nioReadBytes, write as nioWriteBytes}
+  export gears.asyncio.unsafe.NonBlocking.{EOF, accept as nioAccept, read as nioReadBytes, write as nioWriteBytes}
 
   /** A non-blocking pipe, closed after `use`. */
   def withPipe(use: (Int, Int) => Unit): Unit = {

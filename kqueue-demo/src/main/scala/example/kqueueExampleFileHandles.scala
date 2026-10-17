@@ -1,15 +1,15 @@
 package example
 
+import gears.asyncio.unsafe.PosixErr.cError
+import gears.asyncio.unsafe.PosixSockets
+import gears.asyncio.unsafe.Sockets.Flavor
+import gears.asyncio.unsafe.Sockets.Transport
+
 import java.io.IOException
 import scala.scalanative.posix.fcntl
 import scala.scalanative.posix.sys.resource
 import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe.*
-
-import asyncio.unsafe.PosixErr.cError
-import asyncio.unsafe.PosixSockets
-import asyncio.unsafe.Sockets.Flavor
-import asyncio.unsafe.Sockets.Transport
 
 /** Opens many descriptors and prints their numbers, to check the assumption behind an fd-indexed handler table:
   * descriptors are small, dense integers, the kernel hands out the lowest free number, and the soft RLIMIT_NOFILE

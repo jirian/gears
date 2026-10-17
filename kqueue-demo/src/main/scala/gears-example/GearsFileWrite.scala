@@ -1,10 +1,11 @@
 package gearsexample
 
+import gears.asyncio.Reactor
+import gears.asyncio.unsafe.NativeBuffer
+
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.Zone
 
-import asyncio.Reactor
-import asyncio.unsafe.NativeBuffer
 import ReactorFutures.*
 
 /** Mirror of `example.KQueueExampleFileWrite`: writes the message again after every completed write. */

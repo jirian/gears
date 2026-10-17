@@ -1,20 +1,21 @@
 package example
 
+import gears.asyncio.Completion
+import gears.asyncio.HandleSlot
+import gears.asyncio.Interest
+import gears.asyncio.kqueue.Accept
+import gears.asyncio.kqueue.Command
+import gears.asyncio.kqueue.KqueueReactor
+import gears.asyncio.unsafe.NativeBuffer
+import gears.asyncio.unsafe.PosixSockets
+import gears.asyncio.unsafe.Sockets.Transport
+
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.Zone
 
-import asyncio.Completion
-import asyncio.HandleSlot
-import asyncio.Interest
-import asyncio.kqueue.Accept
-import asyncio.kqueue.Command
-import asyncio.kqueue.KqueueReactor
-import asyncio.unsafe.NativeBuffer
-import asyncio.unsafe.PosixSockets
-import asyncio.unsafe.Sockets.Transport
 import KQueueExampleIO.*
 
 object KQueueExampleServerSocket {

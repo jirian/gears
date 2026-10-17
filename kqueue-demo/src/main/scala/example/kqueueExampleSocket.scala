@@ -1,17 +1,18 @@
 package example
 
+import gears.asyncio.Completion
+import gears.asyncio.kqueue.Command
+import gears.asyncio.kqueue.Connect
+import gears.asyncio.kqueue.KqueueReactor
+import gears.asyncio.kqueue.ReadIntoBuffer
+import gears.asyncio.kqueue.WriteFromBuffer
+import gears.asyncio.unsafe.NativeBuffer
+import gears.asyncio.unsafe.Sockets.Transport
+
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import scala.scalanative.unsafe.Zone
 
-import asyncio.Completion
-import asyncio.kqueue.Command
-import asyncio.kqueue.Connect
-import asyncio.kqueue.KqueueReactor
-import asyncio.kqueue.ReadIntoBuffer
-import asyncio.kqueue.WriteFromBuffer
-import asyncio.unsafe.NativeBuffer
-import asyncio.unsafe.Sockets.Transport
 import KQueueExampleIO.*
 
 object KQueueExampleSocket {

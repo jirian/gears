@@ -228,16 +228,11 @@ object Channel:
     var isClosed = false
     val cells = CellBuf()
 
-    // Listeners their sources have dropped, waiting to be removed from `cells`. `dropListener` must not take this
-    // channel's lock: it is called while other locks are held, such as a racing listener's lock (`Async.race` drops its
-    // listener from every other source while completing) or another channel's lock (a failed `acquire` during that
-    // channel's matching drops it too). Taking ours then deadlocks with a thread that holds ours and is waiting for one
-    // of those, as `lockBoth` does while matching. A dropped listener is dead and never locks again, so leaving it
-    // queued a little longer is harmless: matching skips it, and the next `locked` removes it.
+    // dropListener runs while other locks are held, so it must not take this channel's lock: that deadlocks with
+    // lockBoth. Dropped listeners are queued and removed by the next locked section.
     private val droppedReaders = java.util.concurrent.ConcurrentLinkedQueue[Reader]()
     private val droppedSenders = java.util.concurrent.ConcurrentLinkedQueue[(CanSend, Sender)]()
 
-    /** Runs `body` holding the channel's lock, first removing the listeners dropped since it was last held. */
     protected final inline def locked[R](inline body: R): R = synchronized:
       var r = droppedReaders.poll()
       while r != null do

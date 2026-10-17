@@ -70,23 +70,17 @@ lazy val root =
       )
     )
 
-// The platform-independent reactor model: ops, completions, the Reactor trait, and the blocker pool.
+// The reactor interface on every platform; on Native also the io_uring reactor and the POSIX helpers, the latter
+// ported from https://github.com/bishabosha/scala-native-async-io/commit/6e8320d36c71f75c9daf85065f5c89729f0825c0
 lazy val asyncio =
   crossProject(JVMPlatform, NativePlatform)
-    .crossType(CrossType.Pure)
+    .crossType(CrossType.Full)
     .in(file("asyncio"))
     .settings(
       publish / skip := true,
       libraryDependencies += "org.scalameta" %% "munit" % "1.3.6" % Test,
       testFrameworks += MUnitFramework
     )
-
-// ported from https://github.com/bishabosha/scala-native-async-io/commit/6e8320d36c71f75c9daf85065f5c89729f0825c0
-lazy val nativeAsyncioLoop =
-  (project in file("asyncio-native/loop"))
-    .enablePlugins(ScalaNativePlugin)
-    .settings(publish / skip := true)
-    .dependsOn(asyncio.native)
 
 lazy val io =
   crossProject(JSPlatform, JVMPlatform, NativePlatform)
@@ -116,7 +110,7 @@ lazy val io =
       jsEnv := Def.uncached((root.js / jsEnv).value)
     )
     .dependsOn(root)
-    .nativeConfigure(_.dependsOn(nativeAsyncioLoop))
+    .nativeConfigure(_.dependsOn(asyncio.native))
 
 lazy val nativeExamples =
   (project in file("native-examples"))

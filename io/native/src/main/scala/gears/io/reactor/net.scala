@@ -192,10 +192,7 @@ class ReactorTcpListener private[io] (
   private val access = gears.io.IoConcurrency()
 
   override def close(): Unit =
-    guard.close {
-      unistd.close(fd)
-      if unixPath != null then unlinkSocket(unixPath.nn)
-    }
+    guard.close(if unixPath != null then unlinkSocket(unixPath.nn), { unistd.close(fd); () })
 
   override def accept()(using Async): Result[Stream] = access.reading {
     either {
@@ -226,10 +223,7 @@ class ReactorUdpSocket private[io] (
   private val access = gears.io.IoConcurrency()
 
   override def close(): Unit =
-    guard.close {
-      unistd.close(fd)
-      if unixPath != null then unlinkSocket(unixPath.nn)
-    }
+    guard.close(if unixPath != null then unlinkSocket(unixPath.nn), { unistd.close(fd); () })
 
   override def sendTo(buf: Buffer, target: SocketAddress)(using Async): Result[Unit] = access.writing {
     either {

@@ -46,17 +46,33 @@ final class IoGuard:
   /** Closes the guard: runs `releaseHandle` now if no op is in flight, else cancels them all and runs it after the last
     * has finished. Closing twice does nothing.
     */
-  def close(releaseHandle: => Unit): Unit =
+  def close(releaseHandle: => Unit): Unit = close((), releaseHandle)
+
+  /** Closes this guard like the other `close`, but first runs `closing` at once, in the call that closes this guard. It
+    * is for cleanup that must not wait for the ops in flight, such as removing a socket's path before another socket
+    * can be bound to it. If `closing` throws, this guard still closes, and the exception is rethrown afterwards.
+    *
+    * @param closing
+    *   the cleanup to run at once
+    * @param releaseHandle
+    *   closes the handle
+    */
+  def close(closing: => Unit, releaseHandle: => Unit): Unit =
+    var failure: Throwable | Null = null
     val (toCancel, immediate) = synchronized:
       if closed then (Nil, false)
       else
         closed = true
+        // Under the lock, so the last op's release cannot close the handle before this has run.
+        try closing
+        catch case t: Throwable => failure = t
         if inFlight.isEmpty then (Nil, true)
         else
           closeHandle = () => releaseHandle
           (inFlight.toList, false)
     if immediate then releaseHandle
     toCancel.foreach(_.cancel())
+    if failure != null then throw failure.nn
 
 object IoGuard:
   final class Registration private[io] (val cancel: () => Unit)

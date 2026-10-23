@@ -64,10 +64,18 @@ object UringHandles extends Handles {
     (ends(0), ends(1))
   }
 
+  /** Closes `handle`, first removing the Unix socket path it was bound to, so that the removal cannot hit a newer
+    * socket bound to the same path after the close.
+    *
+    * @param handle
+    *   the descriptor to close
+    */
   def close(handle: Int): Unit = {
     val path = boundPaths.remove(handle)
-    PosixSockets.close(handle)
-    if path != null then Zone.acquire { implicit z => PosixFileOps.safeUnlink(toCString(path, StandardCharsets.UTF_8)) }
+    try
+      if path != null then
+        Zone.acquire { implicit z => PosixFileOps.safeUnlink(toCString(path, StandardCharsets.UTF_8)) }
+    finally PosixSockets.close(handle)
   }
 
   private def flavorOf(address: Address): Flavor = address match {

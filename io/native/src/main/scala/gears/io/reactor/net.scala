@@ -10,7 +10,6 @@ import gears.io.net.SocketOption
 import gears.io.reactor.{Address, Slot}
 import gears.io.unsafe.PosixFileOps
 import gears.io.unsafe.PosixSockets
-import gears.io.uring.SocketAddresses
 
 import java.io.IOException
 import java.net.Inet6Address
@@ -22,7 +21,7 @@ import scala.scalanative.memory.PointerBufferOps.given
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.netinet.in.IPPROTO_TCP
 import scala.scalanative.posix.netinet.tcp.TCP_NODELAY
-import scala.scalanative.posix.string.{memcpy, strerror}
+import scala.scalanative.posix.string.strerror
 import scala.scalanative.posix.sys.{socket => posixSocket}
 import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe._
@@ -60,40 +59,42 @@ private[io] def socketFamily(address: SocketAddress): Int =
     case inet: InetSocketAddress => throw IllegalArgumentException(s"Unresolved address: $inet")
     case other                   => throw IllegalArgumentException(s"Unsupported socket address: $other")
 
-private[io] def fillSockAddr(out: Ptr[Byte], addr: SocketAddress): posixSocket.socklen_t =
-  val storage = SocketAddresses.storage()
-  val length = SocketAddresses.encode(toAddress(addr), storage)
-  memcpy(out, SocketAddresses.pointer(storage).asInstanceOf[Ptr[Byte]], length.toLong.toCSize)
-  length
+private def bindTo(fd: Int, address: SocketAddress): Unit =
+  val err = SocketAddresses.withAddress(toAddress(address)): (addr, length) =>
+    if posixSocket.bind(fd, addr, length) < 0 then errno.errno else 0
+  if err != 0 then throw posixError("Failed to bind socket", err)
+
+private def startConnect(fd: Int, address: SocketAddress): Unit =
+  val err = SocketAddresses.withAddress(toAddress(address)): (addr, length) =>
+    if posixSocket.connect(fd, addr, length) < 0 then errno.errno else 0
+  if err != 0 && err != errno.EINPROGRESS then throw posixError(s"Failed to connect to $address", err)
 
 private[io] def parseSockAddr(addr: Ptr[Byte], length: posixSocket.socklen_t): SocketAddress =
   require(length.toLong <= SocketAddresses.storageSize, s"Oversized socket address: ${length.toInt} bytes")
   fromAddress(SocketAddresses.decode(addr.asInstanceOf[Ptr[posixSocket.sockaddr]], length))
 
 private[io] def getLocalAddress(fd: Int): SocketAddress =
-  Zone.acquire: zone =>
-    val addrLen = alloc[posixSocket.socklen_t]()(using zone)
-    val addr = alloc[posixSocket.sockaddr_storage]()(using zone).asInstanceOf[Ptr[Byte]]
-    !addrLen = sizeof[posixSocket.sockaddr_storage].toUInt
-    if posixSocket.getsockname(fd, addr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrLen) < 0 then
-      throw posixError("getsockname failed")
-    if (!addrLen).toLong > sizeof[posixSocket.sockaddr_storage].toLong then
-      throw IOException(s"getsockname returned oversized address: ${(!addrLen).toLong} bytes")
-    parseSockAddr(addr, !addrLen)
+  val addrLen = stackalloc[posixSocket.socklen_t]()
+  val addr = stackalloc[posixSocket.sockaddr_storage]().asInstanceOf[Ptr[Byte]]
+  !addrLen = sizeof[posixSocket.sockaddr_storage].toUInt
+  if posixSocket.getsockname(fd, addr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrLen) < 0 then
+    throw posixError("getsockname failed")
+  if (!addrLen).toLong > sizeof[posixSocket.sockaddr_storage].toLong then
+    throw IOException(s"getsockname returned oversized address: ${(!addrLen).toLong} bytes")
+  parseSockAddr(addr, !addrLen)
 
 private[io] def shutdownSocket(fd: Int, how: CInt): Unit =
   if posixSocket.shutdown(fd, how) < 0 then throw posixError("Failed to shut down socket")
 
 private[io] def getPeerAddress(fd: Int): SocketAddress =
-  Zone.acquire: zone =>
-    val addrLen = alloc[posixSocket.socklen_t]()(using zone)
-    val addr = alloc[posixSocket.sockaddr_storage]()(using zone).asInstanceOf[Ptr[Byte]]
-    !addrLen = sizeof[posixSocket.sockaddr_storage].toUInt
-    if posixSocket.getpeername(fd, addr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrLen) < 0 then
-      throw posixError("getpeername failed")
-    if (!addrLen).toLong > sizeof[posixSocket.sockaddr_storage].toLong then
-      throw IOException(s"getpeername returned oversized address: ${(!addrLen).toLong} bytes")
-    parseSockAddr(addr, !addrLen)
+  val addrLen = stackalloc[posixSocket.socklen_t]()
+  val addr = stackalloc[posixSocket.sockaddr_storage]().asInstanceOf[Ptr[Byte]]
+  !addrLen = sizeof[posixSocket.sockaddr_storage].toUInt
+  if posixSocket.getpeername(fd, addr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrLen) < 0 then
+    throw posixError("getpeername failed")
+  if (!addrLen).toLong > sizeof[posixSocket.sockaddr_storage].toLong then
+    throw IOException(s"getpeername returned oversized address: ${(!addrLen).toLong} bytes")
+  parseSockAddr(addr, !addrLen)
 
 private[io] def toAddress(address: InetSocketAddress): Address =
   address.getAddress match
@@ -116,30 +117,29 @@ private[io] def unlinkSocket(path: String): Unit =
   Zone.acquire { implicit z => PosixFileOps.safeUnlink(toCString(path, StandardCharsets.UTF_8)) }
 
 private[io] def applySocketOption(fd: Int, opt: SocketOption): Unit =
-  Zone.acquire: zone =>
-    def setInt(level: CInt, name: CInt, v: Int): Unit =
-      val p = alloc[CInt]()(using zone)
-      !p = v
-      if posixSocket.setsockopt(fd, level, name, p.asInstanceOf[Ptr[Byte]], sizeof[CInt].toUInt) < 0 then
-        throw posixError("setsockopt failed")
-    opt match
-      case SocketOption.sendBufSize(n)   => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_SNDBUF, n)
-      case SocketOption.recvBufSize(n)   => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_RCVBUF, n)
-      case SocketOption.keepAlive(k)     => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_KEEPALIVE, if k then 1 else 0)
-      case SocketOption.reuseAddr(r)     => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_REUSEADDR, if r then 1 else 0)
-      case SocketOption.noDelay(nd)      => setInt(IPPROTO_TCP, TCP_NODELAY, if nd then 1 else 0)
-      case SocketOption.linger(interval) =>
-        val p = alloc[posixSocket.linger]()(using zone)
-        p._1 = if interval < 0 then 0 else 1
-        p._2 = if interval < 0 then 0 else interval
-        if posixSocket.setsockopt(
-            fd,
-            posixSocket.SOL_SOCKET,
-            posixSocket.SO_LINGER,
-            p.asInstanceOf[Ptr[Byte]],
-            sizeof[posixSocket.linger].toUInt
-          ) < 0
-        then throw posixError("setsockopt failed")
+  def setInt(level: CInt, name: CInt, v: Int): Unit =
+    val p = stackalloc[CInt]()
+    !p = v
+    if posixSocket.setsockopt(fd, level, name, p.asInstanceOf[Ptr[Byte]], sizeof[CInt].toUInt) < 0 then
+      throw posixError("setsockopt failed")
+  opt match
+    case SocketOption.sendBufSize(n)   => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_SNDBUF, n)
+    case SocketOption.recvBufSize(n)   => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_RCVBUF, n)
+    case SocketOption.keepAlive(k)     => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_KEEPALIVE, if k then 1 else 0)
+    case SocketOption.reuseAddr(r)     => setInt(posixSocket.SOL_SOCKET, posixSocket.SO_REUSEADDR, if r then 1 else 0)
+    case SocketOption.noDelay(nd)      => setInt(IPPROTO_TCP, TCP_NODELAY, if nd then 1 else 0)
+    case SocketOption.linger(interval) =>
+      val p = stackalloc[posixSocket.linger]()
+      p._1 = if interval < 0 then 0 else 1
+      p._2 = if interval < 0 then 0 else interval
+      if posixSocket.setsockopt(
+          fd,
+          posixSocket.SOL_SOCKET,
+          posixSocket.SO_LINGER,
+          p.asInstanceOf[Ptr[Byte]],
+          sizeof[posixSocket.linger].toUInt
+        ) < 0
+      then throw posixError("setsockopt failed")
 
 class ReactorTcpStream private[io] (
     private[io] val fd: Int,
@@ -265,12 +265,7 @@ trait ReactorUdpSupport(driver: ReactorDriver) extends net.UdpSupport:
         case unix: UnixSocketAddress => unix.path
         case _                       => null
       if unixPath != null then PosixSockets.bindUnixAddr(fd, unixPath.nn, removeExisting = true)
-      else
-        Zone.acquire: zone =>
-          val sockAddr = alloc[posixSocket.sockaddr_storage]()(using zone).asInstanceOf[Ptr[Byte]]
-          val actualSize = fillSockAddr(sockAddr, address)
-          if posixSocket.bind(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], actualSize) < 0 then
-            throw posixError("Failed to bind socket")
+      else bindTo(fd, address)
       ReactorUdpSocket(fd, driver, getLocalAddress(fd), unixPath)
 
 trait ReactorTcpSupport(driver: ReactorDriver) extends net.TcpSupport:
@@ -284,12 +279,7 @@ trait ReactorTcpSupport(driver: ReactorDriver) extends net.TcpSupport:
     val fd = openSocket(family, posixSocket.SOCK_STREAM)
     closeFdOnFailure(fd):
       options.foreach(applySocketOption(fd, _))
-      Zone.acquire: zone =>
-        val sockAddr = alloc[posixSocket.sockaddr_storage]()(using zone).asInstanceOf[Ptr[Byte]]
-        val addrSize = fillSockAddr(sockAddr, address)
-        if posixSocket.connect(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize) < 0
-          && errno.errno != errno.EINPROGRESS
-        then throw posixError(s"Failed to connect to $address")
+      startConnect(fd, address)
       driver.await(null)(r => r.ops.connect(fd))
       ReactorTcpStream(fd, driver, localAddress = getLocalAddress(fd), remoteAddress = address)
 
@@ -306,11 +296,6 @@ trait ReactorTcpSupport(driver: ReactorDriver) extends net.TcpSupport:
       val defaults = if unixPath == null then Seq(SocketOption.reuseAddr(true)) else Nil
       (defaults ++ options).foreach(applySocketOption(fd, _))
       if unixPath != null then PosixSockets.bindUnixAddr(fd, unixPath.nn, removeExisting = true)
-      else
-        Zone.acquire: zone =>
-          val sockAddr = alloc[posixSocket.sockaddr_storage]()(using zone).asInstanceOf[Ptr[Byte]]
-          val addrSize = fillSockAddr(sockAddr, address)
-          if posixSocket.bind(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize) < 0 then
-            throw posixError("Failed to bind socket")
+      else bindTo(fd, address)
       if posixSocket.listen(fd, 128) < 0 then throw posixError("Failed to listen on socket")
       ReactorTcpListener(fd, driver, getLocalAddress(fd), unixPath)

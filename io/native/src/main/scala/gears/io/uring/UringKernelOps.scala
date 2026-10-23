@@ -5,6 +5,7 @@ import gears.io.reactor.HandleSlot
 import gears.io.reactor.Interest
 import gears.io.reactor.Repeatable
 import gears.io.reactor.Slot
+import gears.io.reactor.SocketAddresses
 import gears.io.unsafe.PosixSockets
 
 import java.io.FileNotFoundException

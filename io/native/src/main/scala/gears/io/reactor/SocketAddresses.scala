@@ -1,6 +1,5 @@
-package gears.io.uring
+package gears.io.reactor
 
-import gears.io.reactor.Address
 import gears.io.unsafe.PosixSockets
 
 import java.io.IOException
@@ -25,17 +24,18 @@ object SocketAddresses {
   def pointer(storage: Array[Byte]): Ptr[socket.sockaddr] =
     storage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[socket.sockaddr]]
 
-  def encode(address: Address, storage: Array[Byte]): socket.socklen_t = {
-    val copy: (Ptr[socket.sockaddr], socket.socklen_t) => socket.socklen_t = { (addr, length) =>
+  def withAddress[A](address: Address)(use: (Ptr[socket.sockaddr], socket.socklen_t) => A): A =
+    address match {
+      case Address.Unix(path)       => PosixSockets.withUnixSocketAddr(path)(use)
+      case Address.IPv4(host, port) => PosixSockets.withIPv4SocketAddr(host, port)(use)
+      case Address.IPv6(host, port) => PosixSockets.withIPv6SocketAddr(host, port)(use)
+    }
+
+  def encode(address: Address, storage: Array[Byte]): socket.socklen_t =
+    withAddress(address) { (addr, length) =>
       string.memcpy(pointer(storage).asInstanceOf[Ptr[Byte]], addr.asInstanceOf[Ptr[Byte]], length.toLong.toCSize)
       length
     }
-    address match {
-      case Address.Unix(path)       => PosixSockets.withUnixSocketAddr(path)(copy)
-      case Address.IPv4(host, port) => PosixSockets.withIPv4SocketAddr(host, port)(copy)
-      case Address.IPv6(host, port) => PosixSockets.withIPv6SocketAddr(host, port)(copy)
-    }
-  }
 
   def decode(addr: Ptr[socket.sockaddr], length: socket.socklen_t): Address = {
     require(length.toLong >= sizeOf[socket.sa_family_t].toLong, s"Short socket address: ${length.toInt} bytes")

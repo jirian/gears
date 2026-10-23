@@ -5,7 +5,7 @@ import scala.collection.mutable
 // The descriptor is closed only after every registered op has finished, so its number cannot be reused under one.
 final class IoGuard:
   private var closed = false
-  private val inFlight = mutable.HashSet.empty[IoGuard.Registration]
+  private val inFlight = mutable.ArrayBuffer.empty[IoGuard.Registration]
   private var closeHandle: (() => Unit) | Null = null
 
   def submit(cancel: () => Unit)(submit: IoGuard.Registration => Unit): IoGuard.Registration | Null = synchronized:

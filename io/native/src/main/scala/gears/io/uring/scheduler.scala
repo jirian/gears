@@ -2,7 +2,6 @@ package gears.io.uring
 
 import gears.async._
 import gears.async.native
-import gears.io.reactor.Reactor
 import gears.io.reactor.{
   IoGuard,
   ReactorDnsSupport,
@@ -36,6 +35,7 @@ class UringPerThreadScheduler(
 ) extends Scheduler
     with ReactorDriver
     with AutoCloseable:
+  type R = UringReactor
 
   require(parallelism > 0, "parallelism must be positive")
   require(entriesPerShard > 0, "entriesPerShard must be positive")
@@ -92,7 +92,7 @@ class UringPerThreadScheduler(
   /** Runs the op `build` makes and waits for it. On a shard of this scheduler, the op goes into that shard's ring;
     * otherwise it becomes a shared job that the next free shard starts.
     */
-  override def await(guard: IoGuard | Null)(build: (r: Reactor) => r.Op)(using Async): Unit =
+  override def await(guard: IoGuard | Null)(build: (r: UringReactor) => r.Op)(using Async): Unit =
     if closed then throw closedError()
     val pending = Future
       .withResolver[Unit]: resolver =>
@@ -112,7 +112,7 @@ class UringPerThreadScheduler(
   /** Opens with `IORING_OP_OPENAT` instead of a pool thread, always adding `O_CLOEXEC`. */
   override def openFile(path: String, flags: Int, mode: Int)(using Async): Int =
     val closeOnExec = gears.io.uring.LinuxConstants.O_CLOEXEC
-    awaitHandle(null)((r, opened) => uring(r).ops.openAt(path, flags | closeOnExec, mode, opened).asInstanceOf[r.Op])
+    awaitHandle(null)((r, opened) => r.ops.openAt(path, flags | closeOnExec, mode, opened))
 
   /** io_uring takes heap buffers in place. */
   override def acceptsHeapBuffers: Boolean = true
@@ -122,13 +122,11 @@ class UringPerThreadScheduler(
     await(guard)(r => r.ops.read(fd, buf))
 
   override def writeFile(guard: IoGuard | Null, fd: Int, buf: ByteBuffer)(using Async): Unit =
-    await(guard)(r => uring(r).ops.writeFile(fd, buf).asInstanceOf[r.Op])
+    await(guard)(r => r.ops.writeFile(fd, buf))
   override def readAt(guard: IoGuard, fd: Int, buf: ByteBuffer, offset: Long)(using Async): Unit =
-    await(guard)(r => uring(r).ops.readAt(fd, buf, offset).asInstanceOf[r.Op])
+    await(guard)(r => r.ops.readAt(fd, buf, offset))
   override def writeAt(guard: IoGuard, fd: Int, buf: ByteBuffer, offset: Long)(using Async): Unit =
-    await(guard)(r => uring(r).ops.writeAt(fd, buf, offset).asInstanceOf[r.Op])
-
-  private def uring(r: Reactor): UringReactor = r.asInstanceOf[UringReactor]
+    await(guard)(r => r.ops.writeAt(fd, buf, offset))
 
   /** Runs `body` after `delay`, using a ring timer on the current shard or on the next free one. */
   override def schedule(delay: FiniteDuration, body: Runnable): Cancellable =
@@ -233,4 +231,4 @@ class UringPerThreadSupport(
   /** Sleeps on a ring timer, so a sleeping fiber doesn't hold a thread. */
   override def sleep(millis: Long)(using Async): Unit =
     require(millis >= 0, "sleep duration must be nonnegative")
-    await(null)(r => r.asInstanceOf[UringReactor].ops.timer(millis.millis).asInstanceOf[r.Op])
+    await(null)(r => r.ops.timer(millis.millis))

@@ -10,15 +10,16 @@ import scala.util.control.NonFatal
   * runtime they use, and every op is handed to the reactor thread. Closing it closes the reactor, which cancels the ops
   * still pending.
   */
-final class SingleReactorDriver(factory: Reactor.Factory[Reactor], threadName: String = "gears-reactor")
+final class SingleReactorDriver[A <: Reactor](factory: Reactor.Factory[A], threadName: String = "gears-reactor")
     extends ReactorDriver
     with AutoCloseable:
+  type R = A
 
   private val tasks = ConcurrentLinkedQueue[Runnable]()
 
   @volatile private var closed = false
   @volatile private var running = true
-  @volatile private var reactor: Reactor | Null = null
+  @volatile private var reactor: A | Null = null
   @volatile private var startFailure: Throwable | Null = null
   private val started = CountDownLatch(1)
 
@@ -67,7 +68,7 @@ final class SingleReactorDriver(factory: Reactor.Factory[Reactor], threadName: S
       tasks.offer(() => body)
       reactor.nn.wakeup()
 
-  def await(guard: IoGuard | Null)(build: (r: Reactor) => r.Op)(using Async): Unit =
+  def await(guard: IoGuard | Null)(build: (r: A) => r.Op)(using Async): Unit =
     if closed then throw IllegalStateException("The reactor driver is closed")
     val r = reactor.nn
     val pending = Future

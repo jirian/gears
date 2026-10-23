@@ -4,7 +4,6 @@ import gears.async.*
 import gears.async.default.given
 import gears.io.Error
 import gears.io.net.TcpSupport
-import gears.io.reactor.Reactor
 import gears.io.reactor.{IoGuard, ReactorDriver, SingleReactorDriver, tcpSupport}
 
 import java.net.InetSocketAddress
@@ -12,10 +11,11 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicInteger
 
-final class CountingDriver(inner: ReactorDriver) extends ReactorDriver:
+final class CountingDriver(val inner: ReactorDriver) extends ReactorDriver:
+  type R = inner.R
   val submitted = AtomicInteger()
 
-  def await(guard: IoGuard | Null)(build: (r: Reactor) => r.Op)(using Async): Unit =
+  def await(guard: IoGuard | Null)(build: (r: R) => r.Op)(using Async): Unit =
     submitted.incrementAndGet()
     inner.await(guard)(build)
 

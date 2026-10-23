@@ -25,7 +25,7 @@ import uringStructOps.*
 // The kernel owns a kernel op's buffers until its CQE arrives, so a cancelled op's onCancel waits for that CQE.
 final class UringReactor private (entries: Int, blockerPool: BlockingPool, resolver: HostResolver) extends Reactor {
 
-  type Op = UringOp[this.type]
+  type Op = Owned[this.type]
 
   private val opsBuilder: UringOps[this.type] = new UringOps[this.type](resolver)
 
@@ -43,7 +43,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   /** One submission of a kernel op, keyed by the user data `id` its SQE and CQE carry. After a cancel, `pending` moves
     * to `cancelled` until the CQE arrives; `cancelQueued` records that the cancel SQE itself was submitted.
     */
-  private final class InFlight(val id: Long, val op: UringKernelOp[?], var pending: Pending[?] | Null) {
+  private final class InFlight(val id: Long, val op: UringKernelOp, var pending: Pending[?] | Null) {
     var cancelled: Pending[?] | Null = null
     var submissionFailure: Throwable | Null = null
     var cancelRequested = false
@@ -90,7 +90,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     ts
   }
 
-  private val resolvedQueue = new java.util.concurrent.ConcurrentLinkedQueue[UringBlockingOp[?]]()
+  private val resolvedQueue = new java.util.concurrent.ConcurrentLinkedQueue[UringBlockingOp]()
   private val wakeFd: Int = eventfd.eventfd(0.toUInt, eventfd.EFD_CLOEXEC)
   if wakeFd < 0 then {
     io_uring_queue_exit(ring)
@@ -100,9 +100,9 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 
   private val wakePending = new java.util.concurrent.atomic.AtomicBoolean()
 
-  private val pendingBlocking = scala.collection.mutable.HashSet.empty[UringBlockingOp[?]]
+  private val pendingBlocking = scala.collection.mutable.HashSet.empty[UringBlockingOp]
 
-  private val cancellingBlocking = scala.collection.mutable.HashSet.empty[UringBlockingOp[?]]
+  private val cancellingBlocking = scala.collection.mutable.HashSet.empty[UringBlockingOp]
 
   private object wakeLock {}
   @volatile private var closed = false
@@ -115,16 +115,16 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   def submit[C <: Op](op: C, completion: Completion[C]): Unit = {
     if closed then throw new IllegalStateException("The reactor is closed")
     op match {
-      case _: Repeatable   => ()
-      case one: UringOp[?] =>
+      case _: Repeatable => ()
+      case one: UringOp  =>
         if one.submitted then throw new IllegalStateException(s"$op is not Repeatable and was already submitted")
     }
     val pending = new Pending(op, completion)
     op match {
-      case kernel: UringKernelOp[?] =>
+      case kernel: UringKernelOp =>
         if kernel.inFlight != null then throw new IllegalStateException(s"$op is already pending")
         enqueue(kernel, pending)
-      case blocking: UringBlockingOp[?] =>
+      case blocking: UringBlockingOp =>
         if blocking.pending != null then throw new IllegalStateException(s"$op is already pending")
         if blocking.cancelling != null then
           throw new IllegalStateException(s"$op is still running after being cancelled")
@@ -145,7 +145,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   /** Prepares and submits one SQE for `op`. If the submit fails, the op is cancelled and fails with that error once its
     * CQE arrives, since the kernel may already have its buffers.
     */
-  private def enqueue(op: UringKernelOp[?], pending: Pending[?]): Unit = {
+  private def enqueue(op: UringKernelOp, pending: Pending[?]): Unit = {
     val sqe = nextSqe()
     try op.prepareSubmission(sqe)
     catch {
@@ -210,7 +210,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       }
 
   /** Called by a pool thread when `blocking` has settled: queues it for the reactor thread and wakes the loop. */
-  private[uring] def resolved(blocking: UringBlockingOp[?]): Unit =
+  private[uring] def resolved(blocking: UringBlockingOp): Unit =
     if !closed then {
       resolvedQueue.add(blocking)
       wakeup()
@@ -357,7 +357,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     * can be abandoned.
     */
   def cancel(op: Op): Boolean = op match {
-    case kernel: UringKernelOp[?] =>
+    case kernel: UringKernelOp =>
       kernel.inFlight match {
         case flight: InFlight if flight.pending != null && !completionArrived(flight.id) =>
           flight.cancelled = flight.pending
@@ -366,7 +366,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
           true
         case _ => false
       }
-    case blocking: UringBlockingOp[?] =>
+    case blocking: UringBlockingOp =>
       val pending = detach(blocking)
       if pending == null then false
       else {
@@ -406,7 +406,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     }
 
   /** Takes the pending record of `blocking`, so its outcome is no longer delivered. */
-  private def detach(blocking: UringBlockingOp[?]): Pending[?] | Null = {
+  private def detach(blocking: UringBlockingOp): Pending[?] | Null = {
     val pending = blocking.pending
     blocking.pending = null
     pendingBlocking -= blocking
@@ -427,7 +427,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         flight.cancelled = null
         if !flight.cancelQueued then requestCancel(flight)
       }
-      val running = scala.collection.mutable.ArrayBuffer.empty[UringBlockingOp[?]]
+      val running = scala.collection.mutable.ArrayBuffer.empty[UringBlockingOp]
       for blocking <- pendingBlocking.toList do {
         val pending = detach(blocking)
         if pending != null then {

@@ -14,14 +14,14 @@ class CancelRetrySuite extends munit.FunSuite:
     val (read, write) = reactor.handles.pipe()
     var cancelled = false
     var attempts = 0
-    val op = new UringKernelOp[reactor.type] with Repeatable:
-      private val underlying = new Read[reactor.type](read, ByteBuffer.allocate(8))
+    val op = Owned[reactor.type, UringKernelOp](new UringKernelOp with Repeatable:
+      private val underlying = new Read(read, ByteBuffer.allocate(8))
       private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit = underlying.prepare(sqe)
       private[uring] def finish(result: Int): Boolean = underlying.finish(result)
       override private[uring] def prepareCancel(sqe: Ptr[io_uring_sqe], id: Long): Unit =
         attempts += 1
         if attempts == 1 then throw IOException("Injected temporary cancellation failure")
-        super.prepareCancel(sqe, id)
+        super.prepareCancel(sqe, id))
     try
       reactor.submit(
         op,

@@ -120,7 +120,8 @@ class DriverLifecycleSuite extends munit.FunSuite:
   test("successful file opens are reclaimed when the suspending handoff fails"):
     val backend = SingleReactorDriver(() => UringReactor.open())
     val cancelled = new ReactorDriver:
-      def await(guard: IoGuard | Null)(build: (r: Reactor) => r.Op)(using Async): Unit =
+      type R = UringReactor
+      def await(guard: IoGuard | Null)(build: (r: UringReactor) => r.Op)(using Async): Unit =
         backend.await(guard)(build)
         throw CancellationException()
     try
@@ -130,10 +131,7 @@ class DriverLifecycleSuite extends munit.FunSuite:
           intercept[CancellationException](cancelled.openFile("build.sbt", scala.scalanative.posix.fcntl.O_RDONLY, 0))
           intercept[CancellationException]:
             cancelled.awaitHandle(null)((r, into) =>
-              r.asInstanceOf[UringReactor]
-                .ops
-                .openAt("build.sbt", scala.scalanative.posix.fcntl.O_RDONLY, 0, into)
-                .asInstanceOf[r.Op]
+              r.ops.openAt("build.sbt", scala.scalanative.posix.fcntl.O_RDONLY, 0, into)
             )
         assertEquals(new java.io.File("/proc/self/fd").list().length, before)
     finally backend.close()

@@ -8,9 +8,7 @@ import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 
 class UringReadinessFallbackSuite extends munit.FunSuite:
-  private type Owner = this.type
-
-  private def preparedOpcode(op: UringKernelOp[?]): Int =
+  private def preparedOpcode(op: UringKernelOp): Int =
     val storage = new Array[Byte](sizeof[uring.io_uring_sqe].toInt)
     val sqe = storage.asInstanceOf[ByteArray].at(0)
     op.prepareSubmission(sqe.asInstanceOf[Ptr[uring.io_uring_sqe]])
@@ -21,7 +19,7 @@ class UringReadinessFallbackSuite extends munit.FunSuite:
   test("EAGAIN makes an op wait for readiness, then submit itself again"):
     val (in, out) = UringHandles.pipe()
     try
-      val read = new Read[Owner](in, java.nio.ByteBuffer.allocate(8))
+      val read = new Read(in, java.nio.ByteBuffer.allocate(8))
       assertEquals(preparedOpcode(read), uring.IORING_OP_READ, "the op itself first")
       assert(!read.finishSubmission(-errno.EAGAIN), "EAGAIN is not completion")
       assertEquals(preparedOpcode(read), uring.IORING_OP_POLL_ADD, "then a readiness wait, rather than a spin")
@@ -34,7 +32,7 @@ class UringReadinessFallbackSuite extends munit.FunSuite:
   test("a cancelled readiness wait releases nothing: its result is a poll mask, not a descriptor"):
     val (in, out) = UringHandles.pipe()
     try
-      val accept = new Accept[Owner](in, HandleSlot())
+      val accept = new Accept(in, HandleSlot())
       assert(!accept.finishSubmission(-errno.EAGAIN))
       accept.discardSubmission(in)
       assert(isOpen(in), "the number in a readiness wait's result is not closed")
@@ -47,11 +45,11 @@ class UringReadinessFallbackSuite extends munit.FunSuite:
       UringHandles.close(out)
 
   test("ops without a readiness wait treat EAGAIN as a plain retry"):
-    val timer = new UringTimer[Owner](1_000_000L)
+    val timer = new UringTimer(1_000_000L)
     intercept[java.io.IOException](timer.finishSubmission(-errno.EAGAIN))
     val (in, out) = UringHandles.pipe()
     try
-      val connect = new Connect[Owner](out)
+      val connect = new Connect(out)
       assert(!connect.finishSubmission(-errno.EAGAIN), "a poll op just polls again")
       assertEquals(preparedOpcode(connect), uring.IORING_OP_POLL_ADD)
     finally

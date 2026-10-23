@@ -16,19 +16,37 @@ import scala.scalanative.unsigned.*
 import uring.*
 import uringStructOps.*
 
-/** Every op a `UringReactor` runs: its `Op` type is `UringOp[this.type]`. `Owner` is the reactor's singleton type, so
-  * an op built by one reactor cannot be submitted to or cancelled on another, even when both are known to be
-  * `UringReactor`s. An op is either a [[UringKernelOp]], which the kernel runs through the ring, or a
-  * [[UringBlockingOp]], which a pool thread runs.
+/** Every op a `UringReactor` runs. An op is either a [[UringKernelOp]], which the kernel runs through the ring, or a
+  * [[UringBlockingOp]], which a pool thread runs. A reactor accepts only ops of its own, see [[Owned]].
   */
-sealed abstract class UringOp[Owner] {
+sealed abstract class UringOp {
   private[uring] var submitted = false
+}
+
+/** An op built by the reactor whose singleton type is `R`. A `UringReactor`'s `Op` type is `Owned[this.type]`, and only
+  * its `ops` brand ops that way, so an op built by one reactor cannot be submitted to or cancelled on another, even
+  * when both are known to be `UringReactor`s.
+  */
+opaque type Owned[R] <: UringOp = UringOp
+
+object Owned {
+
+  /** Returns `op` branded as built by the reactor whose singleton type is `R`.
+    *
+    * @tparam R
+    *   the singleton type of the reactor that owns `op`
+    * @tparam T
+    *   the op's own class, which the result keeps
+    * @param op
+    *   the op to brand
+    */
+  private[uring] def apply[R, T <: UringOp](op: T): Owned[R] & T = op
 }
 
 /** An op the kernel runs: the reactor turns it into one submission queue entry, and its completion queue entry settles
   * it. All of its methods run on the reactor thread.
   */
-abstract class UringKernelOp[Owner] extends UringOp[Owner] {
+abstract class UringKernelOp extends UringOp {
   private[uring] var inFlight: AnyRef | Null = null
 
   /** Fills in `sqe` for one submission. Called again for each resubmission. */
@@ -85,49 +103,51 @@ abstract class UringKernelOp[Owner] extends UringOp[Owner] {
   * backend uses directly: positioned and sequential file I/O, `readv`/`writev`, `openAt`, and nanosecond timers.
   * Building an op does not touch the reactor, so this may be used from any thread.
   */
-final class UringOps[Owner](resolver: HostResolver) extends Ops[UringOp[Owner]] {
-  def read(fd: Int, buf: ByteBuffer): Read[Owner] = new Read(fd, buf)
-  def write(fd: Int, buf: ByteBuffer): Write[Owner] = new Write(fd, buf, plain = false)
-  def accept(fd: Int, into: HandleSlot): Accept[Owner] = new Accept(fd, into)
-  def connect(fd: Int): UringOp[Owner] = new Connect(fd)
-  def receive(fd: Int, buf: ByteBuffer, from: Slot[Address]): Receive[Owner] = new Receive(fd, buf, from)
-  def send(fd: Int, buf: ByteBuffer, to: Address | Null): Send[Owner] = new Send(fd, buf, to)
-  def timer(milliseconds: Int): UringTimer[Owner] = new UringTimer(milliseconds * 1_000_000L)
-  def whenReady(fd: Int, interest: Interest)(perform: () => Boolean): WhenReady[Owner] =
-    new WhenReady(fd, interest, perform)
-  def blocking(body: () => Unit): UringBlockingOp[Owner] = new BlockingTask(body)
-  def blocking[A <: AnyRef](body: () => A, into: Slot[A]): UringBlockingOp[Owner] = new BlockingResultTask(body, into)
-  def resolve(host: String, into: Slot[List[ResolvedAddress]]): Resolve[Owner] = new Resolve(host, into, resolver)
+final class UringOps[R] private[uring] (resolver: HostResolver) extends Ops[Owned[R]] {
+  def read(fd: Int, buf: ByteBuffer): Owned[R] & Read = Owned(new Read(fd, buf))
+  def write(fd: Int, buf: ByteBuffer): Owned[R] & Write = Owned(new Write(fd, buf, plain = false))
+  def accept(fd: Int, into: HandleSlot): Owned[R] & Accept = Owned(new Accept(fd, into))
+  def connect(fd: Int): Owned[R] & Connect = Owned(new Connect(fd))
+  def receive(fd: Int, buf: ByteBuffer, from: Slot[Address]): Owned[R] & Receive = Owned(new Receive(fd, buf, from))
+  def send(fd: Int, buf: ByteBuffer, to: Address | Null): Owned[R] & Send = Owned(new Send(fd, buf, to))
+  def timer(milliseconds: Int): Owned[R] & UringTimer = Owned(new UringTimer(milliseconds * 1_000_000L))
+  def whenReady(fd: Int, interest: Interest)(perform: () => Boolean): Owned[R] & WhenReady =
+    Owned(new WhenReady(fd, interest, perform))
+  def blocking(body: () => Unit): Owned[R] & UringBlockingOp = Owned(new BlockingTask(body))
+  def blocking[A <: AnyRef](body: () => A, into: Slot[A]): Owned[R] & UringBlockingOp =
+    Owned(new BlockingResultTask(body, into))
+  def resolve(host: String, into: Slot[List[ResolvedAddress]]): Owned[R] & Resolve =
+    Owned(new Resolve(host, into, resolver))
 
   /** Fills `bufs` in order with one `readv(2)`. Completes once at least one byte was read, or at end of stream. */
-  def readv(fd: Int, bufs: Array[ByteBuffer]): ReadVector[Owner] = new ReadVector(fd, bufs)
+  def readv(fd: Int, bufs: Array[ByteBuffer]): Owned[R] & ReadVector = Owned(new ReadVector(fd, bufs))
 
   /** Drains `bufs` in order with one `sendmsg(2)`, or `writev(2)` if `fd` is not a socket. Completes once at least one
     * byte was written.
     */
-  def writev(fd: Int, bufs: Array[ByteBuffer]): WriteVector[Owner] = new WriteVector(fd, bufs)
+  def writev(fd: Int, bufs: Array[ByteBuffer]): Owned[R] & WriteVector = Owned(new WriteVector(fd, bufs))
 
   /** Like `write`, but with `write(2)` from the start instead of trying `send(2)` first: for files and pipes. */
-  def writeFile(fd: Int, buf: ByteBuffer): Write[Owner] = new Write(fd, buf, plain = true)
+  def writeFile(fd: Int, buf: ByteBuffer): Owned[R] & Write = Owned(new Write(fd, buf, plain = true))
 
   /** Reads at `offset` without moving the file position, like `pread(2)`. */
-  def readAt(fd: Int, buf: ByteBuffer, offset: Long): Read[Owner] =
+  def readAt(fd: Int, buf: ByteBuffer, offset: Long): Owned[R] & Read =
     require(offset >= 0, "offset must be nonnegative")
-    new Read(fd, buf, offset)
+    Owned(new Read(fd, buf, offset))
 
   /** Writes at `offset` without moving the file position, like `pwrite(2)`. */
-  def writeAt(fd: Int, buf: ByteBuffer, offset: Long): Write[Owner] =
+  def writeAt(fd: Int, buf: ByteBuffer, offset: Long): Owned[R] & Write =
     require(offset >= 0, "offset must be nonnegative")
-    new Write(fd, buf, plain = true, offset = offset)
+    Owned(new Write(fd, buf, plain = true, offset = offset))
 
   /** Completes once `duration` has passed, with nanosecond precision. */
-  def timer(duration: FiniteDuration): UringTimer[Owner] = new UringTimer(duration.toNanos)
+  def timer(duration: FiniteDuration): Owned[R] & UringTimer = Owned(new UringTimer(duration.toNanos))
 
   /** Opens `path` like `openat(2)` relative to the current directory, and completes after writing the new descriptor
     * into `into`. A missing file fails with `FileNotFoundException`.
     */
-  def openAt(path: String, flags: Int, mode: Int, into: HandleSlot): OpenAt[Owner] =
-    new OpenAt(path, flags, mode, into)
+  def openAt(path: String, flags: Int, mode: Int, into: HandleSlot): Owned[R] & OpenAt =
+    Owned(new OpenAt(path, flags, mode, into))
 }
 
 /** An op a `BlockingPool` thread runs, so the reactor thread never blocks. The pool thread settles it, and the reactor
@@ -137,7 +157,7 @@ final class UringOps[Owner](resolver: HostResolver) extends Ops[UringOp[Owner]] 
   * thread writes `outcome`, and the reactor reads it after taking the op from its resolved queue, which makes the write
   * visible. The other fields are used by the reactor thread only.
   */
-sealed abstract class UringBlockingOp[Owner] extends UringOp[Owner] {
+sealed abstract class UringBlockingOp extends UringOp {
 
   /** The blocking work, run on a pool thread. It may be interrupted when the op is cancelled. */
   def block(): Unit
@@ -230,7 +250,7 @@ object UringBlockingOp {
   private final case class Failed(failure: Throwable)
 
   /** Runs `op` on `pool`, settling it with its outcome unless it was cancelled before it started. */
-  private[uring] def run(op: UringBlockingOp[?], pool: BlockingPool): Unit =
+  private[uring] def run(op: UringBlockingOp, pool: BlockingPool): Unit =
     pool.execute { () =>
       if op.begin() then {
         var failure: Throwable | Null = null
@@ -243,18 +263,18 @@ object UringBlockingOp {
 }
 
 /** `Ops.blocking` without a result. */
-final class BlockingTask[Owner](body: () => Unit) extends UringBlockingOp[Owner] {
+final class BlockingTask(body: () => Unit) extends UringBlockingOp {
   def block(): Unit = body()
 }
 
 /** `Ops.blocking` with a result, which is written into `into` unless the op was cancelled first. */
-final class BlockingResultTask[Owner, A <: AnyRef](body: () => A, into: Slot[A]) extends UringBlockingOp[Owner] {
+final class BlockingResultTask[A <: AnyRef](body: () => A, into: Slot[A]) extends UringBlockingOp {
   def block(): Unit = publish(into, body())
 }
 
 /** `Ops.resolve`: looks `host` up with the reactor's `HostResolver` on a pool thread. */
-final class Resolve[Owner](val host: String, into: Slot[List[ResolvedAddress]], resolver: HostResolver)
-    extends UringBlockingOp[Owner] {
+final class Resolve(val host: String, into: Slot[List[ResolvedAddress]], resolver: HostResolver)
+    extends UringBlockingOp {
   // A lookup writes only through publish, which drops results after a cancel, so it can be left to finish alone.
   override private[uring] def abandonOnCancel: Boolean = true
 

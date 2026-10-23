@@ -24,12 +24,17 @@ import scala.scalanative.unsigned.*
   */
 trait ReactorDriver:
 
+  /** The kind of reactor this driver runs ops on. A driver for one kind of reactor fixes it, so its own code can build
+    * that reactor's specific ops; code written for any driver sees only a `Reactor`.
+    */
+  type R <: Reactor
+
   /** Builds an op on the driver's reactor thread with `build`, submits it, and suspends until it completes; a failure
     * is thrown. If the caller is cancelled, the op is cancelled, and the caller still waits until the reactor has
     * finished with the op's buffers before the cancellation is thrown. With a `guard`, the op is registered with it:
     * closing the guard cancels the op, and the op fails with `AsynchronousCloseException`.
     */
-  def await(guard: IoGuard | Null)(build: (r: Reactor) => r.Op)(using Async): Unit
+  def await(guard: IoGuard | Null)(build: (r: R) => r.Op)(using Async): Unit
 
   /** Opens `path` like `open(2)`, close-on-exec, without blocking the reactor. */
   def openFile(path: String, flags: Int, mode: Int)(using Async): Int =
@@ -45,7 +50,7 @@ trait ReactorDriver:
   /** `await` for an op that produces a handle, returning it. A handle produced for a caller that no longer waits is
     * closed.
     */
-  final def awaitHandle(guard: IoGuard | Null)(build: (r: Reactor, into: HandleSlot) => r.Op)(using Async): Int =
+  final def awaitHandle(guard: IoGuard | Null)(build: (r: R, into: HandleSlot) => r.Op)(using Async): Int =
     val opened = HandleSlot()
     try
       await(guard)(r => build(r, opened))
@@ -63,7 +68,7 @@ trait ReactorDriver:
   def acceptsHeapBuffers: Boolean = false
 
   /** `await` for an op that fills `buf`, such as a read. Bytes that arrived before a cancel are kept. */
-  final def awaitFilling(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: Reactor, into: ByteBuffer) => r.Op)(using
+  final def awaitFilling(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: R, into: ByteBuffer) => r.Op)(using
       Async
   ): Unit =
     if acceptsHeapBuffers || buf.hasPointer() then await(guard)(r => build(r, buf))
@@ -82,7 +87,7 @@ trait ReactorDriver:
             buf.put(staged)
 
   /** `await` for an op that consumes `buf`, such as a write. `buf` advances by what was consumed, even on a cancel. */
-  final def awaitDraining(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: Reactor, from: ByteBuffer) => r.Op)(using
+  final def awaitDraining(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: R, from: ByteBuffer) => r.Op)(using
       Async
   ): Unit =
     if acceptsHeapBuffers || buf.hasPointer() then await(guard)(r => build(r, buf))
@@ -205,11 +210,11 @@ object ReactorDriver:
   /** Builds and submits one op on `reactor`, which must be called on its thread, resolving `resolver` when it settles.
     * Returns the cancel action, which goes through `onLoop` because cancelling also has to happen on that thread.
     */
-  private[io] def submitOn(
-      reactor: Reactor,
+  private[io] def submitOn[R <: Reactor](
+      reactor: R,
       onLoop: (=> Unit) => Unit,
       guard: IoGuard | Null,
-      build: (r: Reactor) => r.Op,
+      build: (r: R) => r.Op,
       resolver: Future.Resolver[Unit]
   ): () => Unit =
     val op = try build(reactor)

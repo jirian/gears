@@ -299,22 +299,15 @@ trait ReactorTcpSupport(driver: ReactorDriver) extends net.TcpSupport:
     val family = socketFamily(address)
     val fd = openSocket(family, posixSocket.SOCK_STREAM)
     closeFdOnFailure(fd):
-      options.foreach(applySocketOption(fd, _))
       val unixPath = address match
         case unix: UnixSocketAddress => unix.path
         case _                       => null
+      // First, so the caller's own options can override it.
+      val defaults = if unixPath == null then Seq(SocketOption.reuseAddr(true)) else Nil
+      (defaults ++ options).foreach(applySocketOption(fd, _))
       if unixPath != null then PosixSockets.bindUnixAddr(fd, unixPath.nn, removeExisting = true)
       else
         Zone.acquire: zone =>
-          val optVal = alloc[CInt]()(using zone)
-          !optVal = 1
-          posixSocket.setsockopt(
-            fd,
-            posixSocket.SOL_SOCKET,
-            posixSocket.SO_REUSEADDR,
-            optVal.asInstanceOf[Ptr[Byte]],
-            sizeof[CInt].toUInt
-          )
           val sockAddr = alloc[posixSocket.sockaddr_storage]()(using zone).asInstanceOf[Ptr[Byte]]
           val addrSize = fillSockAddr(sockAddr, address)
           if posixSocket.bind(fd, sockAddr.asInstanceOf[Ptr[posixSocket.sockaddr]], addrSize) < 0 then

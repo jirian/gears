@@ -59,6 +59,32 @@ class DriverLifecycleSuite extends munit.FunSuite:
       Thread.setDefaultUncaughtExceptionHandler(previous)
       scheduler.close()
 
+  test("a lookup that never returns times out on time, and the scheduler still closes promptly"):
+    val release = CountDownLatch(1)
+    val resolver = new gears.io.uring.HostResolver:
+      def resolve(host: String): Either[String, List[ResolvedAddress]] =
+        var done = false
+        while !done do
+          try
+            release.await()
+            done = true
+          catch case _: InterruptedException => ()
+        Left("released")
+    val scheduler = UringPerThreadSupport(parallelism = 1, resolver = resolver, onStall = _ => ())
+    try
+      val dns = scheduler.dnsSupport
+      Async.blocking:
+        val started = System.nanoTime()
+        val outcome = withTimeoutOption(100.millis)(dns.resolve("stuck.test"))
+        assertEquals(outcome, None)
+        assert(System.nanoTime() - started < 1.second.toNanos, "the timeout waited for the lookup")
+      val closing = System.nanoTime()
+      scheduler.close()
+      assert(System.nanoTime() - closing < 1.second.toNanos, "close waited for the lookup")
+    finally
+      release.countDown()
+      scheduler.close()
+
   test("cancellation waits for a blocking operation to release its borrowed memory"):
     val driver = SingleReactorDriver(() => UringReactor.open())
     try

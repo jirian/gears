@@ -338,7 +338,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       if pending == null then false
       else {
         promise match {
-          case blocking: UringBlocking[?] if blocking.interrupt() =>
+          case blocking: UringBlocking[?] if blocking.interrupt() && !blocking.abandonOnCancel =>
             blocking.cancelling = pending
             cancellingBlockers += blocking
           case _ => pending.nn.cancelled()
@@ -396,8 +396,8 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         if pending != null then {
           dropped += pending.nn
           promise match {
-            case blocking: UringBlocking[?] if blocking.interrupt() => running += blocking
-            case _                                                  => ()
+            case blocking: UringBlocking[?] if blocking.interrupt() && !blocking.abandonOnCancel => running += blocking
+            case _                                                                               => ()
           }
         }
       }

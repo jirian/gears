@@ -129,6 +129,8 @@ object UringPromise {
 abstract class UringBlocking[Owner] extends UringPromise[Owner] {
   def block(): Unit
 
+  private[uring] def abandonOnCancel: Boolean = false
+
   private var runner: Thread | Null = null
   private var cancelled = false
   private var ended = false
@@ -184,6 +186,9 @@ final class BlockingResultTask[Owner, A <: AnyRef](body: () => A, into: Slot[A])
 
 final class Resolve[Owner](val host: String, into: Slot[List[ResolvedAddress]], resolver: HostResolver)
     extends UringBlocking[Owner] {
+  // A lookup writes only through publish, which drops results after a cancel, so it can be left to finish alone.
+  override private[uring] def abandonOnCancel: Boolean = true
+
   def block(): Unit = resolver.resolve(host) match {
     case Right(addresses) => publish(into, addresses)
     case Left(error)      => throw new IOException(s"Failed to resolve $host: $error")

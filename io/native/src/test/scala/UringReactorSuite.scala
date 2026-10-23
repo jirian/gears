@@ -416,6 +416,74 @@ class UringReactorSuite extends munit.FunSuite:
       r.close()
       pool.close()
 
+  private final class StuckResolver extends HostResolver:
+    val entered = new java.util.concurrent.CountDownLatch(1)
+    val release = new java.util.concurrent.CountDownLatch(1)
+    val returned = new java.util.concurrent.CountDownLatch(1)
+    def resolve(host: String): Either[String, List[ResolvedAddress]] =
+      entered.countDown()
+      var done = false
+      while !done do
+        try
+          release.await()
+          done = true
+        catch case _: InterruptedException => ()
+      returned.countDown()
+      Right(List(ResolvedAddress(AddressFamily.IPv4, "127.0.0.1")))
+
+  test("cancelling a running lookup runs onCancel without waiting for it, and drops its late result"):
+    val pool = new BlockingPool(parallelism = 1, queueCapacity = 4, threadNamePrefix = "uring-test-stuck")
+    val resolver = StuckResolver()
+    val r = UringReactor.open(blockerPool = pool, resolver = resolver)
+    try
+      val resolved = Slot[List[ResolvedAddress]]()
+      val events = ArrayBuffer.empty[String]
+      val op = r.ops.resolve("stuck.test", resolved)
+      r.submit(
+        op,
+        new Completion[r.Op]:
+          def onComplete(op: r.Op): Unit = events += "complete"
+          override def onCancel(op: r.Op): Unit = events += "cancel"
+      )
+      resolver.entered.await()
+      assert(r.cancel(op))
+      while events.isEmpty do r.runOnce(block = true)
+      assertEquals(events.toList, List("cancel"))
+      assertEquals(resolver.returned.getCount(), 1L)
+      resolver.release.countDown()
+      resolver.returned.await()
+      Thread.sleep(50)
+      r.runOnce(block = false)
+      assertEquals(events.toList, List("cancel"))
+      intercept[IllegalStateException](resolved.clear())
+    finally
+      resolver.release.countDown()
+      r.close()
+      pool.close()
+
+  test("closing a reactor does not wait for a running lookup"):
+    val pool = new BlockingPool(parallelism = 1, queueCapacity = 4, threadNamePrefix = "uring-test-stuck")
+    val resolver = StuckResolver()
+    val r = UringReactor.open(blockerPool = pool, resolver = resolver)
+    try
+      val cancelled = new java.util.concurrent.atomic.AtomicBoolean(false)
+      r.submit(
+        r.ops.resolve("stuck.test", Slot[List[ResolvedAddress]]()),
+        new Completion[r.Op]:
+          def onComplete(op: r.Op): Unit = ()
+          override def onCancel(op: r.Op): Unit = cancelled.set(true)
+      )
+      resolver.entered.await()
+      val started = System.nanoTime()
+      r.close()
+      assert(System.nanoTime() - started < 1_000_000_000L, "close waited for the lookup")
+      assert(cancelled.get())
+      assertEquals(resolver.returned.getCount(), 1L)
+    finally
+      resolver.release.countDown()
+      r.close()
+      pool.close()
+
   test("whenReady runs its body once the descriptor is ready, and waits again when told to"):
     Reactor.scoped: r =>
       Zone.acquire: zone =>

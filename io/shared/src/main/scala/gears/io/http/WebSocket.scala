@@ -9,6 +9,11 @@ import java.nio.ByteBuffer
 import java.nio.charset.{CodingErrorAction, StandardCharsets}
 import java.util.concurrent.atomic.AtomicBoolean
 
+/** One end of a WebSocket connection (RFC 6455), made by `WebSocket.connect` or by a server handler. One `receive` may
+  * run at a time, and sends from several fibers are serialized, so a receive and sends can run at once. Pings are
+  * answered automatically, and a close from the peer is echoed. Messages larger than `maxMessageSize` fail the
+  * connection with close code 1009.
+  */
 final class WebSocket private[http] (
     stream: TcpStream,
     input: Reader,
@@ -27,8 +32,10 @@ final class WebSocket private[http] (
   @volatile private var closeReceived = false
   @volatile private var receivedClose: Option[Close] = None
 
+  /** The close frame the peer sent, once `receive` has seen it. */
   def peerClose: Option[Close] = receivedClose
 
+  /** Closes the connection at once, without a close handshake; `sendClose` starts one. */
   override def close(): Unit = if closed.compareAndSet(false, true) then stream.close()
 
   private def encode(text: String): Array[Byte] =
@@ -41,9 +48,13 @@ final class WebSocket private[http] (
     buf.get(bytes)
     bytes
 
+  /** Sends a text message. */
   def sendText(text: String)(using Async): Unit = send(Message.Text(text))
+
+  /** Sends a binary message. */
   def sendBinary(bytes: Array[Byte])(using Async): Unit = send(Message.Binary(bytes))
 
+  /** Sends one message as one frame. A failed send closes the connection. */
   def send(message: Message)(using Async): Unit =
     val (opcode, bytes) = message match
       case Message.Text(text)   => (1, encode(text))
@@ -51,10 +62,14 @@ final class WebSocket private[http] (
     require(bytes.length <= maxMessageSize, "Message exceeds maxMessageSize")
     writeFrame(opcode, bytes)
 
+  /** Sends a ping with up to 125 bytes; the peer's pong is consumed by `receive`. */
   def ping(bytes: Array[Byte] = Array.emptyByteArray)(using Async): Unit =
     require(bytes.length <= 125, "A ping may contain at most 125 bytes")
     writeFrame(9, bytes)
 
+  /** Starts the close handshake. Afterwards nothing but the peer's close can be received, and `receive` discards any
+    * data messages that arrive before it.
+    */
   def sendClose(code: Int = 1000, reason: String = "")(using Async): Unit =
     require(validCloseCode(code), s"Invalid close code: $code")
     val text = encode(reason)
@@ -94,6 +109,9 @@ final class WebSocket private[http] (
         throw t
     finally permit.release()
 
+  /** The next message, reassembled from its fragments, or `None` once the peer has closed. A protocol violation by the
+    * peer sends the matching close code, closes the connection and throws `ProtocolException`.
+    */
   def receive()(using Async): Option[Message] =
     if !reading.compareAndSet(false, true) then throw ConcurrentReceiveException()
     try
@@ -129,6 +147,7 @@ final class WebSocket private[http] (
                     catch case _: IOException => protocolError("Invalid text UTF-8", 1007)
                     Message.Text(text)
                   else Message.Binary(bytes)
+                // After our close, data is dropped while we wait for the peer's close.
                 if !closeSent then
                   result = Some(value)
                   done = true
@@ -156,6 +175,7 @@ final class WebSocket private[http] (
           if out.position() == before then throw IOException("WebSocket read made no progress")
     out.array()
 
+  // Opcodes: 0 continuation, 1 text, 2 binary, 8 close, 9 ping, 10 pong.
   private case class Frame(fin: Boolean, opcode: Int, payload: Array[Byte])
 
   private def readFrame(remaining: Int)(using Async): Frame =
@@ -166,6 +186,7 @@ final class WebSocket private[http] (
     val opcode = first & 15
     if (first & 0x70) != 0 then protocolError("Unexpected reserved frame bits")
     if !Set(0, 1, 2, 8, 9, 10).contains(opcode) then protocolError("Unknown frame opcode")
+    // Only frames sent by a client are masked.
     if ((second & 0x80) != 0) == client then protocolError("Incorrect frame masking")
     val short = second & 127
     if opcode >= 8 && (!fin || short > 125) then protocolError("Invalid control frame")
@@ -202,16 +223,24 @@ final class WebSocket private[http] (
   private def protocolError(message: String, code: Int = 1002): Nothing = throw ProtocolException(message, code)
 
 object WebSocket:
+
+  /** A complete WebSocket message. */
   enum Message:
     case Text(value: String)
     case Binary(bytes: Array[Byte])
 
+  /** A close frame's status: its code, if it had one, and reason. */
   final case class Close(code: Option[Int], reason: String)
+
+  /** The peer broke the protocol; `closeCode` is the code that was sent back. */
   final class ProtocolException(message: String, val closeCode: Int) extends IOException(message)
+
+  /** A second `receive` was started while one was running. */
   final class ConcurrentReceiveException extends IllegalStateException("A WebSocket receive is already pending")
 
   val DefaultMaxMessageSize: Int = 16 * 1024 * 1024
 
+  /** Opens a `ws` or `wss` connection on a transport of its own, offering `subprotocols`. */
   def connect(
       url: String,
       headers: Headers = Headers.empty,
@@ -223,6 +252,7 @@ object WebSocket:
     try connectWith(transport, url, headers, subprotocols, maxMessageSize)
     finally transport.close()
 
+  /** Opens a `ws` or `wss` connection over a connection from `transport`, which keeps no hold on it afterwards. */
   def connectWith(
       transport: Transport,
       url: String,
@@ -304,6 +334,7 @@ object WebSocket:
         stream.close()
         throw t
 
+  /** `connect` as a gears `Resource`, closed when released. */
   def resource(
       url: String,
       headers: Headers = Headers.empty,
@@ -313,6 +344,9 @@ object WebSocket:
   )(using TcpSupport, DnsSupport): Resource[WebSocket] =
     Resource(connect(url, headers, subprotocols, maxMessageSize, tls), _.close())
 
+  /** A server handler that upgrades each valid request and runs `body` on the WebSocket, closing it afterwards. By
+    * default only same-origin browsers, and clients that send no `Origin`, are accepted.
+    */
   def handler(
       body: WebSocket => Async ?=> Unit,
       subprotocols: Seq[String] = Seq.empty,
@@ -326,6 +360,10 @@ object WebSocket:
           try body(socket)
           finally socket.close()
 
+  /** Upgrades `request` to a WebSocket from inside a handler, or answers it with an error and returns `None` if it is
+    * not a valid upgrade request or `originAllowed` refuses it. Picks the first of `subprotocols` that the client
+    * offered.
+    */
   def upgrade(
       w: ResponseWriter,
       request: HttpRequest,

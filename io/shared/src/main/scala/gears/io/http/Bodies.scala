@@ -10,6 +10,10 @@ import scala.concurrent.duration.FiniteDuration
 import scala.util.Success
 
 private[http] object Bodies:
+
+  /** Like `timed`, but if `body` produced a value and the caller is cancelled or times out before it receives it, the
+    * value is disposed of instead of leaking, such as a connection opened just as the timeout fired.
+    */
   def timedOwned[A <: Closeable](
       timeout: Option[FiniteDuration],
       dispose: A => Async ?=> Unit = (value: A) => value.close()
@@ -20,11 +24,14 @@ private[http] object Bodies:
         val value = body
         owned.set(value)
         value
+      // Handed to the caller; only a value that never reached it is disposed of below.
       owned.set(null)
       result
     finally
       val remaining = owned.getAndSet(null)
       if remaining != null then dispose(remaining.nn)
+
+  /** A reader over `data`. */
   def bytes(data: Array[Byte]): Reader = new Reader:
     private val input = ByteBuffer.wrap(data)
     def readBuf(out: ByteBuffer)(using Async): Result[Unit] =
@@ -38,6 +45,7 @@ private[http] object Bodies:
         input.position(input.position() + n)
         Right(())
 
+  /** Reads `reader` to its end. */
   def collect(reader: Reader)(using Async): Array[Byte] =
     val out = ByteArrayOutputStream()
     val buf = ByteBuffer.allocate(8192)
@@ -51,6 +59,7 @@ private[http] object Bodies:
           out.write(buf.array(), 0, buf.position())
     out.toByteArray
 
+  /** Runs `body`, failing with `TimeoutException` if it takes longer than `timeout`. */
   def timed[A](timeout: Option[FiniteDuration], armed: Cancellable => Unit = _ => ())(
       body: Async ?=> A
   )(using Async): A = timeout match
@@ -63,6 +72,9 @@ private[http] object Bodies:
         try Async.select(Future(body).handle(_.get), expired.handle(_ => throw TimeoutException()))
         finally timer.cancel()
 
+/** Reads one message body with its framing: a fixed `Content-Length`, chunked (with trailers skipped), or until the
+  * connection closes. More than `limit` bytes fail with `BodyTooLargeException`.
+  */
 private[http] final class MessageBody(reader: RequestReader, framing: BodyFraming, limit: Long) extends Reader:
   private val access = IoConcurrency()
   private var remaining = framing match
@@ -78,6 +90,7 @@ private[http] final class MessageBody(reader: RequestReader, framing: BodyFramin
     else if done then Left(Error.EOF)
     else
       if framing == BodyFraming.Chunked && remaining == 0 then
+        // Every chunk's data ends with a CRLF of its own, before the next size line.
         if needChunkEnd && reader.readLine(0).nonEmpty then throw IOException("Missing chunk CRLF")
         val size = reader.readLine(1024).takeWhile(_ != ';')
         if size.isEmpty || !size.forall(c => c.isDigit && c <= '9' || "abcdefABCDEF".contains(c)) then
@@ -96,6 +109,7 @@ private[http] final class MessageBody(reader: RequestReader, framing: BodyFramin
         needChunkEnd = true
       if done then Left(Error.EOF)
       else
+        // A body without a length may read one byte past the limit, which is how it notices the overflow.
         val n = if framing == BodyFraming.UntilClose then math.min(out.remaining().toLong, limit - total + 1).toInt
         else math.min(out.remaining().toLong, remaining).toInt
         if n <= 0 then throw BodyTooLargeException(limit.toInt)
@@ -117,6 +131,9 @@ private[http] final class MessageBody(reader: RequestReader, framing: BodyFramin
               if remaining == 0 && framing != BodyFraming.Chunked then done = true
             Right(())
 
+/** The body of a streamed client response. Reading it to the end, or `close` after the end, returns the connection to
+  * the pool; closing it earlier discards the connection. Each read is bounded by the client's read timeout.
+  */
 final class ResponseBody private[http] (
     decoder: MessageBody,
     timeout: Option[FiniteDuration],
@@ -147,17 +164,25 @@ final class ResponseBody private[http] (
           awaitUpload
           throw t
 
+  /** Reads the rest of the body. */
   def readAll()(using Async): Array[Byte] = Bodies.collect(this)
 
+  /** Stops reading. The connection is reused only if the body was complete. */
   def close(): Unit = release(decoder.complete)
+
+  /** Like `close`, and also stops a request body that is still uploading and waits for it to end. */
   def finish()(using Async): Unit =
     close()
     awaitUpload
 
+/** A client response whose body is read as it arrives. Close or finish it to release the connection. */
 final case class StreamingResponse(status: HttpStatus, headers: Headers, body: ResponseBody) extends Closeable:
   def close(): Unit = body.close()
   def finish()(using Async): Unit = body.finish()
 
+/** A client request whose body is streamed from `body`: with `Content-Length` if `contentLength` is given, chunked
+  * otherwise.
+  */
 final case class StreamingRequest(
     method: HttpMethod,
     url: Url,

@@ -6,6 +6,10 @@ import gears.io.reactor.Reactor
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch}
 import scala.util.control.NonFatal
 
+/** A `ReactorDriver` that runs any `Reactor` on one thread of its own, opened with `factory`. Fibers stay on whatever
+  * runtime they use, and every op is handed to the reactor thread. Closing it closes the reactor, which cancels the ops
+  * still pending.
+  */
 final class SingleReactorDriver(factory: Reactor.Factory[Reactor], threadName: String = "gears-reactor")
     extends ReactorDriver
     with AutoCloseable:
@@ -38,6 +42,7 @@ final class SingleReactorDriver(factory: Reactor.Factory[Reactor], threadName: S
       while running do
         drain()
         if running then
+          // Tasks queued after the check still wake the loop, because onLoop calls wakeup after queueing.
           try r.runOnce(block = tasks.isEmpty)
           catch case NonFatal(e) => report(e)
     finally

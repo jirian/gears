@@ -2,15 +2,19 @@ package gears.io.http
 
 import java.nio.charset.StandardCharsets
 
+/** An HTTP request method. Methods without a case of their own are `Other`. */
 enum HttpMethod:
   case GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH
   case Other(name: String)
 
+  /** The method as it appears on the request line. */
   def rendered: String = this match
     case Other(name) => name
     case known       => known.toString
 
 object HttpMethod:
+
+  /** The method named by a request-line token; method names are case-sensitive. */
   def parse(token: String): HttpMethod = token match
     case "GET"     => GET
     case "HEAD"    => HEAD
@@ -23,8 +27,10 @@ object HttpMethod:
     case "PATCH"   => PATCH
     case other     => Other(other)
 
+/** A response status: its code and the reason phrase sent with it. */
 final case class HttpStatus(code: Int, reason: String)
 
+/** The common statuses. */
 object HttpStatus:
   val Ok = HttpStatus(200, "OK")
   val Created = HttpStatus(201, "Created")
@@ -56,32 +62,43 @@ object HttpStatus:
   private[http] def isRedirect(code: Int): Boolean =
     code == 301 || code == 302 || code == 303 || code == 307 || code == 308
 
+/** Header syntax checks from RFC 9110. Every way of building headers runs them, so a header cannot smuggle a line break
+  * into a request or response.
+  */
 object HeaderSyntax:
   private val separators = "()<>@,;:\\\"/[]?={} \t"
 
+  /** Whether `name` is a token: printable ASCII without separators. */
   def isValidName(name: String): Boolean =
     name.nonEmpty && name.forall(c => c > ' ' && c < 127 && separators.indexOf(c) < 0)
 
+  /** Whether `value` has no CR, LF or NUL. */
   def isValidValue(value: String): Boolean =
     value.forall(c => c != '\r' && c != '\n' && c != '\u0000')
 
+  /** Throws `IllegalArgumentException` unless both are valid. */
   def check(name: String, value: String): Unit =
     if !isValidName(name) then throw new IllegalArgumentException(s"invalid header name: '$name'")
     if !isValidValue(value) then throw new IllegalArgumentException(s"invalid value for header '$name'")
 
+/** An immutable list of headers in order. Names compare case-insensitively, and a name may repeat. */
 final class Headers private (private val entries: Vector[(String, String)]):
+  /** The first value of `name`. */
   def get(name: String): Option[String] =
     entries.collectFirst { case (k, v) if k.equalsIgnoreCase(name) => v }
 
+  /** Every value of `name`, in order. */
   def getAll(name: String): Seq[String] =
     entries.collect { case (k, v) if k.equalsIgnoreCase(name) => v }
 
   def contains(name: String): Boolean = get(name).isDefined
 
+  /** These headers plus one more, keeping any others with the same name. */
   def add(name: String, value: String): Headers =
     HeaderSyntax.check(name, value)
     new Headers(entries :+ (name -> value))
 
+  /** These headers with every `name` replaced by this one value. */
   def set(name: String, value: String): Headers =
     HeaderSyntax.check(name, value)
     new Headers(entries.filterNot((k, _) => k.equalsIgnoreCase(name)) :+ (name -> value))
@@ -96,6 +113,7 @@ object Headers:
     pairs.foreach((name, value) => HeaderSyntax.check(name, value))
     new Headers(pairs.toVector)
 
+/** A mutable header list, for building a response's headers in a handler. */
 final class MutableHeaders:
   private val entries = scala.collection.mutable.ArrayBuffer[(String, String)]()
 
@@ -126,6 +144,7 @@ object MutableHeaders:
     headers.iterator.foreach((k, v) => m.add(k, v))
     m
 
+/** A cookie, as set by a `Set-Cookie` header. */
 final case class Cookie(
     name: String,
     value: String,
@@ -135,9 +154,12 @@ final case class Cookie(
     secure: Boolean = false,
     httpOnly: Boolean = false
 ):
+  /** The cookie as sent back in a `Cookie` request header. */
   def rendered: String = s"$name=$value"
 
 object Cookie:
+
+  /** Parses a `Set-Cookie` value. Unknown attributes are ignored; a value without `name=` gives `None`. */
   def parse(setCookieValue: String): Option[Cookie] =
     val parts = setCookieValue.split(";").map(_.trim).toList
     parts match
@@ -165,6 +187,9 @@ object Cookie:
           case _ => None
       case Nil => None
 
+/** A request with its whole body. `path` is still percent-encoded and excludes the query, which has no `?`.
+  * `pathValues` holds the values of the route's `{name}` segments.
+  */
 final case class HttpRequest(
     method: HttpMethod,
     path: String,
@@ -176,12 +201,19 @@ final case class HttpRequest(
 ):
   def pathValue(name: String): Option[String] = pathValues.get(name)
 
+/** A response with its whole body. The server adds `Content-Length` and framing headers itself. */
 final case class HttpResponse(status: HttpStatus, headers: Headers, body: Array[Byte]):
+
+  /** This response with `name` set to `value`, replacing earlier values. */
   def withHeader(name: String, value: String): HttpResponse = copy(headers = headers.set(name, value))
 
+  /** The cookies its `Set-Cookie` headers set. */
   def cookies: Seq[Cookie] = headers.getAll("Set-Cookie").flatMap(Cookie.parse)
 
+/** Responses with a text body. */
 object HttpResponse:
+
+  /** A response with a UTF-8 body, labelled `text/plain` unless `contentType` says otherwise. */
   def apply(status: HttpStatus, body: String, contentType: String = "text/plain; charset=utf-8"): HttpResponse =
     HttpResponse(status, Headers("Content-Type" -> contentType), body.getBytes(StandardCharsets.UTF_8))
 

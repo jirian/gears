@@ -16,6 +16,9 @@ import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
+/** Conversion between `Address` and kernel `sockaddr` bytes. Encoded addresses live in heap arrays, which may be handed
+  * to the kernel because Scala Native's GC doesn't move objects.
+  */
 object SocketAddresses {
   final val storageSize = sizeOf[socket.sockaddr_storage].toInt
 

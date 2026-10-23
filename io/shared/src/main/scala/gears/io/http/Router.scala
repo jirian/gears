@@ -4,6 +4,15 @@ import gears.async.Async
 
 import scala.collection.mutable
 
+/** Routes requests by path and method. Patterns are matched against the path as received, without decoding:
+  *   - `/users`: exactly that path;
+  *   - `/users/{id}`: one segment per `{name}`, available as `request.pathValue("id")`;
+  *   - `/static/`: a trailing slash matches the whole subtree.
+  *
+  * An exact pattern wins over a wildcard, a wildcard with more literal segments over one with fewer, and a subtree
+  * comes last, with longer patterns first. HEAD uses the GET handler. A path no pattern matches gets 404; a path whose
+  * pattern has no handler for the method gets 405 with an `Allow` header.
+  */
 final class Router extends Handler:
   private final case class Registration(
       pattern: String,
@@ -23,6 +32,7 @@ final class Router extends Handler:
       }
     )
 
+  /** Serves every method on `pattern` with `handler`, which may stream. */
   def handle(pattern: String)(handler: Handler): this.type =
     registrationFor(pattern).anyMethod = Some(handler)
     this
@@ -31,6 +41,7 @@ final class Router extends Handler:
     registrationFor(pattern).handlers.update(method, handler)
     this
 
+  /** Serves one method on `pattern` with a function from the request to a whole response. */
   def get(pattern: String)(handler: HttpRequest => Async ?=> HttpResponse): this.type =
     register(HttpMethod.GET, pattern, Handler.of(handler))
   def post(pattern: String)(handler: HttpRequest => Async ?=> HttpResponse): this.type =
@@ -69,6 +80,7 @@ final class Router extends Handler:
       else Option.when(pattern == path)(reg -> Map.empty[String, String])
     }
 
+  // Sorted ascending: exact before wildcard before subtree, then more literal segments, then longer patterns.
   private def specificity(pattern: String): (Int, Int, Int) =
     if isWildcard(pattern) then (1, -segments(pattern).count(!_.startsWith("{")), -pattern.length)
     else if isSubtree(pattern) then (2, 0, -pattern.length)
@@ -112,6 +124,7 @@ final class Router extends Handler:
         }
         selected.serveStream(w, request.copy(pathValues = values), body)
 
+  /** Routes `request` without a connection and returns the response, for tests and in-process use. */
   def dispatch(request: HttpRequest)(using Async): HttpResponse =
     var captured: HttpResponse = null
     var status = HttpStatus.Ok

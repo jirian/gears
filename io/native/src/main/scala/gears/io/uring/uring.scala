@@ -26,6 +26,9 @@ import scala.scalanative.runtime.Intrinsics._
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
 
+/** liburing's functions and the kernel's io_uring structures. The three helpers liburing only has as `static inline`
+  * come from `uring_shim.c` under `gears_` names.
+  */
 @link("uring")
 @extern
 private[uring] object uring {
@@ -151,6 +154,7 @@ private[uring] object uring {
 
 }
 
+/** liburing's `static inline` prep helpers, and field accessors for the `CStruct`s above. */
 private[uring] object uringStructOps {
 
   import uring._

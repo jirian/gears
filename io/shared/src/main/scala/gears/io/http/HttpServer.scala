@@ -12,6 +12,23 @@ import java.util.concurrent.TimeoutException
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
+/** An HTTP/1.1 server configuration, served with `serve`. One `Server` serves one listener, once.
+  *
+  * @param readTimeout
+  *   bounds each read of a request body
+  * @param writeTimeout
+  *   bounds the handler and the writing of its response, per request
+  * @param idleTimeout
+  *   bounds the wait for the next request on a connection, and the TLS handshake
+  * @param tls
+  *   serves HTTPS with this TLS support and server context
+  * @param maxBodySize
+  *   the largest request body accepted, in bytes; larger ones get 413
+  * @param errorLog
+  *   receives handler failures and accept errors
+  * @param maxConnections
+  *   connections beyond this many are closed at once
+  */
 final case class Server(
     handler: Handler,
     readTimeout: Option[FiniteDuration] = None,
@@ -25,19 +42,28 @@ final case class Server(
   require(maxConnections > 0 && maxBodySize >= 0)
   private[http] val lifecycle = ServerLifecycle(maxConnections)
 
+  /** Serves connections from `listener` until it closes or the server shuts down. */
   def serve(listener: TcpListener)(using Async, AsyncOperations): Unit = gears.io.http.serve(listener, this)
 
+  /** Stops accepting, ends idle connections, and lets requests in progress finish for up to `grace`; then closes the
+    * rest.
+    */
   def shutdown(grace: FiniteDuration)(using Async): Unit =
     require(grace.toNanos >= 0, "shutdown grace must be nonnegative")
     lifecycle.stopAccepting()
     try Bodies.timed(Some(grace))(lifecycle.awaitDrained())
     finally lifecycle.stopNow()
 
+  /** Closes the listener and every connection at once. */
   def close(): Unit = lifecycle.stopNow()
 
+/** Serves `handler` on `listener` with the default configuration, until the listener closes. */
 def serve(listener: TcpListener, handler: Handler)(using Async, AsyncOperations): Unit =
   serve(listener, Server(handler))
 
+/** Serves `server` on `listener`: one fiber per connection, each handling its requests in turn with keep-alive. Returns
+  * once the listener has closed and every connection has finished.
+  */
 def serve(listener: TcpListener, server: Server)(using Async, AsyncOperations): Unit =
   server.lifecycle.start(listener)
   Async.group:
@@ -76,6 +102,7 @@ private def serveConnection(raw: TcpStream, server: Server)(using Async, AsyncOp
         null
   if stream != null then handleConnectionOwned(stream, server, raw)
 
+// `stream` may be a TLS wrapper; `owner` is the raw connection, which is what the lifecycle tracks.
 private def handleConnectionOwned(stream: TcpStream, server: Server, owner: TcpStream)(using
     Async,
     AsyncOperations
@@ -102,6 +129,7 @@ private def handleOneRequest(stream: TcpStream, reader: RequestReader, server: S
 ): Boolean =
   val headBytesOpt =
     try
+      // Marked idle while waiting for a request head, so a graceful shutdown may end this connection now.
       if !server.lifecycle.working(owner, false) then None
       else server.idleTimeout.fold(reader.readHead())(t => withTimeoutOption(t)(reader.readHead()).flatten)
     catch case _: TimeoutException => None
@@ -162,8 +190,10 @@ private def respond(stream: TcpStream, reader: RequestReader, server: Server, he
             Handler.of(_ => HttpResponse.internalError()).serveHTTP(w, request)
       if abandoned then w.abandon()
       else
+        // Unread request body bytes are still on the wire, so the next request on this connection can't be parsed.
         if !body.complete && !w.upgraded then w.header.set("Connection", "close")
         w.finish()
+    // An upgrade cancels the write deadline, so a WebSocket isn't cut off when the request's time is up.
     Bodies.timed(server.writeTimeout, timer => w.cancelDeadline = () => timer.cancel())(dispatch())
     requestWantsKeepAlive && body.complete && !w.forcedClose && !w.upgraded
   catch
@@ -331,6 +361,7 @@ private[http] enum BodyFraming:
   case Chunked
   case UntilClose
 
+// Ambiguous framing is refused rather than guessed, because a proxy in front may guess differently (request smuggling).
 private def requestFraming(headers: Headers, maxBodySize: Int): Either[HttpResponse, BodyFraming] =
   val codings = headers.getAll("Transfer-Encoding")
   val lengths = headers.getAll("Content-Length").distinct
@@ -355,6 +386,9 @@ private[http] final class HeadTooLargeException extends Exception("request head 
 private[http] final class BodyTooLargeException(val limit: Int)
     extends java.io.IOException(s"message body exceeds the limit of $limit bytes")
 
+/** Buffered reading of requests from a connection: the head up to its blank line, then body bytes. Bytes read past the
+  * current message stay buffered for the next one.
+  */
 private[http] final class RequestReader(stream: TcpStream) extends gears.io.Reader:
   private val pending = new ArrayBuffer[Byte]()
   private val tmp = ByteBuffer.allocate(8192)
@@ -379,6 +413,7 @@ private[http] final class RequestReader(stream: TcpStream) extends gears.io.Read
       tmp.clear()
       val result =
         try stream.readBuf(tmp)
+        // Bytes that arrived before a cancel or timeout are kept for the next read.
         finally
           tmp.flip()
           if tmp.hasRemaining then

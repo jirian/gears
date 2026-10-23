@@ -4,6 +4,9 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.{CodingErrorAction, StandardCharsets}
 
+/** RFC 6455 helpers: the handshake's key and accept values, header tokens, UTF-8 checks and close codes. SHA-1 and
+  * base64 are implemented here so the module needs nothing platform-specific for them.
+  */
 private[http] object WebSocketProtocol:
   private val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 

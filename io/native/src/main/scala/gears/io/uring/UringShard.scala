@@ -7,6 +7,11 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import scala.scalanative.runtime.Continuations
 import scala.util.control.NonFatal
 
+/** One thread of a `UringPerThreadScheduler`, with its own `UringReactor`. Its loop runs, in turn: work posted to the
+  * reactor thread, shared jobs from threads outside the scheduler, its own fiber tasks, and ready completions. When
+  * idle, it takes a task from the global queue or steals one from a sibling, and otherwise waits in the reactor for up
+  * to 2 ms.
+  */
 private[uring] final class UringShard(
     val scheduler: UringPerThreadScheduler,
     entries: Int,
@@ -27,6 +32,7 @@ private[uring] final class UringShard(
 
   private val PollTimeoutNanos = 2_000_000L
 
+  /** When the current task started, for the stall watchdog; 0 while idle. The low bit is set so it is never 0. */
   @volatile private[uring] var busySince = 0L
 
   private inline def busy[A](inline body: A): A =
@@ -36,6 +42,7 @@ private[uring] final class UringShard(
 
   private val MaxSharedJobsPerTurn = 64
 
+  /** Queues a fiber task. A task from another thread also wakes the loop. */
   private[uring] def execute(body: Runnable, calledFromOwnThread: Boolean): Unit =
     taskQueue.offer(body)
     if !calledFromOwnThread then wake()
@@ -46,6 +53,8 @@ private[uring] final class UringShard(
     case t: UringShardThread => t.shard eq this
     case _                   => false
 
+  /** Runs `body` on this shard's thread, the only one that may use its reactor: now if already there, else next turn.
+    */
   private[uring] def onLoop(body: => Unit): Unit =
     if isCurrent then body
     else
@@ -64,6 +73,7 @@ private[uring] final class UringShard(
       r = loopQueue.poll()
     ran
 
+  /** Starts up to 64 ops submitted from outside the scheduler, so a burst of them cannot starve this shard's fibers. */
   private def drainSharedJobs(): Boolean =
     var taken = 0
     var job = sharedJobs.poll()
@@ -80,6 +90,7 @@ private[uring] final class UringShard(
     val thread = Thread.currentThread()
     thread.getUncaughtExceptionHandler().uncaughtException(thread, e)
 
+  /** Runs one task. `Continuations.handlersReset` clears continuation state a task may leave behind on this thread. */
   private def runTask(task: Runnable): Unit =
     Continuations.handlersReset()
     try busy(task.run())
@@ -96,6 +107,7 @@ private[uring] final class UringShard(
   private def pollReactor(timeoutNanos: Long): Boolean =
     Continuations.handlersReset()
     try
+      // Waiting for completions isn't a stall, so only a non-blocking poll counts as busy for the watchdog.
       if timeoutNanos == 0 then busy(reactor.poll(0))
       else reactor.poll(timeoutNanos)
     catch
@@ -106,6 +118,7 @@ private[uring] final class UringShard(
 
   private[uring] def stealTask(): Runnable = taskQueue.poll()
 
+  /** Every this many turns, a busy shard still takes one task from the global queue, so those tasks are not starved. */
   private val GlobalQueueInterval = 61
 
   private def runFromGlobal(): Unit =
@@ -139,6 +152,9 @@ private[uring] final class UringShard(
     running = false
     wake()
 
+  /** The thread's body. A fatal error stops the whole scheduler, so its fibers fail instead of hanging. On the way out
+    * it closes the reactor and hands its leftover tasks to `afterClose`.
+    */
   private[uring] def loop(): Unit =
     Continuations.handlersReset()
     try
@@ -170,11 +186,17 @@ private[uring] final class UringShard(
 private[uring] final class UringShardThread(val shard: UringShard) extends Thread(() => shard.loop())
 
 private[uring] object UringShard:
+
+  /** Runs a task that arrived after its scheduler closed on gears' default runtime, so the fiber it resumes can see the
+    * closed scheduler and finish its cleanup.
+    */
   def afterClose(task: Runnable): Unit = gears.async.default.DefaultSupport.execute(() =>
     Continuations.handlersReset()
     try task.run()
     finally Continuations.handlersReset()
   )
+
+  /** The shard whose thread this is, if any. */
   def current(): Option[UringShard] = Thread.currentThread() match
     case t: UringShardThread => Some(t.shard)
     case _                   => None

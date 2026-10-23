@@ -1,5 +1,6 @@
 package gears.io.uring
 
+/** Linux values that Scala Native's POSIX bindings don't provide. */
 object LinuxConstants {
   final val SOCK_NONBLOCK = 0x800
   final val SOCK_CLOEXEC = 0x80000

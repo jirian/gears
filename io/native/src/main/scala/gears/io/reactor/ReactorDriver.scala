@@ -13,11 +13,27 @@ import scala.scalanative.posix.{errno, fcntl}
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
+/** Runs reactor ops for fibers: the bridge between a `Reactor`, which has a single thread and completes ops through
+  * callbacks, and gears code, which waits for one op at a time. The network, file and DNS supports in this package are
+  * written only against this trait, so they work on any driver: `UringPerThreadScheduler`, `SingleReactorDriver`, or
+  * one written outside gears.
+  *
+  * An implementation provides `await`. The other methods have defaults that use only ops every reactor has: file I/O
+  * and opening files run as blocking ops on a private `dup` of the descriptor, and heap buffers reach the reactor as
+  * pointer views of their arrays. A driver whose reactor does better overrides them, as the uring scheduler does.
+  */
 trait ReactorDriver:
 
+  /** Builds an op on the driver's reactor thread with `build`, submits it, and suspends until it completes; a failure
+    * is thrown. If the caller is cancelled, the op is cancelled, and the caller still waits until the reactor has
+    * finished with the op's buffers before the cancellation is thrown. With a `guard`, the op is registered with it:
+    * closing the guard cancels the op, and the op fails with `AsynchronousCloseException`.
+    */
   def await(guard: IoGuard | Null)(build: (r: Reactor) => r.Op)(using Async): Unit
 
+  /** Opens `path` like `open(2)`, close-on-exec, without blocking the reactor. */
   def openFile(path: String, flags: Int, mode: Int)(using Async): Int =
+    // The open may finish after this fiber was cancelled; whatever descriptor it produced is then closed below.
     val owned = new java.util.concurrent.atomic.AtomicInteger(-1)
     try
       await(null)(r => r.ops.blocking(() => { owned.set(ReactorDriver.openNow(path, flags, mode)); () }))
@@ -26,6 +42,9 @@ trait ReactorDriver:
       val fd = owned.getAndSet(-1)
       if fd >= 0 then scala.scalanative.posix.unistd.close(fd)
 
+  /** `await` for an op that produces a handle, returning it. A handle produced for a caller that no longer waits is
+    * closed.
+    */
   final def awaitHandle(guard: IoGuard | Null)(build: (r: Reactor, into: HandleSlot) => r.Op)(using Async): Int =
     val opened = HandleSlot()
     try
@@ -38,8 +57,12 @@ trait ReactorDriver:
         if fd >= 0 then scala.scalanative.posix.unistd.close(fd)
         throw t
 
+  /** Whether the reactor takes heap `ByteBuffer`s directly. If not, `awaitFilling` and `awaitDraining` pass it a
+    * pointer view of the buffer's array instead.
+    */
   def acceptsHeapBuffers: Boolean = false
 
+  /** `await` for an op that fills `buf`, such as a read. Bytes that arrived before a cancel are kept. */
   final def awaitFilling(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: Reactor, into: ByteBuffer) => r.Op)(using
       Async
   ): Unit =
@@ -58,6 +81,7 @@ trait ReactorDriver:
             staged.flip()
             buf.put(staged)
 
+  /** `await` for an op that consumes `buf`, such as a write. `buf` advances by what was consumed, even on a cancel. */
   final def awaitDraining(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: Reactor, from: ByteBuffer) => r.Op)(using
       Async
   ): Unit =
@@ -78,16 +102,20 @@ trait ReactorDriver:
           try await(guard)(r => build(r, staged))
           finally buf.position(buf.position() + staged.position())
 
+  /** Reads from a file at its position. By default with `read(2)` on a blocking-pool thread. */
   def readFile(guard: IoGuard | Null, fd: Int, buf: ByteBuffer)(using Async): Unit =
     blockingFileIo(guard, fd, buf, -1L, write = false)
 
+  /** Writes to a file at its position. By default with `write(2)` on a blocking-pool thread. */
   def writeFile(guard: IoGuard | Null, fd: Int, buf: ByteBuffer)(using Async): Unit =
     blockingFileIo(guard, fd, buf, -1L, write = true)
 
+  /** Reads at `offset` without moving the file position, like `pread(2)`. */
   def readAt(guard: IoGuard, fd: Int, buf: ByteBuffer, offset: Long)(using Async): Unit =
     require(offset >= 0, "offset must be nonnegative")
     blockingFileIo(guard, fd, buf, offset, write = false)
 
+  /** Writes at `offset` without moving the file position, like `pwrite(2)`. */
   def writeAt(guard: IoGuard, fd: Int, buf: ByteBuffer, offset: Long)(using Async): Unit =
     require(offset >= 0, "offset must be nonnegative")
     blockingFileIo(guard, fd, buf, offset, write = true)
@@ -133,6 +161,7 @@ trait ReactorDriver:
 object ReactorDriver:
   private val StageSize = 64 * 1024
 
+  // Heap arrays can be handed out by address because Scala Native's GC never moves objects.
   private[io] def pointerAt(buf: ByteBuffer): Ptr[Byte] | Null =
     if buf.hasPointer() then buf.pointer() + buf.position()
     else if buf.hasArray() && buf.hasRemaining() then buf.array().at(buf.arrayOffset() + buf.position())
@@ -151,6 +180,10 @@ object ReactorDriver:
       throw error
     copy
 
+  /** Waits for an op's future. `link` makes cancelling the caller cancel the op; `uninterruptible` makes the caller
+    * keep waiting after its own cancellation until the op has settled, because until then the kernel or a pool thread
+    * may still use the caller's buffers.
+    */
   private[io] def waitFor(future: Future[Unit])(using Async): Unit =
     future.link()
     uninterruptible(future.await)
@@ -169,6 +202,9 @@ object ReactorDriver:
       throw failure
     fd
 
+  /** Builds and submits one op on `reactor`, which must be called on its thread, resolving `resolver` when it settles.
+    * Returns the cancel action, which goes through `onLoop` because cancelling also has to happen on that thread.
+    */
   private[io] def submitOn(
       reactor: Reactor,
       onLoop: (=> Unit) => Unit,
@@ -180,6 +216,7 @@ object ReactorDriver:
     catch
       case t: Throwable =>
         resolver.reject(t)
+        // Nothing was submitted, so there is nothing to cancel.
         return () => ()
     val cancel = () => onLoop(reactor.cancel(op))
     var registration: IoGuard.Registration | Null = null
@@ -189,6 +226,7 @@ object ReactorDriver:
     val completion = new Completion[reactor.Op]:
       def onComplete(op: reactor.Op): Unit =
         release()
+        // The handle was closed while the op ran; report that rather than a result for a closed stream.
         if guard != null && guard.nn.isClosed then resolver.reject(AsynchronousCloseException())
         else resolver.resolve(())
       override def onFailure(op: reactor.Op, failure: Throwable): Unit =
@@ -209,6 +247,10 @@ object ReactorDriver:
     catch case t: Throwable => resolver.reject(t)
     cancel
 
+/** An op submission that another thread will start, on whichever `S` (a shard, or a driver's loop) picks it up. A
+  * cancel before the start skips the start and runs `whenCancelledFirst`; a cancel after it runs the cancel action the
+  * start returned. Either way it happens once.
+  */
 private[io] final class SharedJob[S](start: S => (() => Unit), whenCancelledFirst: () => Unit):
   private var cancelTaken: (() => Unit) | Null = null
   private var cancelled = false

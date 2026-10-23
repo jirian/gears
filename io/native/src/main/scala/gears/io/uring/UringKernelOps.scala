@@ -24,11 +24,14 @@ import scala.scalanative.unsigned.*
 import uring.*
 import uringStructOps.*
 
+/** Shared helpers for the kernel ops: result checks, error messages and poll masks. */
 private[uring] object Ring {
   export LinuxConstants.{ETIME, POLLIN, POLLOUT, SOCK_CLOEXEC, SOCK_NONBLOCK}
 
+  /** The offset that makes a read or write use and advance the file position, like `read(2)` and `write(2)`. */
   val currentPosition: __u64 = (-1L).toULong
 
+  /** Whether a negative result only means "try again". */
   def transient(res: Int): Boolean = res == -errno.EINTR || res == -errno.EAGAIN
 
   def failure(what: String, res: Int): IOException =
@@ -40,6 +43,9 @@ private[uring] object Ring {
 
 import Ring.*
 
+/** The memory a kernel op reads into or writes from, for one buffer. Heap and pointer buffers are handed to the kernel
+  * in place; only a read-only heap buffer, which has no accessible array, goes through a scratch copy that the op owns.
+  */
 // Heap buffers are handed to the kernel in place, which relies on Scala Native's GC never moving objects.
 private[uring] final class BufferRegion(buf: ByteBuffer) {
   private var scratch: Array[Byte] | Null = null
@@ -57,9 +63,11 @@ private[uring] final class BufferRegion(buf: ByteBuffer) {
     scratch.nn.asInstanceOf[ByteArray].at(0)
   }
 
+  /** Rejects a read-only buffer for an op that fills it. */
   def validateFill(): Unit =
     require(!buf.isReadOnly, "Read buffers must be writable")
 
+  /** Where the kernel should write the buffer's remaining bytes. */
   def toFill(): Ptr[Byte] = {
     validateFill()
     val direct = inPlace()
@@ -67,6 +75,7 @@ private[uring] final class BufferRegion(buf: ByteBuffer) {
     if copied then scratchOf(buf.remaining()) else direct.asInstanceOf[Ptr[Byte]]
   }
 
+  /** Where the kernel should read the buffer's remaining bytes from, copying them first if needed. */
   def toDrain(): Ptr[Byte] = {
     val direct = inPlace()
     copied = direct == null && buf.remaining() > 0
@@ -77,18 +86,22 @@ private[uring] final class BufferRegion(buf: ByteBuffer) {
     } else direct.asInstanceOf[Ptr[Byte]]
   }
 
+  /** Accounts for `n` bytes the kernel wrote: copies them out of scratch if used, and advances the position. */
   def filled(n: Int): Unit =
     if copied then buf.put(scratch.nn, 0, n) else buf.position(buf.position() + n)
 
+  /** Accounts for `n` bytes the kernel consumed. */
   def drained(n: Int): Unit = buf.position(buf.position() + n)
 }
 
+/** A `BufferRegion` per buffer plus the `iovec` array that describes them, for `readv` and `writev`. */
 private[uring] final class VectorBufferRegion(bufs: Array[ByteBuffer]) {
   require(bufs.length <= 1024, "A vector I/O operation may contain at most 1024 buffers")
   private val vectors = new Array[Byte](math.max(1, sizeof[iovec].toInt * bufs.length))
   private val regions = bufs.map(new BufferRegion(_))
   private var filling = false
 
+  /** Fills in the `iovec`s for a read (`fill`) or a write, and returns them. */
   def prepare(fill: Boolean): Ptr[iovec] =
     filling = fill
     val base = vectors.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[iovec]]
@@ -100,6 +113,7 @@ private[uring] final class VectorBufferRegion(bufs: Array[ByteBuffer]) {
       i += 1
     base
 
+  /** Spreads `count` transferred bytes over the buffers in order. */
   def advance(count: Int): Unit =
     var left = count
     var i = 0
@@ -111,6 +125,9 @@ private[uring] final class VectorBufferRegion(bufs: Array[ByteBuffer]) {
     if left != 0 then throw new IOException(s"Vector I/O returned $count bytes beyond the supplied buffers")
 }
 
+/** A `msghdr`, its one `iovec` and room for a peer address, for `sendmsg` and `recvmsg`. They are heap arrays owned by
+  * the op, because the kernel reads them after the submitting call returns.
+  */
 private[uring] final class MessageHeader {
   private val header = new Array[Byte](sizeof[msghdr].toInt)
   private val vector = new Array[Byte](sizeof[iovec].toInt)
@@ -118,6 +135,7 @@ private[uring] final class MessageHeader {
 
   def msg: Ptr[msghdr] = header.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[msghdr]]
 
+  /** Points the header at one data range, with an address of `nameLength` bytes in `name`, or none if 0. */
   def set(data: Ptr[Byte], length: Int, nameLength: Int): Unit = {
     val iov = vector.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[iovec]]
     iov.iov_base = data
@@ -125,6 +143,7 @@ private[uring] final class MessageHeader {
     setIovecs(iov, 1, nameLength)
   }
 
+  /** Points the header at `count` existing `iovec`s. */
   def setIovecs(iov: Ptr[iovec], count: Int, nameLength: Int): Unit = {
     val m = uringStructOps.msghdrOps(msg)
     m.msg_name = if nameLength > 0 then SocketAddresses.pointer(name).asInstanceOf[Ptr[Byte]] else null
@@ -137,6 +156,9 @@ private[uring] final class MessageHeader {
   }
 }
 
+/** `Ops.read`, and `UringOps.readAt` when `offset` is given. Waits for readiness if the descriptor is non-blocking and
+  * has nothing to read.
+  */
 final class Read[Owner](val fd: Int, buf: ByteBuffer, offset: Long = -1L) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLIN
@@ -156,6 +178,7 @@ final class Read[Owner](val fd: Int, buf: ByteBuffer, offset: Long = -1L) extend
     }
 }
 
+/** `UringOps.readv`. */
 final class ReadVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLIN
@@ -176,6 +199,10 @@ final class ReadVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends Urin
     }
 }
 
+/** `Ops.write`, `UringOps.writeFile` and `UringOps.writeAt`. Unless `plain`, it starts with `send(2)` and
+  * `MSG_NOSIGNAL`, so a closed peer is an error instead of a `SIGPIPE`, and switches to `write(2)` for good when the
+  * descriptor turns out not to be a socket.
+  */
 final class Write[Owner](val fd: Int, buf: ByteBuffer, private var plain: Boolean, offset: Long = -1L)
     extends UringKernelOp[Owner]
     with Repeatable {
@@ -204,6 +231,7 @@ final class Write[Owner](val fd: Int, buf: ByteBuffer, private var plain: Boolea
     }
 }
 
+/** `UringOps.writev`, with the same `send` first, `write` if not a socket rule as `Write`. */
 final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLOUT
@@ -236,6 +264,9 @@ final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends Uri
     }
 }
 
+/** `Ops.accept`. The new connection is non-blocking and close-on-exec. A connection aborted before it was accepted is
+  * skipped, and a connection accepted after a cancel is closed.
+  */
 final class Accept[Owner](val fd: Int, into: HandleSlot) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLIN
@@ -253,6 +284,7 @@ final class Accept[Owner](val fd: Int, into: HandleSlot) extends UringKernelOp[O
   override private[uring] def discard(res: Int): Unit = if res >= 0 then unistd.close(res)
 }
 
+/** `Ops.connect`: waits until the socket is writable, then reads `SO_ERROR` to see whether the connect worked. */
 final class Connect[Owner](val fd: Int) extends UringKernelOp[Owner] {
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit = io_uring_prep_poll_add(sqe, fd, POLLOUT.toUInt)
 
@@ -265,6 +297,7 @@ final class Connect[Owner](val fd: Int) extends UringKernelOp[Owner] {
     }
 }
 
+/** `Ops.whenReady`: a one-shot readiness wait, then `body` on the reactor thread; false from `body` waits again. */
 final class WhenReady[Owner](val fd: Int, val interest: Interest, body: () => Boolean)
     extends UringKernelOp[Owner]
     with Repeatable {
@@ -276,6 +309,7 @@ final class WhenReady[Owner](val fd: Int, val interest: Interest, body: () => Bo
     else body()
 }
 
+/** `Ops.receive`: one datagram with `recvmsg(2)`. A datagram larger than the buffer is truncated to fit. */
 final class Receive[Owner](val fd: Int, buf: ByteBuffer, from: Slot[Address])
     extends UringKernelOp[Owner]
     with Repeatable {
@@ -300,6 +334,7 @@ final class Receive[Owner](val fd: Int, buf: ByteBuffer, from: Slot[Address])
     else {
       val received = math.min(res, windowSize)
       region.filled(received)
+      // `Ops.receive` leaves the buffer flipped over the datagram.
       buf.limit(start + received)
       buf.position(start)
       from.set(SocketAddresses.decode(SocketAddresses.pointer(header.name), header.msg.msg_namelen))
@@ -307,6 +342,7 @@ final class Receive[Owner](val fd: Int, buf: ByteBuffer, from: Slot[Address])
     }
 }
 
+/** `Ops.send`: one datagram with `sendmsg(2)`, to `to` or to the connected peer. */
 final class Send[Owner](val fd: Int, buf: ByteBuffer, to: Address | Null) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLOUT
@@ -329,6 +365,7 @@ final class Send[Owner](val fd: Int, buf: ByteBuffer, to: Address | Null) extend
     }
 }
 
+/** `Ops.timer` and `UringOps.timer`: an io_uring timeout that only fires on time. */
 final class UringTimer[Owner](val nanoseconds: Long) extends UringKernelOp[Owner] with Repeatable {
   require(nanoseconds >= 0, "Timer duration must not be negative")
   private val timespec = new Array[Byte](sizeof[__kernel_timespec].toInt)
@@ -341,6 +378,7 @@ final class UringTimer[Owner](val nanoseconds: Long) extends UringKernelOp[Owner
   }
 
   private[uring] def finish(res: Int): Boolean =
+    // -ETIME is how a timeout reports that it expired.
     if res == -ETIME || res == 0 then true
     else throw failure("Timer failed", res)
 
@@ -348,6 +386,9 @@ final class UringTimer[Owner](val nanoseconds: Long) extends UringKernelOp[Owner
     io_uring_prep_timeout_remove(sqe, userData.toULong, 0.toUInt)
 }
 
+/** `UringOps.openAt`. The path is copied into a NUL-terminated array the op owns, because the kernel reads it after
+  * submission.
+  */
 final class OpenAt[Owner](val path: String, flags: Int, mode: Int, into: HandleSlot) extends UringKernelOp[Owner] {
   private val cPath = {
     val utf8 = path.getBytes(StandardCharsets.UTF_8)

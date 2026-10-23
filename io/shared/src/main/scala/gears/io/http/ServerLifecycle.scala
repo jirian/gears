@@ -6,6 +6,10 @@ import gears.io.net.{TcpListener, TcpStream}
 import scala.collection.mutable
 import scala.util.Success
 
+/** The connections of one running server and its shutdown. Each connection is idle or active; a graceful stop closes
+  * the listener and ends idle connections, letting active ones finish their request, while a forced stop closes
+  * everything and cancels the handlers.
+  */
 private[http] final class ServerLifecycle(limit: Int):
   private var listener: TcpListener | Null = null
   private var stopping = false

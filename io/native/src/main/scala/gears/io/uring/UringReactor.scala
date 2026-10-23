@@ -16,7 +16,13 @@ import scala.scalanative.unsigned.*
 import uring.*
 import uringStructOps.*
 
-// The kernel owns a ring op's buffers until its CQE arrives, so a cancelled op's onCancel waits for that CQE.
+/** A `Reactor` on one Linux io_uring (kernel 5.11 or later). Kernel ops become submission queue entries, and their
+  * completions are dispatched by `poll`; blocking ops and DNS lookups run on a `BlockingPool`. Other threads wake a
+  * waiting `poll` through an eventfd that the ring always has a read pending on.
+  *
+  * Like every `Reactor`, it is used from one thread, apart from `wakeup` and building ops.
+  */
+// The kernel owns a kernel op's buffers until its CQE arrives, so a cancelled op's onCancel waits for that CQE.
 final class UringReactor private (entries: Int, blockerPool: BlockingPool, resolver: HostResolver) extends Reactor {
 
   type Op = UringOp[this.type]
@@ -27,12 +33,16 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 
   def handles: Handles = UringHandles
 
+  /** A submitted op with the completion to run for it. */
   private final class Pending[C <: Op](val op: C, val completion: Completion[C]) {
     def complete(): Unit = completion.onComplete(op)
     def fail(failure: Throwable): Unit = completion.onFailure(op, failure)
     def cancelled(): Unit = completion.onCancel(op)
   }
 
+  /** One submission of a kernel op, keyed by the user data `id` its SQE and CQE carry. After a cancel, `pending` moves
+    * to `cancelled` until the CQE arrives; `cancelQueued` records that the cancel SQE itself was submitted.
+    */
   private final class InFlight(val id: Long, val op: UringKernelOp[?], var pending: Pending[?] | Null) {
     var cancelled: Pending[?] | Null = null
     var submissionFailure: Throwable | Null = null
@@ -47,6 +57,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     if res < 0 then throw Ring.failure("Failed to set up io_uring", res)
   }
 
+  // User data of the eventfd read, and of SQEs whose CQEs are ignored: cancels, and no-ops that fill a taken SQE.
   private inline val WakeId = 0L
   private inline val InternalId = 1L
   private var nextId = 2L
@@ -64,6 +75,8 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   private val cqeSlotStorage = new Array[Byte](sizeof[Ptr[io_uring_cqe]].toInt)
   private def cqeSlot: Ptr[Ptr[io_uring_cqe]] =
     cqeSlotStorage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[Ptr[io_uring_cqe]]]
+  // CQEs are copied out and dispatched one by one, so a completion that cancels a later op of the same batch can
+  // still see that op's CQE here.
   private val reapedIds = new Array[Long](MaxBatch)
   private val reapedResults = new Array[Int](MaxBatch)
   private var reapedCount = 0
@@ -97,6 +110,8 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 
   armWake()
 
+  /** Submits `op`. A kernel op gets an SQE and is flushed to the kernel at once; a blocking op is queued on the pool.
+    */
   def submit[C <: Op](op: C, completion: Completion[C]): Unit = {
     if closed then throw new IllegalStateException("The reactor is closed")
     op match {
@@ -127,11 +142,15 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     op.submitted = true
   }
 
+  /** Prepares and submits one SQE for `op`. If the submit fails, the op is cancelled and fails with that error once its
+    * CQE arrives, since the kernel may already have its buffers.
+    */
   private def enqueue(op: UringKernelOp[?], pending: Pending[?]): Unit = {
     val sqe = nextSqe()
     try op.prepareSubmission(sqe)
     catch {
       case t: Throwable =>
+        // The SQE is already taken from the ring and will be submitted, so it must not hold a half-prepared op.
         io_uring_prep_nop(sqe)
         sqe.user_data = InternalId.toULong
         throw t
@@ -148,6 +167,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         requestCancel(flight)
   }
 
+  /** A free SQE, flushing the queue once if it is full. */
   private def nextSqe(): Ptr[io_uring_sqe] = {
     var sqe = io_uring_get_sqe(ring)
     if sqe == null then {
@@ -158,6 +178,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     sqe
   }
 
+  /** Hands prepared SQEs to the kernel. A busy or interrupted submit is left for the next `poll` to retry. */
   private def flush(): Unit = {
     val res = io_uring_submit(ring)
     unsubmitted = res < 0 || io_uring_sq_ready(ring) != 0.toUInt
@@ -165,6 +186,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       throw Ring.failure("Failed to submit to io_uring", res)
   }
 
+  /** Keeps one read of the wake eventfd in the ring, so a write to it ends a blocking wait. */
   private def armWake(): Unit =
     if !closing && !wakeInFlight then
       try {
@@ -175,8 +197,10 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         flush()
       } catch case _: IOException => ()
 
+  /** Ends a blocking `poll`, from any thread. Wake-ups requested before the loop sees one are merged. */
   def wakeup(): Unit =
     if wakePending.compareAndSet(false, true) then
+      // Under the lock, so close can't free the eventfd's number between the check and the write.
       wakeLock.synchronized {
         if !closed then {
           val signal = stackalloc[CLongLong]()
@@ -185,12 +209,14 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         }
       }
 
+  /** Called by a pool thread when `blocking` has settled: queues it for the reactor thread and wakes the loop. */
   private[uring] def resolved(blocking: UringBlockingOp[?]): Unit =
     if !closed then {
       resolvedQueue.add(blocking)
       wakeup()
     }
 
+  /** Runs the completions of settled blocking ops on the reactor thread. Returns whether any ran. */
   private def deliverResolved(): Boolean = {
     var ran = false
     var blocking = resolvedQueue.poll()
@@ -215,6 +241,9 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     ran
   }
 
+  /** Whether the CQE for `id` is already reaped or waiting in the completion queue. Then a cancel is too late, and the
+    * op completes normally instead.
+    */
   private def completionArrived(id: Long): Boolean = {
     var i = reapedCursor
     while i < reapedCount do {
@@ -230,6 +259,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     false
   }
 
+  /** Copies up to a batch of CQEs out of the ring and marks them consumed, so dispatching may submit again safely. */
   private def reap(): Unit = {
     val count = io_uring_peek_batch_cqe(ring, batch, MaxBatch.toUInt).toInt
     var i = 0
@@ -244,6 +274,9 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     reapedCursor = 0
   }
 
+  /** Settles the submission `id` with `res`: completes, fails or resubmits its op, or, after a cancel, keeps its
+    * progress and runs `onCancel`.
+    */
   private def dispatch(id: Long, res: Int): Unit =
     if id == WakeId then {
       wakeInFlight = false
@@ -254,6 +287,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         case None         => ()
         case Some(flight) =>
           val op = flight.op
+          // A repeatable op may already be in flight again under a newer submission; only clear our own.
           if op.inFlight.asInstanceOf[AnyRef] eq flight then op.inFlight = null
           val pending = flight.pending
           if pending == null then {
@@ -281,6 +315,10 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
           }
       }
 
+  /** One turn: runs everything ready, waiting up to `timeoutNanos` first if nothing is (forever if negative, not at all
+    * if 0). Returns whether any op's completion ran. While submissions or the wake read are not in the kernel yet, the
+    * wait is capped at 10 ms so they are retried.
+    */
   def poll(timeoutNanos: Long): Boolean = {
     if closed then throw new IllegalStateException("The reactor is closed")
     retryCancels()
@@ -314,6 +352,10 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 
   def stop(): Unit = stopped = true
 
+  /** Cancels `op`. For a kernel op, `onCancel` runs only when its CQE arrives, because until then the kernel may still
+    * write to its buffers. A running blocking op is interrupted, and `onCancel` waits for it to return, unless the op
+    * can be abandoned.
+    */
   def cancel(op: Op): Boolean = op match {
     case kernel: UringKernelOp[?] =>
       kernel.inFlight match {
@@ -336,6 +378,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       }
   }
 
+  /** Submits a cancel SQE for `flight`. If the queue is full, it goes to the backlog that the next `poll` retries. */
   private def requestCancel(flight: InFlight): Unit =
     flight.cancelRequested = true
     try {
@@ -354,6 +397,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       case _: IOException => if !flight.cancelQueued then cancelBacklog += flight
     }
 
+  /** Resubmits cancels that did not fit into the queue earlier. */
   private def retryCancels(): Unit =
     if cancelBacklog.nonEmpty then {
       val retry = cancelBacklog.toList
@@ -361,6 +405,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       retry.foreach(flight => if !flight.cancelQueued && inFlight.contains(flight.id) then requestCancel(flight))
     }
 
+  /** Takes the pending record of `blocking`, so its outcome is no longer delivered. */
   private def detach(blocking: UringBlockingOp[?]): Pending[?] | Null = {
     val pending = blocking.pending
     blocking.pending = null
@@ -368,6 +413,9 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     pending.asInstanceOf[Pending[?] | Null]
   }
 
+  /** Cancels everything, waits for every CQE and every running blocking op, then unmaps the ring. Only then does it run
+    * the `onCancel`s, so no callback sees memory the kernel or a pool thread still uses.
+    */
   def close(): Unit = {
     if !closed then {
       closing = true
@@ -447,12 +495,15 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 }
 
 object UringReactor {
+
+  /** Opens a reactor with a ring of `entries` submission slots. */
   def open(
       entries: Int = 256,
       blockerPool: BlockingPool = BlockingPool.global,
       resolver: HostResolver = PosixHostResolver
   ): UringReactor = new UringReactor(entries, blockerPool, resolver)
 
+  /** Opens a reactor for `body` and closes it afterwards. */
   def scoped(
       entries: Int = 256,
       blockerPool: BlockingPool = BlockingPool.global,

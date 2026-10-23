@@ -7,6 +7,7 @@ import gears.io.reactor.{ResolvedAddress, Slot}
 import java.io.IOException
 import java.net.{InetAddress, UnknownHostException}
 
+/** `DnsSupport` through the reactor's `resolve` op; a failed lookup is an `UnknownHostException`. */
 trait ReactorDnsSupport(driver: ReactorDriver) extends DnsSupport:
   override def resolve(host: String)(using Async): Array[InetAddress] =
     val addresses = Slot[List[ResolvedAddress]]()

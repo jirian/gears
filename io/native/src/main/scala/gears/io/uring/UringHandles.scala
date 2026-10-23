@@ -18,6 +18,10 @@ import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
+/** The `Handles` of the uring reactor: handles are POSIX descriptors, opened non-blocking. `readNow` and `writeNow`
+  * take heap buffers as well as pointer buffers. A Unix socket path bound by `listen` or `datagram` is remembered, so
+  * `close` can remove it.
+  */
 object UringHandles extends Handles {
   private val boundPaths = new ConcurrentHashMap[Integer, String]()
 

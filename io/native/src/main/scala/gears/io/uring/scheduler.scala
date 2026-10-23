@@ -18,6 +18,13 @@ import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.concurrent.duration._
 
+/** A gears `Scheduler` and `ReactorDriver` with `parallelism` shard threads, each running fibers and its own io_uring.
+  * A fiber's I/O goes into the ring of the shard it runs on; I/O from any other thread is handed to a shard. Idle
+  * shards steal tasks from busy ones. A watchdog reports a shard that runs one task for longer than
+  * `stallWarningAfter`, which usually means a fiber is blocking its thread.
+  *
+  * Use [[UringPerThreadSupport]], which adds the gears `AsyncSupport`, to run fibers on it.
+  */
 // A fiber must not block its shard's thread: nothing else on that shard runs, and its reactor's I/O cannot complete.
 class UringPerThreadScheduler(
     parallelism: Int = Runtime.getRuntime().availableProcessors(),
@@ -65,6 +72,7 @@ class UringPerThreadScheduler(
   private def currentShard = UringShard.current().filter(_.scheduler eq this)
   private def pickShard(): UringShard = shards(Math.floorMod(nextShard.getAndIncrement(), shards.length))
 
+  /** Runs `body` on the current shard, or from any other thread, on the next free shard via the global queue. */
   override def execute(body: Runnable): Unit =
     currentShard match
       case Some(shard) => shard.execute(body, calledFromOwnThread = true)
@@ -81,6 +89,9 @@ class UringPerThreadScheduler(
       sharedJobs.offer(job)
       pickShard().wake()
 
+  /** Runs the op `build` makes and waits for it. On a shard of this scheduler, the op goes into that shard's ring;
+    * otherwise it becomes a shared job that the next free shard starts.
+    */
   override def await(guard: IoGuard | Null)(build: (r: Reactor) => r.Op)(using Async): Unit =
     if closed then throw closedError()
     val pending = Future
@@ -98,12 +109,15 @@ class UringPerThreadScheduler(
             submitShared(job)
     ReactorDriver.waitFor(pending)
 
+  /** Opens with `IORING_OP_OPENAT` instead of a pool thread, always adding `O_CLOEXEC`. */
   override def openFile(path: String, flags: Int, mode: Int)(using Async): Int =
     val closeOnExec = gears.io.uring.LinuxConstants.O_CLOEXEC
     awaitHandle(null)((r, opened) => uring(r).ops.openAt(path, flags | closeOnExec, mode, opened).asInstanceOf[r.Op])
 
+  /** io_uring takes heap buffers in place. */
   override def acceptsHeapBuffers: Boolean = true
 
+  /** File I/O goes through the ring too, not through the blocking pool. */
   override def readFile(guard: IoGuard | Null, fd: Int, buf: ByteBuffer)(using Async): Unit =
     await(guard)(r => r.ops.read(fd, buf))
 
@@ -116,6 +130,7 @@ class UringPerThreadScheduler(
 
   private def uring(r: Reactor): UringReactor = r.asInstanceOf[UringReactor]
 
+  /** Runs `body` after `delay`, using a ring timer on the current shard or on the next free one. */
   override def schedule(delay: FiniteDuration, body: Runnable): Cancellable =
     if closed then throw closedError()
     def start(shard: UringShard): () => Unit =
@@ -158,11 +173,15 @@ class UringPerThreadScheduler(
     if cause == null then IllegalStateException("The scheduler is closed")
     else IllegalStateException("The scheduler stopped after a fatal error on one of its shards", cause)
 
+  /** Called by a shard that hit a fatal error: closes the scheduler, and later calls fail with `cause`. */
   private[uring] def failed(cause: Throwable): Unit =
     synchronized:
       if failure == null && !closed then failure = cause
     close()
 
+  /** Stops the shards and waits for their threads, cancelling queued jobs. Each shard closes its reactor, which cancels
+    * its pending I/O. Tasks still queued run on gears' default runtime, so suspended fibers can finish.
+    */
   override def close(): Unit =
     val first = synchronized:
       val wasOpen = !closed
@@ -182,11 +201,22 @@ class UringPerThreadScheduler(
         UringShard.afterClose(task)
         task = globalQueue.poll()
 
+  /** TCP, UDP, files and DNS on this scheduler. Fibers on any runtime may use them; see `await`. */
   def tcpSupport = new ReactorTcpSupport(this) {}
   def udpSupport = new ReactorUdpSupport(this) {}
   def fileSupport = new ReactorFileSupport(this) {}
   def dnsSupport = new ReactorDnsSupport(this) {}
 
+/** The io_uring runtime for gears: a `UringPerThreadScheduler` that is also the `AsyncSupport` and `AsyncOperations`
+  * for fibers on its shards. Close it when done; its shard threads are daemons, but its rings stay mapped until then.
+  *
+  * {{{
+  * Using.resource(UringPerThreadSupport()): support =>
+  *   given UringPerThreadSupport = support
+  *   given TcpSupport = support.tcpSupport
+  *   Async.blocking { ... }
+  * }}}
+  */
 class UringPerThreadSupport(
     parallelism: Int = Runtime.getRuntime().availableProcessors(),
     entriesPerShard: Int = 256,
@@ -200,6 +230,7 @@ class UringPerThreadSupport(
     with native.NativeSuspend:
   type Scheduler = this.type
 
+  /** Sleeps on a ring timer, so a sleeping fiber doesn't hold a thread. */
   override def sleep(millis: Long)(using Async): Unit =
     require(millis >= 0, "sleep duration must be nonnegative")
     await(null)(r => r.asInstanceOf[UringReactor].ops.timer(millis.millis).asInstanceOf[r.Op])

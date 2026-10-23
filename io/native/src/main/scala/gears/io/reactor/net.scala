@@ -27,6 +27,7 @@ import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
 
+/** A Unix domain socket path, for the TCP (stream) and UDP (datagram) supports. */
 final case class UnixSocketAddress(path: String) extends SocketAddress:
   override def toString: String = path
 
@@ -141,6 +142,9 @@ private[io] def applySocketOption(fd: Int, opt: SocketOption): Unit =
         ) < 0
       then throw posixError("setsockopt failed")
 
+/** A TCP or Unix stream socket on a driver. Closing it while ops are pending cancels them, and they fail with
+  * `AsynchronousCloseException`.
+  */
 class ReactorTcpStream private[io] (
     private[io] val fd: Int,
     driver: ReactorDriver,
@@ -175,6 +179,7 @@ class ReactorTcpStream private[io] (
     }
   }
 
+/** A listening socket on a driver. Closing a Unix listener removes its path. */
 class ReactorTcpListener private[io] (
     private[io] val fd: Int,
     driver: ReactorDriver,
@@ -197,6 +202,7 @@ class ReactorTcpListener private[io] (
       var stream: ReactorTcpStream | Null = null
       while stream == null do
         val clientFd = driver.awaitHandle(guard)((r, accepted) => r.ops.accept(fd, accepted))
+        // A client that reset before we looked has no peer address; drop it and accept the next one.
         val peer =
           try getPeerAddress(clientFd)
           catch
@@ -208,6 +214,7 @@ class ReactorTcpListener private[io] (
     }
   }
 
+/** A datagram socket on a driver. Closing a Unix socket removes its path. */
 class ReactorUdpSocket private[io] (
     private[io] val fd: Int,
     driver: ReactorDriver,
@@ -251,6 +258,7 @@ class ReactorUdpSocket private[io] (
     }
   }
 
+/** `UdpSupport` on a driver, for IP and Unix addresses. */
 trait ReactorUdpSupport(driver: ReactorDriver) extends net.UdpSupport:
   type Socket = ReactorUdpSocket
 
@@ -268,6 +276,9 @@ trait ReactorUdpSupport(driver: ReactorDriver) extends net.UdpSupport:
       else bindTo(fd, address)
       ReactorUdpSocket(fd, driver, getLocalAddress(fd), unixPath)
 
+/** `TcpSupport` on a driver, for IP and Unix addresses. `listen` sets `SO_REUSEADDR` on IP sockets unless the options
+  * say otherwise.
+  */
 trait ReactorTcpSupport(driver: ReactorDriver) extends net.TcpSupport:
   type Stream = ReactorTcpStream
   type Listener = ReactorTcpListener

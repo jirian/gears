@@ -1,5 +1,6 @@
 package gears.io.http
 
+/** Random bytes for WebSocket masks and handshake keys, from the platform's secure source. */
 private[http] object WebSocketRandom:
   def bytes(size: Int): Array[Byte] =
     val out = new Array[Byte](size)

@@ -14,6 +14,7 @@ import scala.scalanative.unsigned._
 
 import openssl._
 
+/** An OpenSSL `SSL_CTX`. Closing it frees the context; sessions already opened from it keep their own reference. */
 private final class OpenSslContext(ctx: Ptr[SSL_CTX]) extends TlsContext:
   private var closed = false
   def session[A](create: Ptr[SSL_CTX] => A): A = synchronized:
@@ -24,6 +25,7 @@ private final class OpenSslContext(ctx: Ptr[SSL_CTX]) extends TlsContext:
       closed = true
       SSL_CTX_free(ctx)
 
+/** The text of the oldest error in OpenSSL's per-thread error queue, for exception messages. */
 private[tls] def lastOpenSslError(): String =
   val code = ERR_get_error()
   if code == 0.toULong then "no OpenSSL error recorded"
@@ -32,12 +34,16 @@ private[tls] def lastOpenSslError(): String =
     ERR_error_string_n(code, buf, 256.toUSize)
     fromCString(buf)
 
+/** TLS on Scala Native through OpenSSL 1.1.0 or later, over any `TcpStream`. */
 object NativeTlsSupport extends TlsSupport:
   private def freeAndFail(ctx: Ptr[SSL_CTX], what: String): Nothing =
     val msg = lastOpenSslError()
     SSL_CTX_free(ctx)
     throw new IOException(s"$what: $msg")
 
+  /** A client context. With `verify`, servers must present a certificate trusted by the system's store or by `caFile`,
+    * and matching the name given to `wrapClient`; without it, any certificate is accepted.
+    */
   def clientContext(verify: Boolean = true, caFile: Option[String] = None): TlsContext =
     val ctx = SSL_CTX_new(TLS_client_method())
     if ctx == null then throw new IOException(s"SSL_CTX_new failed: ${lastOpenSslError()}")
@@ -52,6 +58,7 @@ object NativeTlsSupport extends TlsSupport:
     else SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, null)
     OpenSslContext(ctx)
 
+  /** A server context with a PEM certificate chain and private key. */
   def serverContext(certFile: String, keyFile: String): TlsContext =
     val ctx = SSL_CTX_new(TLS_server_method())
     if ctx == null then throw new IOException(s"SSL_CTX_new failed: ${lastOpenSslError()}")
@@ -63,6 +70,9 @@ object NativeTlsSupport extends TlsSupport:
       if SSL_CTX_check_private_key(ctx) != 1 then freeAndFail(ctx, "private key does not match certificate")
     OpenSslContext(ctx)
 
+  /** Runs a client handshake on `stream`, sending `serverName` as SNI and verifying the certificate against it (a host
+    * name, or an IP literal checked against the certificate's IP addresses). Closes `stream` if the handshake fails.
+    */
   def wrapClient(stream: TcpStream, context: TlsContext, serverName: String)(using Async): TcpStream =
     val tls =
       context.asInstanceOf[OpenSslContext].session(ctx => TlsStream.open(stream, ctx, isServer = false, serverName))
@@ -74,6 +84,7 @@ object NativeTlsSupport extends TlsSupport:
         tls.close()
         throw t
 
+  /** Runs a server handshake on `stream`. Closes `stream` if the handshake fails. */
   def wrapServer(stream: TcpStream, context: TlsContext)(using Async): TcpStream =
     val tls = context.asInstanceOf[OpenSslContext].session(ctx => TlsStream.open(stream, ctx, isServer = true, ""))
     try
@@ -84,6 +95,13 @@ object NativeTlsSupport extends TlsSupport:
         tls.close()
         throw t
 
+/** A TLS connection over `underlying`. OpenSSL never touches the socket: it works on an in-memory BIO pair, and this
+  * class moves bytes between the pair and `underlying` with ordinary gears reads and writes, so a handshake or read
+  * suspends its fiber instead of blocking a thread, on any `TcpStream`.
+  *
+  * Every OpenSSL call holds `nativeLock`. One read and one write may run at once, as on any `TcpStream`; their network
+  * input and output each have their own semaphore.
+  */
 final class TlsStream private (
     underlying: TcpStream,
     ssl: Ptr[SSL],
@@ -116,9 +134,13 @@ final class TlsStream private (
     underlying.shutdownOutput()
 
   override def shutdownInput()(using Async): Unit =
+    // Only to throw ClosedChannelException if the session was freed.
     native(())
     underlying.shutdownInput()
 
+  /** Writes everything OpenSSL has produced to `underlying`. Bytes not yet written survive a cancel and go first next
+    * time.
+    */
   private def flushNetworkOut()(using Async): Unit =
     val guard = outbound.acquire()
     try
@@ -142,6 +164,9 @@ final class TlsStream private (
           finally unsentFrom = out.position()
     finally guard.release()
 
+  /** Reads more ciphertext from `underlying` into OpenSSL. False at end of stream. Bytes read before a cancel are still
+    * fed in.
+    */
   private def fillNetworkIn()(using Async): Boolean =
     val guard = inbound.acquire()
     try
@@ -164,6 +189,8 @@ final class TlsStream private (
 
   private var failureDetail = ""
 
+  // OpenSSL's error queue is per thread and fibers move between threads, so a stale error from someone else would
+  // change what SSL_get_error reports. The detail text is read here too, on the thread that made the call.
   private def call(op: () => Int): (Int, Int) = native:
     ERR_clear_error()
     val r = op()
@@ -171,6 +198,9 @@ final class TlsStream private (
     if e == SSL_ERROR_SSL || e == SSL_ERROR_SYSCALL then failureDetail = lastOpenSslError()
     (r, e)
 
+  /** Runs an OpenSSL call until it stops asking for network I/O, doing that I/O in between. Returns its result and
+    * `SSL_get_error` code; `PeerClosed` if it wanted input at end of stream.
+    */
   private def pump(op: () => Int)(using Async): (Int, Int) =
     var (result, error) = call(op)
     flushNetworkOut()
@@ -181,6 +211,7 @@ final class TlsStream private (
           val more = fillNetworkIn()
           if !more then error = TlsStream.PeerClosed
           more
+        // With a BIO pair, this means the pair's buffer was full; flushNetworkOut has just drained it.
         case SSL_ERROR_WANT_WRITE => true
         case _                    => false
       if retry then
@@ -236,6 +267,7 @@ final class TlsStream private (
       Right(())
   }
 
+  /** Frees the OpenSSL session and closes `underlying`, without sending `close_notify`; `shutdownOutput` sends it. */
   override def close(): Unit =
     val first = nativeLock.synchronized:
       if freed then false

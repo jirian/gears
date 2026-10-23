@@ -7,6 +7,7 @@ import gears.io.{Error, Reader}
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 
+/** Runs the examples named on the command line, or lists them. Exits 1 if any check failed. */
 object Main:
   private val examples: Seq[(String, String, () => Unit)] = Seq(
     ("tcp-echo", "TCP listen, accept, connect, socket options and half-close", tcpEchoExample),
@@ -49,6 +50,7 @@ object Main:
 
 private val failures = java.util.concurrent.atomic.AtomicInteger()
 
+/** Prints a check's result and counts failures. */
 private[examples] def check(ok: Boolean, what: String): Unit =
   println(s"  $what: ${if ok then "ok" else "FAILED"}")
   if !ok then failures.incrementAndGet()
@@ -57,14 +59,17 @@ private[examples] def fail(message: String): Unit =
   println(s"  FAILED: $message")
   failures.incrementAndGet()
 
+/** Runs `body` with a fresh io_uring runtime and closes it afterwards. */
 private[examples] def withUring(body: UringPerThreadSupport ?=> Unit): Unit =
   val support = UringPerThreadSupport()
   try body(using support)
   finally support.close()
 
+/** The value of `result`, or an exception naming `what`. */
 private[examples] def orFail[E, A](what: String)(result: Either[E, A]): A =
   result.fold(e => throw RuntimeException(s"$what failed: $e"), identity)
 
+/** Reads `reader` to its end as UTF-8. */
 private[examples] def readToEnd(reader: Reader)(using Async): String =
   val out = java.io.ByteArrayOutputStream()
   val buf = ByteBuffer.allocate(1024)

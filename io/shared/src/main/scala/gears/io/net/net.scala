@@ -14,8 +14,10 @@ abstract class TcpStream extends Reader, Writer, Closeable:
   def localAddress: SocketAddress
   def remoteAddress: SocketAddress
 
+  /** Half-closes the stream: the peer reads end of stream, and this side can still read. */
   def shutdownOutput()(using Async): Unit
 
+  /** Stops reading: a pending or later read returns end of stream. */
   def shutdownInput()(using Async): Unit
 
 // Represents a TCP server/listener.
@@ -49,13 +51,19 @@ object TcpSupport:
   ) =
     tcp.listen(address, options)
 
+/** A bound datagram socket, IP or Unix. */
 abstract class UdpSocket extends Closeable:
   def localAddress: SocketAddress
 
+  /** Sends the remaining bytes of `buf` as one datagram to `target`. */
   def sendTo(buf: Buffer, target: SocketAddress)(using Async): Result[Unit]
 
+  /** Receives one datagram into `buf`, advancing its position by the datagram's size, and returns its sender. A
+    * datagram larger than the room in `buf` is truncated.
+    */
   def receiveFrom(buf: Buffer)(using Async): Result[SocketAddress]
 
+/** Opens datagram sockets. */
 trait UdpSupport:
   type Socket <: UdpSocket
 
@@ -70,18 +78,28 @@ object UdpSupport:
   ) =
     udp.bind(address, options)
 
+/** Shared TLS configuration, such as trusted certificates or a server's certificate and key. */
 trait TlsContext extends java.io.Closeable
 
+/** TLS over existing TCP streams. */
 trait TlsSupport:
+
+  /** A client configuration; `verify` checks the server's certificate against the system store and `caFile`. */
   def clientContext(verify: Boolean = true, caFile: Option[String] = None): TlsContext
 
+  /** A server configuration from PEM files. */
   def serverContext(certFile: String, keyFile: String): TlsContext
 
+  /** Runs a client handshake on `stream` for `serverName` and returns the encrypted stream. */
   def wrapClient(stream: TcpStream, context: TlsContext, serverName: String)(using Async): TcpStream
 
+  /** Runs a server handshake on `stream` and returns the encrypted stream. */
   def wrapServer(stream: TcpStream, context: TlsContext)(using Async): TcpStream
 
+/** Host name lookup that suspends the caller instead of blocking its thread. */
 trait DnsSupport:
+
+  /** The addresses of `host`; throws `UnknownHostException` if there are none. */
   def resolve(host: String)(using Async): Array[java.net.InetAddress]
 
 object DnsSupport:

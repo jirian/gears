@@ -10,9 +10,15 @@ import java.nio.charset.StandardCharsets
 import scala.collection.mutable
 import scala.concurrent.duration.*
 
+/** An `http` or `https` URL, split into the parts a request needs. `host` is a name or a bare IP literal, without
+  * brackets; `query` has no `?`.
+  */
 final case class Url(scheme: String, host: String, port: Int, path: String, query: String):
+
+  /** The request target: the path and query. */
   def target: String = if query.isEmpty then path else s"$path?$query"
 
+  /** The `Host` header value: brackets around IPv6, and the port unless it is the scheme's default. */
   def hostHeader: String =
     val bracketed = if host.contains(':') then s"[$host]" else host
     if port == Url.defaultPort(scheme) then bracketed else s"$bracketed:$port"
@@ -20,6 +26,9 @@ final case class Url(scheme: String, host: String, port: Int, path: String, quer
 object Url:
   private def defaultPort(scheme: String): Int = if scheme == "https" then 443 else 80
 
+  /** Parses an absolute `http` or `https` URL. Throws `IllegalArgumentException` for other schemes, a malformed port,
+    * whitespace or control characters.
+    */
   def parse(raw: String): Url =
     if raw.exists(c => c <= ' ' || c == '\u007f') then
       throw new IllegalArgumentException("URL contains whitespace or control characters")
@@ -51,6 +60,7 @@ object Url:
       case i  => (pathAndQuery.substring(0, i), pathAndQuery.substring(i + 1))
     Url(scheme, host, port, if path.isEmpty then "/" else path, query)
 
+  /** Resolves a redirect's `Location` against the URL that was requested. */
   def resolve(base: Url, location: String): Url =
     if location.contains("://") then parse(location)
     else
@@ -62,8 +72,13 @@ object Url:
         else base.path.substring(0, base.path.lastIndexOf('/') + 1) + path
       base.copy(path = absolutePath, query = query)
 
+/** A client request with its whole body. The transport adds `Host`, `Content-Length` and `Connection` itself. */
 final case class ClientRequest(method: HttpMethod, url: Url, headers: Headers, body: Array[Byte]):
+
+  /** This request with `name` set to `value`. */
   def withHeader(name: String, value: String): ClientRequest = copy(headers = headers.set(name, value))
+
+  /** This request with `cookie` added. */
   def addCookie(cookie: Cookie): ClientRequest = copy(headers = headers.add("Cookie", cookie.rendered))
 
 object ClientRequest:
@@ -72,6 +87,23 @@ object ClientRequest:
   def post(url: String, body: Array[Byte], contentType: String = "application/octet-stream"): ClientRequest =
     ClientRequest(HttpMethod.POST, Url.parse(url), Headers("Content-Type" -> contentType), body)
 
+/** Sends single requests over pooled connections, like Go's `http.Transport`. Connections are kept per scheme, host and
+  * port; only idempotent requests reuse a pooled connection, so a request that cannot safely be retried never goes over
+  * one the server may just have closed. At most `maxConnections` are open at once; further requests wait.
+  *
+  * @param tls
+  *   enables `https`; `tlsContext` makes its client context, once, on first use
+  * @param maxResponseBodySize
+  *   the largest response body read, in bytes
+  * @param idleTimeout
+  *   how long a pooled connection may sit unused before it is closed instead of reused
+  * @param connectTimeout
+  *   bounds the DNS lookup, connect and TLS handshake
+  * @param responseHeaderTimeout
+  *   bounds the wait for the response head after the request was sent
+  * @param readTimeout
+  *   bounds each read of a response body
+  */
 final class Transport(
     tls: Option[TlsSupport] = None,
     tlsContext: TlsSupport => TlsContext = _.clientContext(),
@@ -126,6 +158,7 @@ final class Transport(
       queue += Idle(stream, System.nanoTime())
       idleCount += 1
 
+  /** Closes the pooled connections that are not in use. */
   def closeIdleConnections(): Unit =
     val streams = synchronized:
       val all = idle.valuesIterator.flatMap(_.iterator.map(_.stream)).toList
@@ -183,6 +216,7 @@ final class Transport(
           raw.close()
           throw e
 
+  /** Sends `request` and reads the whole response. Redirects are not followed; `Client` does that. */
   def roundTrip(request: ClientRequest)(using Async): HttpResponse =
     val response = execute(
       () =>
@@ -199,6 +233,9 @@ final class Transport(
     try HttpResponse(response.status, response.headers, response.body.readAll())
     finally response.finish()
 
+  /** Sends `request`, streaming its body while the response arrives, and returns once the response head is in. The
+    * caller must close or finish the response.
+    */
   def roundTripStreaming(request: StreamingRequest)(using Async): StreamingResponse =
     roundTripStreaming(request, Async.current.group)
 
@@ -207,6 +244,7 @@ final class Transport(
   ): StreamingResponse =
     execute(() => request, replayable = false, owner = owner)
 
+  /** `roundTripStreaming` as a gears `Resource`, finished when released. */
   def response(request: StreamingRequest): Resource[StreamingResponse] =
     Resource(roundTripStreaming(request), _.finish())
 
@@ -220,6 +258,7 @@ final class Transport(
     def releasePermit(): Unit = if permitReleased.compareAndSet(false, true) then permit.release()
     var transferred = false
     try
+      // `request` is a function so a retry gets a fresh body reader; only replayable requests are ever retried.
       val first = request()
       val key = (first.url.scheme, first.url.host, first.url.port)
       val reused = if replayable then takeIdle(key._1, key._2, key._3) else None
@@ -232,6 +271,7 @@ final class Transport(
           if worker != null then
             worker.cancel()
             worker.awaitResult(using async.withGroup(CompletionGroup.Unlinked))
+          // Releases the upload's scope, now that the upload has ended.
           uploadAllocation._2
         val finished = new java.util.concurrent.atomic.AtomicBoolean(false)
         val uploaded = new java.util.concurrent.atomic.AtomicBoolean(false)
@@ -241,6 +281,7 @@ final class Transport(
           if worker != null then worker.cancel()
           synchronized { active.remove(stream) }
           try
+            // A connection goes back to the pool only if the whole request went out on it.
             if reuse && uploaded.get() then release(key, stream) else stream.close()
           finally if returnPermit then releasePermit()
         val admitted = synchronized:
@@ -253,12 +294,15 @@ final class Transport(
           awaitUpload()
           throw IllegalStateException("The HTTP transport is closed")
         try
+          // The body uploads while the response is read, because a server may answer before reading it all, as with
+          // a 413 for a body that is too large.
           val upload = Future {
             writeRequest(stream, outgoing)
             uploaded.set(true)
           }(using uploadScope, uploadScope)
           uploading.set(upload)
           upload.link(owner)
+          // `finish` may have run before `uploading` was set, and then had nothing to cancel.
           if finished.get() then upload.cancel()
           val reader = RequestReader(stream)
           val head = Bodies.timed(responseHeaderTimeout):
@@ -274,6 +318,7 @@ final class Transport(
                 incoming.handle(_.get),
                 upload.handle { result =>
                   result match
+                    // The server stopped reading the upload; it may still have sent a response, so keep reading.
                     case scala.util.Failure(_: UploadWriteFailure) => ()
                     case other                                     => other.get
                   incoming.await
@@ -300,6 +345,7 @@ final class Transport(
         case Some(stream) =>
           try attempt(stream, first)
           catch
+            // A pooled connection may have been closed by the server while idle: retry once on a new one.
             case _: IOException if !Async.current.group.isCancelled => attempt(dial(key._1, key._2, key._3), request())
         case None => attempt(dial(key._1, key._2, key._3), first)
     finally if !transferred then releasePermit()
@@ -391,17 +437,30 @@ object Transport:
       true
     case _ => false
 
+/** An HTTP client on a `Transport` that follows up to `maxRedirects` redirects. A 301, 302 or 303 turns a non-GET
+  * request into a GET without body, and a redirect to another origin drops `Authorization` and `Cookie`. `timeout`
+  * bounds a whole call, redirects included.
+  */
 final class Client(transport: Transport, maxRedirects: Int = 10, timeout: Option[FiniteDuration] = None)
     extends Closeable:
+
+  /** Closes the transport and its connections. */
   def close(): Unit = transport.close()
+
+  /** Closes the transport's unused pooled connections. */
   def closeIdleConnections(): Unit = transport.closeIdleConnections()
+
+  /** Sends a streaming request without following redirects. The caller must close or finish the response. */
   def sendStreaming(request: StreamingRequest)(using Async): StreamingResponse =
     val owner = Async.current.group
     Bodies.timedOwned(timeout, (response: StreamingResponse) => response.finish())(
       transport.roundTripStreaming(request, owner)
     )
+
+  /** `sendStreaming` as a gears `Resource`. */
   def response(request: StreamingRequest): Resource[StreamingResponse] = Resource(sendStreaming(request), _.finish())
 
+  /** Sends `request`, following redirects, and reads the whole response. */
   def send(request: ClientRequest)(using Async): HttpResponse = Bodies.timed(timeout)(follow(request, maxRedirects))
 
   def get(url: String)(using Async): HttpResponse = send(ClientRequest.get(url))
@@ -428,8 +487,12 @@ final class Client(transport: Transport, maxRedirects: Int = 10, timeout: Option
     else response
 
 object Client:
+
+  /** A client for plain `http`. */
   def apply()(using TcpSupport, DnsSupport): Client = new Client(Transport())
   def apply(transport: Transport): Client = new Client(transport)
+
+  /** A client for `http` and `https`, verifying servers against the system's trusted certificates. */
   def apply(tls: TlsSupport)(using TcpSupport, DnsSupport): Client = new Client(Transport(tls = Some(tls)))
 
   private[http] def redirectMethod(status: Int, method: HttpMethod): HttpMethod =

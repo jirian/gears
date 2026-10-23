@@ -6,6 +6,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.util.control.NonFatal
 
+/** A fixed set of daemon threads for work that must block, such as DNS lookups and the default file I/O. Reactors hand
+  * their blocking ops to it, so the reactor thread never blocks. The defaults come from the system properties
+  * `gears.io.blocking.parallelism` (4 threads) and `gears.io.blocking.queueCapacity` (unbounded).
+  */
 final class BlockingPool(
     parallelism: Int = BlockingPool.defaultParallelism,
     queueCapacity: Int = BlockingPool.defaultQueueCapacity,
@@ -23,6 +27,9 @@ final class BlockingPool(
     worker.start()
   }
 
+  /** Queues `task`. Throws `RejectedExecutionException` once closed, or if a bounded queue is full. A task that throws
+    * is ignored: blocking ops catch their own failures.
+    */
   def execute(task: Runnable): Unit = lifecycleLock.synchronized {
     if !accepting.get() || !queue.offer(task) then
       throw new RejectedExecutionException("The blocking I/O pool is closed or its queue is full")
@@ -43,6 +50,7 @@ final class BlockingPool(
     }
   }
 
+  /** Stops accepting tasks. Queued tasks still run, then the threads exit. It does not wait for them. */
   def close(): Unit = lifecycleLock.synchronized { accepting.set(false) }
 }
 
@@ -52,5 +60,6 @@ object BlockingPool {
   val defaultQueueCapacity: Int =
     sys.props.get("gears.io.blocking.queueCapacity").fold(Int.MaxValue)(_.toInt)
 
+  /** The pool every reactor uses unless given another. It is never closed. */
   lazy val global: BlockingPool = new BlockingPool()
 }

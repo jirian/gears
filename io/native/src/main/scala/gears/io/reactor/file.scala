@@ -24,6 +24,7 @@ private[reactor] trait PosixFile extends FileHandle:
 
   private case class Value[A](value: A)
 
+  // Runs on a private dup of the descriptor, so a concurrent close can't free the number while a pool thread uses it.
   protected def call[A](body: Int => A)(using Async): A =
     val copy = guard.whileOpen(ReactorDriver.duplicate(fd))
     val result = Slot[Value[A]]()
@@ -50,6 +51,7 @@ private[reactor] trait PosixFile extends FileHandle:
       val info = alloc[stat.stat]()(using zone)
       if stat.fstat(fd, info) < 0 then throw posixError("Failed to stat file")
       val value = !info
+      // Scala Native's stat fields: _6 st_size, _8 st_mtim, _13 st_mode.
       FileInfo(
         value._6,
         value._8._1 * 1000L + value._8._2 / 1000000L,
@@ -58,6 +60,7 @@ private[reactor] trait PosixFile extends FileHandle:
         stat.S_ISDIR(value._13) != 0
       )
 
+/** A file open for reading on a driver. */
 final class ReactorFileReader private[io] (
     protected val fd: Int,
     protected val driver: ReactorDriver
@@ -67,6 +70,7 @@ final class ReactorFileReader private[io] (
   override def readBuf(buf: Buffer)(using Async): Result[Unit] = access.reading:
     atCursor(read(buf, None))
 
+  // Positioned reads don't use the file position, so they skip the cursor lock.
   override def readAt(offset: Long, buf: Buffer)(using Async): Result[Unit] = access.reading:
     require(offset >= 0, "offset must be nonnegative")
     read(buf, Some(offset))
@@ -81,6 +85,7 @@ final class ReactorFileReader private[io] (
         case Some(at) => driver.readAt(guard, fd, buf, at)
       if buf.position() == before then either.error(Error.EOF)
 
+/** A file open for writing on a driver. */
 final class ReactorFileWriter private[io] (
     protected val fd: Int,
     protected val driver: ReactorDriver,
@@ -115,6 +120,7 @@ final class ReactorFileWriter private[io] (
   def sync()(using Async): Unit = access.writing:
     call(fd => if unistd.fsync(fd) < 0 then throw posixError("Failed to sync file"))
 
+/** `FileSupport` on a driver. */
 trait ReactorFileSupport(driver: ReactorDriver) extends FileSupport:
   type File = ReactorFileReader
   type FileOut = ReactorFileWriter

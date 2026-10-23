@@ -18,6 +18,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketAddress
 import java.nio.charset.StandardCharsets
+import scala.scalanative.memory.PointerBufferOps.given
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.netinet.in.IPPROTO_TCP
 import scala.scalanative.posix.netinet.tcp.TCP_NODELAY
@@ -234,7 +235,10 @@ class ReactorUdpSocket private[io] (
     either {
       val free = buf.slice()
       val sender = Slot[Address]()
-      if driver.acceptsHeapBuffers then driver.await(guard)(r => r.ops.receive(fd, free, sender))
+      val target = if driver.acceptsHeapBuffers || free.hasPointer() then free else ReactorDriver.pointerView(free)
+      if target != null then
+        driver.await(guard)(r => r.ops.receive(fd, target.nn, sender))
+        buf.position(buf.position() + target.nn.remaining())
       else
         Zone.acquire: zone =>
           val n = math.min(free.remaining(), 64 * 1024)
@@ -242,7 +246,7 @@ class ReactorUdpSocket private[io] (
           driver.await(guard)(r => r.ops.receive(fd, staged, sender))
           free.put(staged)
           free.flip()
-      buf.position(buf.position() + free.remaining())
+        buf.position(buf.position() + free.remaining())
       fromAddress(sender.clear())
     }
   }

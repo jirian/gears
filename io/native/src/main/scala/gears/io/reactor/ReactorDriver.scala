@@ -45,28 +45,38 @@ trait ReactorDriver:
   ): Unit =
     if acceptsHeapBuffers || buf.hasPointer() then await(guard)(r => build(r, buf))
     else
-      Zone.acquire: zone =>
-        val n = math.min(buf.remaining(), ReactorDriver.StageSize)
-        val staged = PointerBuffer.wrap(alloc[Byte](math.max(n, 1))(using zone), n)
-        try await(guard)(r => build(r, staged))
-        finally
-          staged.flip()
-          buf.put(staged)
+      val view = ReactorDriver.pointerView(buf)
+      if view != null then
+        try await(guard)(r => build(r, view))
+        finally buf.position(buf.position() + view.position())
+      else
+        Zone.acquire: zone =>
+          val n = math.min(buf.remaining(), ReactorDriver.StageSize)
+          val staged = PointerBuffer.wrap(alloc[Byte](math.max(n, 1))(using zone), n)
+          try await(guard)(r => build(r, staged))
+          finally
+            staged.flip()
+            buf.put(staged)
 
   final def awaitDraining(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: Reactor, from: ByteBuffer) => r.Op)(using
       Async
   ): Unit =
     if acceptsHeapBuffers || buf.hasPointer() then await(guard)(r => build(r, buf))
     else
-      Zone.acquire: zone =>
-        val n = math.min(buf.remaining(), ReactorDriver.StageSize)
-        val staged = PointerBuffer.wrap(alloc[Byte](math.max(n, 1))(using zone), n)
-        val source = buf.duplicate()
-        source.limit(source.position() + n)
-        staged.put(source)
-        staged.flip()
-        try await(guard)(r => build(r, staged))
-        finally buf.position(buf.position() + staged.position())
+      val view = ReactorDriver.pointerView(buf)
+      if view != null then
+        try await(guard)(r => build(r, view))
+        finally buf.position(buf.position() + view.position())
+      else
+        Zone.acquire: zone =>
+          val n = math.min(buf.remaining(), ReactorDriver.StageSize)
+          val staged = PointerBuffer.wrap(alloc[Byte](math.max(n, 1))(using zone), n)
+          val source = buf.duplicate()
+          source.limit(source.position() + n)
+          staged.put(source)
+          staged.flip()
+          try await(guard)(r => build(r, staged))
+          finally buf.position(buf.position() + staged.position())
 
   def readFile(guard: IoGuard | Null, fd: Int, buf: ByteBuffer)(using Async): Unit =
     blockingFileIo(guard, fd, buf, -1L, write = false)
@@ -86,37 +96,51 @@ trait ReactorDriver:
       Async
   ): Unit =
     val copy = if guard == null then ReactorDriver.duplicate(fd) else guard.whileOpen(ReactorDriver.duplicate(fd))
+    def transfer(ptr: Ptr[Byte], n: Int)(settle: Int => Unit): Unit =
+      @volatile var count = 0
+      try
+        await(guard)(r =>
+          r.ops.blocking(() => {
+            var done = -1L
+            while done < 0 do
+              done =
+                if offset < 0 then
+                  if write then scala.scalanative.posix.unistd.write(copy, ptr, n.toUSize).toLong
+                  else scala.scalanative.posix.unistd.read(copy, ptr, n.toUSize).toLong
+                else if write then scala.scalanative.posix.unistd.pwrite(copy, ptr, n.toUSize, offset.toSize).toLong
+                else scala.scalanative.posix.unistd.pread(copy, ptr, n.toUSize, offset.toSize).toLong
+              if done < 0 && errno.errno != errno.EINTR then throw posixError("File I/O failed")
+            count = done.toInt
+          })
+        )
+      finally settle(count)
     try
-      Zone.acquire: zone =>
-        val n = math.min(buf.remaining(), ReactorDriver.StageSize)
-        val ptr = alloc[Byte](math.max(n, 1))(using zone)
-        if write then
-          val source = buf.duplicate()
-          source.limit(source.position() + n)
-          PointerBuffer.wrap(ptr, n).put(source)
-        @volatile var count = 0
-        try
-          await(guard)(r =>
-            r.ops.blocking(() => {
-              var done = -1L
-              while done < 0 do
-                done =
-                  if offset < 0 then
-                    if write then scala.scalanative.posix.unistd.write(copy, ptr, n.toUSize).toLong
-                    else scala.scalanative.posix.unistd.read(copy, ptr, n.toUSize).toLong
-                  else if write then scala.scalanative.posix.unistd.pwrite(copy, ptr, n.toUSize, offset.toSize).toLong
-                  else scala.scalanative.posix.unistd.pread(copy, ptr, n.toUSize, offset.toSize).toLong
-                if done < 0 && errno.errno != errno.EINTR then throw posixError("File I/O failed")
-              count = done.toInt
-            })
-          )
-        finally
-          if write then buf.position(buf.position() + count)
-          else buf.put(PointerBuffer.wrap(ptr, count))
+      val direct = ReactorDriver.pointerAt(buf)
+      if direct != null then transfer(direct.nn, buf.remaining())(count => buf.position(buf.position() + count))
+      else
+        Zone.acquire: zone =>
+          val n = math.min(buf.remaining(), ReactorDriver.StageSize)
+          val ptr = alloc[Byte](math.max(n, 1))(using zone)
+          if write then
+            val source = buf.duplicate()
+            source.limit(source.position() + n)
+            PointerBuffer.wrap(ptr, n).put(source)
+          transfer(ptr, n): count =>
+            if write then buf.position(buf.position() + count)
+            else buf.put(PointerBuffer.wrap(ptr, count))
     finally scala.scalanative.posix.unistd.close(copy)
 
 object ReactorDriver:
   private val StageSize = 64 * 1024
+
+  private[io] def pointerAt(buf: ByteBuffer): Ptr[Byte] | Null =
+    if buf.hasPointer() then buf.pointer() + buf.position()
+    else if buf.hasArray() && buf.hasRemaining() then buf.array().at(buf.arrayOffset() + buf.position())
+    else null
+
+  private[io] def pointerView(buf: ByteBuffer): ByteBuffer | Null =
+    val ptr = pointerAt(buf)
+    if ptr == null then null else PointerBuffer.wrap(ptr.nn, buf.remaining())
 
   private[reactor] def duplicate(fd: Int): Int =
     val copy = scala.scalanative.posix.unistd.dup(fd)

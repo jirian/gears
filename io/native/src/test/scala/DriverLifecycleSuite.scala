@@ -9,6 +9,7 @@ import gears.io.uring.UringReactor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{CancellationException, CountDownLatch}
 import scala.concurrent.duration.*
+import scala.scalanative.memory.PointerBufferOps.given
 
 class DriverLifecycleSuite extends munit.FunSuite:
   test("physical close waits until the last registered operation acknowledges cancellation"):
@@ -168,6 +169,16 @@ class DriverLifecycleSuite extends munit.FunSuite:
     finally
       first.close()
       second.close()
+
+  test("a heap buffer reaches a reactor that needs pointers in place"):
+    val bytes = new Array[Byte](8)
+    val buf = java.nio.ByteBuffer.wrap(bytes, 2, 4)
+    val view = ReactorDriver.pointerView(buf).nn
+    assert(view.hasPointer())
+    assertEquals(view.remaining(), 4)
+    view.put(7.toByte)
+    assertEquals(bytes(2), 7.toByte)
+    assertEquals(ReactorDriver.pointerView(buf.asReadOnlyBuffer()), null)
 
   test("closing the uring runtime resumes sleeping fibers so their cleanup can finish"):
     val support = UringPerThreadSupport(parallelism = 1)

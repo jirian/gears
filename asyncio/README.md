@@ -9,11 +9,12 @@ Three modules, each depending only on the one before it:
 | `asyncio-gears` | the runtime: `ReactorPool`, `ReactorWorker`, `RunQueue`, `TakePolicy`, `ReactorScheduler`, `Pools` | `asyncio` |
 | `higherlevel` | the higher level the interface is for: result-returning methods and a stream of chunks over `Io` | `asyncio` |
 
-The backends (`asyncio-native/loop`, `asyncio-native/nwframework`, `asyncio-jvm/nio`) depend on the first two; the
-platform runners (`asyncio-native/gears`, `asyncio-jvm/gears`) on the runtime, and on the backends only in their
-tests. A reference from the interface to anything below it, or from a runner to a backend, does not compile. The
-Native implementation the two Native backends share (`NativePool`, the Posix sockets and files) is kept in the loop
-module's `asyncio.unsafe` package, so the Network.framework backend depends on the loop module for it.
+The backends (`asyncio-native/loop`, `asyncio-native/nwframework`, `asyncio-native/uring`, `asyncio-jvm/nio`) depend
+on the first two; the platform runners (`asyncio-native/gears`, `asyncio-jvm/gears`) on the runtime, and on the
+backends only in their tests. A reference from the interface to anything below it, or from a runner to a backend, does
+not compile. The Native implementation the Native backends share (`NativePool`, the Posix sockets and files) is kept in
+the loop module's `asyncio.unsafe` package, so the Network.framework and io_uring backends depend on the loop module
+for it.
 
 What the build does not enforce: what the interface hides from programs it hides by package (`private[asyncio]`:
 `CallerBackend.performHere`, `Slot.set`, `Handle.wrap`), and every module of this repository lives in a package

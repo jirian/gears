@@ -10,7 +10,7 @@ import scala.scalanative.unsafe.*
 class UringReadinessFallbackSuite extends munit.FunSuite:
   private type Owner = this.type
 
-  private def preparedOpcode(op: RingOp[?]): Int =
+  private def preparedOpcode(op: UringKernelOp[?]): Int =
     val storage = new Array[Byte](sizeof[uring.io_uring_sqe].toInt)
     val sqe = storage.asInstanceOf[ByteArray].at(0)
     op.prepareSubmission(sqe.asInstanceOf[Ptr[uring.io_uring_sqe]])

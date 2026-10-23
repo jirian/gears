@@ -14,7 +14,7 @@ class CancelRetrySuite extends munit.FunSuite:
     val (read, write) = reactor.handles.pipe()
     var cancelled = false
     var attempts = 0
-    val op = new RingOp[reactor.type] with Repeatable:
+    val op = new UringKernelOp[reactor.type] with Repeatable:
       private val underlying = new Read[reactor.type](read, ByteBuffer.allocate(8))
       private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit = underlying.prepare(sqe)
       private[uring] def finish(result: Int): Boolean = underlying.finish(result)

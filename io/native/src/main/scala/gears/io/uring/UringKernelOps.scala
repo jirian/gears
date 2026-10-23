@@ -136,7 +136,7 @@ private[uring] final class MessageHeader {
   }
 }
 
-final class Read[Owner](val fd: Int, buf: ByteBuffer, offset: Long = -1L) extends RingOp[Owner] with Repeatable {
+final class Read[Owner](val fd: Int, buf: ByteBuffer, offset: Long = -1L) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLIN
   private val region = new BufferRegion(buf)
@@ -155,7 +155,7 @@ final class Read[Owner](val fd: Int, buf: ByteBuffer, offset: Long = -1L) extend
     }
 }
 
-final class ReadVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends RingOp[Owner] with Repeatable {
+final class ReadVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLIN
   require(bufs.forall(buf => !buf.isReadOnly), "Read buffers must be writable")
@@ -176,7 +176,7 @@ final class ReadVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends Ring
 }
 
 final class Write[Owner](val fd: Int, buf: ByteBuffer, private var plain: Boolean, offset: Long = -1L)
-    extends RingOp[Owner]
+    extends UringKernelOp[Owner]
     with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLOUT
@@ -203,7 +203,7 @@ final class Write[Owner](val fd: Int, buf: ByteBuffer, private var plain: Boolea
     }
 }
 
-final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends RingOp[Owner] with Repeatable {
+final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLOUT
   private val region = new VectorBufferRegion(bufs)
@@ -235,7 +235,7 @@ final class WriteVector[Owner](val fd: Int, bufs: Array[ByteBuffer]) extends Rin
     }
 }
 
-final class Accept[Owner](val fd: Int, into: HandleSlot) extends RingOp[Owner] with Repeatable {
+final class Accept[Owner](val fd: Int, into: HandleSlot) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLIN
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit =
@@ -252,7 +252,7 @@ final class Accept[Owner](val fd: Int, into: HandleSlot) extends RingOp[Owner] w
   override private[uring] def discard(res: Int): Unit = if res >= 0 then unistd.close(res)
 }
 
-final class Connect[Owner](val fd: Int) extends RingOp[Owner] {
+final class Connect[Owner](val fd: Int) extends UringKernelOp[Owner] {
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit = io_uring_prep_poll_add(sqe, fd, POLLOUT.toUInt)
 
   private[uring] def finish(res: Int): Boolean =
@@ -265,7 +265,7 @@ final class Connect[Owner](val fd: Int) extends RingOp[Owner] {
 }
 
 final class WhenReady[Owner](val fd: Int, val interest: Interest, body: () => Boolean)
-    extends RingOp[Owner]
+    extends UringKernelOp[Owner]
     with Repeatable {
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit = io_uring_prep_poll_add(sqe, fd, pollMask(interest))
 
@@ -275,7 +275,9 @@ final class WhenReady[Owner](val fd: Int, val interest: Interest, body: () => Bo
     else body()
 }
 
-final class Receive[Owner](val fd: Int, buf: ByteBuffer, from: Slot[Address]) extends RingOp[Owner] with Repeatable {
+final class Receive[Owner](val fd: Int, buf: ByteBuffer, from: Slot[Address])
+    extends UringKernelOp[Owner]
+    with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLIN
   private val region = new BufferRegion(buf)
@@ -304,7 +306,7 @@ final class Receive[Owner](val fd: Int, buf: ByteBuffer, from: Slot[Address]) ex
     }
 }
 
-final class Send[Owner](val fd: Int, buf: ByteBuffer, to: Address | Null) extends RingOp[Owner] with Repeatable {
+final class Send[Owner](val fd: Int, buf: ByteBuffer, to: Address | Null) extends UringKernelOp[Owner] with Repeatable {
   override protected def readinessFd: Int = fd
   override protected def readinessEvents: Int = POLLOUT
   private val region = new BufferRegion(buf)
@@ -326,7 +328,7 @@ final class Send[Owner](val fd: Int, buf: ByteBuffer, to: Address | Null) extend
     }
 }
 
-final class UringTimer[Owner](val nanoseconds: Long) extends RingOp[Owner] with Repeatable {
+final class UringTimer[Owner](val nanoseconds: Long) extends UringKernelOp[Owner] with Repeatable {
   require(nanoseconds >= 0, "Timer duration must not be negative")
   private val timespec = new Array[Byte](sizeof[__kernel_timespec].toInt)
 
@@ -345,7 +347,7 @@ final class UringTimer[Owner](val nanoseconds: Long) extends RingOp[Owner] with 
     io_uring_prep_timeout_remove(sqe, userData.toULong, 0.toUInt)
 }
 
-final class OpenAt[Owner](val path: String, flags: Int, mode: Int, into: HandleSlot) extends RingOp[Owner] {
+final class OpenAt[Owner](val path: String, flags: Int, mode: Int, into: HandleSlot) extends UringKernelOp[Owner] {
   private val cPath = {
     val utf8 = path.getBytes(StandardCharsets.UTF_8)
     java.util.Arrays.copyOf(utf8, utf8.length + 1)

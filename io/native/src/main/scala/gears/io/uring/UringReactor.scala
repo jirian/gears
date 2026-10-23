@@ -33,7 +33,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     def cancelled(): Unit = completion.onCancel(op)
   }
 
-  private final class InFlight(val id: Long, val op: RingOp[?], var pending: Pending[?] | Null) {
+  private final class InFlight(val id: Long, val op: UringKernelOp[?], var pending: Pending[?] | Null) {
     var cancelled: Pending[?] | Null = null
     var submissionFailure: Throwable | Null = null
     var cancelRequested = false
@@ -77,7 +77,7 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     ts
   }
 
-  private val resolvedQueue = new java.util.concurrent.ConcurrentLinkedQueue[UringPromise[?]]()
+  private val resolvedQueue = new java.util.concurrent.ConcurrentLinkedQueue[UringBlockingOp[?]]()
   private val wakeFd: Int = eventfd.eventfd(0.toUInt, eventfd.EFD_CLOEXEC)
   if wakeFd < 0 then {
     io_uring_queue_exit(ring)
@@ -87,9 +87,9 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 
   private val wakePending = new java.util.concurrent.atomic.AtomicBoolean()
 
-  private val pendingPromises = scala.collection.mutable.HashSet.empty[UringPromise[?]]
+  private val pendingBlocking = scala.collection.mutable.HashSet.empty[UringBlockingOp[?]]
 
-  private val cancellingBlockers = scala.collection.mutable.HashSet.empty[UringBlocking[?]]
+  private val cancellingBlocking = scala.collection.mutable.HashSet.empty[UringBlockingOp[?]]
 
   private object wakeLock {}
   @volatile private var closed = false
@@ -106,34 +106,28 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     }
     val pending = new Pending(op, completion)
     op match {
-      case ring: RingOp[?] =>
-        if ring.inFlight != null then throw new IllegalStateException(s"$op is already pending")
-        enqueue(ring, pending)
-      case promise: UringPromise[?] =>
-        if promise.pending != null then throw new IllegalStateException(s"$op is already pending")
-        promise match {
-          case blocking: UringBlocking[?] if blocking.cancelling != null =>
-            throw new IllegalStateException(s"$op is still running after being cancelled")
-          case _ => ()
-        }
-        promise.pending = pending
-        promise.reactor = this
-        pendingPromises += promise
-        promise match {
-          case blocking: UringBlocking[?] =>
-            try Blockers.run(blocking, blockerPool)
-            catch {
-              case t: Throwable =>
-                promise.pending = null
-                pendingPromises -= promise
-                throw t
-            }
+      case kernel: UringKernelOp[?] =>
+        if kernel.inFlight != null then throw new IllegalStateException(s"$op is already pending")
+        enqueue(kernel, pending)
+      case blocking: UringBlockingOp[?] =>
+        if blocking.pending != null then throw new IllegalStateException(s"$op is already pending")
+        if blocking.cancelling != null then
+          throw new IllegalStateException(s"$op is still running after being cancelled")
+        blocking.pending = pending
+        blocking.reactor = this
+        pendingBlocking += blocking
+        try UringBlockingOp.run(blocking, blockerPool)
+        catch {
+          case t: Throwable =>
+            blocking.pending = null
+            pendingBlocking -= blocking
+            throw t
         }
     }
     op.submitted = true
   }
 
-  private def enqueue(op: RingOp[?], pending: Pending[?]): Unit = {
+  private def enqueue(op: UringKernelOp[?], pending: Pending[?]): Unit = {
     val sqe = nextSqe()
     try op.prepareSubmission(sqe)
     catch {
@@ -191,35 +185,32 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         }
       }
 
-  private[uring] def resolved(promise: UringPromise[?]): Unit =
+  private[uring] def resolved(blocking: UringBlockingOp[?]): Unit =
     if !closed then {
-      resolvedQueue.add(promise)
+      resolvedQueue.add(blocking)
       wakeup()
     }
 
   private def deliverResolved(): Boolean = {
     var ran = false
-    var promise = resolvedQueue.poll()
-    while promise != null do {
-      val pending = promise.pending
-      promise.pending = null
-      pendingPromises -= promise
-      promise match {
-        case blocking: UringBlocking[?] if blocking.cancelling != null =>
-          ran = true
-          val cancelled = blocking.cancelling.asInstanceOf[Pending[?]]
-          blocking.cancelling = null
-          cancellingBlockers -= blocking
-          cancelled.cancelled()
-        case _ =>
-          if pending != null then {
-            ran = true
-            val p = pending.asInstanceOf[Pending[?]]
-            val failure = promise.failure
-            if failure != null then p.fail(failure.nn) else p.complete()
-          }
+    var blocking = resolvedQueue.poll()
+    while blocking != null do {
+      val pending = blocking.pending
+      blocking.pending = null
+      pendingBlocking -= blocking
+      if blocking.cancelling != null then {
+        ran = true
+        val cancelled = blocking.cancelling.asInstanceOf[Pending[?]]
+        blocking.cancelling = null
+        cancellingBlocking -= blocking
+        cancelled.cancelled()
+      } else if pending != null then {
+        ran = true
+        val p = pending.asInstanceOf[Pending[?]]
+        val failure = blocking.failure
+        if failure != null then p.fail(failure.nn) else p.complete()
       }
-      promise = resolvedQueue.poll()
+      blocking = resolvedQueue.poll()
     }
     ran
   }
@@ -324,8 +315,8 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   def stop(): Unit = stopped = true
 
   def cancel(op: Op): Boolean = op match {
-    case ring: RingOp[?] =>
-      ring.inFlight match {
+    case kernel: UringKernelOp[?] =>
+      kernel.inFlight match {
         case flight: InFlight if flight.pending != null && !completionArrived(flight.id) =>
           flight.cancelled = flight.pending
           flight.pending = null
@@ -333,16 +324,14 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
           true
         case _ => false
       }
-    case promise: UringPromise[?] =>
-      val pending = detach(promise)
+    case blocking: UringBlockingOp[?] =>
+      val pending = detach(blocking)
       if pending == null then false
       else {
-        promise match {
-          case blocking: UringBlocking[?] if blocking.interrupt() && !blocking.abandonOnCancel =>
-            blocking.cancelling = pending
-            cancellingBlockers += blocking
-          case _ => pending.nn.cancelled()
-        }
+        if blocking.interrupt() && !blocking.abandonOnCancel then {
+          blocking.cancelling = pending
+          cancellingBlocking += blocking
+        } else pending.nn.cancelled()
         true
       }
   }
@@ -372,10 +361,10 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
       retry.foreach(flight => if !flight.cancelQueued && inFlight.contains(flight.id) then requestCancel(flight))
     }
 
-  private def detach(promise: UringPromise[?]): Pending[?] | Null = {
-    val pending = promise.pending
-    promise.pending = null
-    pendingPromises -= promise
+  private def detach(blocking: UringBlockingOp[?]): Pending[?] | Null = {
+    val pending = blocking.pending
+    blocking.pending = null
+    pendingBlocking -= blocking
     pending.asInstanceOf[Pending[?] | Null]
   }
 
@@ -390,23 +379,20 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         flight.cancelled = null
         if !flight.cancelQueued then requestCancel(flight)
       }
-      val running = scala.collection.mutable.ArrayBuffer.empty[UringBlocking[?]]
-      for promise <- pendingPromises.toList do {
-        val pending = detach(promise)
+      val running = scala.collection.mutable.ArrayBuffer.empty[UringBlockingOp[?]]
+      for blocking <- pendingBlocking.toList do {
+        val pending = detach(blocking)
         if pending != null then {
           dropped += pending.nn
-          promise match {
-            case blocking: UringBlocking[?] if blocking.interrupt() && !blocking.abandonOnCancel => running += blocking
-            case _                                                                               => ()
-          }
+          if blocking.interrupt() && !blocking.abandonOnCancel then running += blocking
         }
       }
-      for blocking <- cancellingBlockers do {
+      for blocking <- cancellingBlocking do {
         dropped += blocking.cancelling.asInstanceOf[Pending[?]]
         blocking.cancelling = null
         running += blocking
       }
-      cancellingBlockers.clear()
+      cancellingBlocking.clear()
       resolvedQueue.clear()
       var wakeCancelQueued = false
       def cancelWake(): Unit = if wakeInFlight && !wakeCancelQueued then

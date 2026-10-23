@@ -180,6 +180,68 @@ class DriverLifecycleSuite extends munit.FunSuite:
     assertEquals(bytes(2), 7.toByte)
     assertEquals(ReactorDriver.pointerView(buf.asReadOnlyBuffer()), null)
 
+  test("fibers on the default runtime can use a uring runtime's sockets"):
+    val uring = UringPerThreadSupport(parallelism = 1)
+    given gears.io.net.TcpSupport = uring.tcpSupport
+    try
+      Async.blocking:
+        val onShard = AtomicBoolean(false)
+        def checkThread(): Unit = if Thread.currentThread().getName.startsWith("uring-shard") then onShard.set(true)
+        val listener = gears.io.net.TcpSupport.listen(java.net.InetSocketAddress("127.0.0.1", 0)).toOption.get
+        try
+          val server = Future:
+            val connection = listener.accept().toOption.get
+            try
+              val buf = java.nio.ByteBuffer.allocate(5)
+              while buf.hasRemaining && connection.readBuf(buf).isRight do checkThread()
+              buf.flip()
+              connection.writeBuf(buf)
+            finally connection.close()
+          val client = gears.io.net.TcpSupport.connect(listener.localAddress).toOption.get
+          try
+            client.writeBuf(java.nio.ByteBuffer.wrap("hello".getBytes))
+            val reply = java.nio.ByteBuffer.allocate(5)
+            while reply.hasRemaining && client.readBuf(reply).isRight do checkThread()
+            assertEquals(String(reply.array()), "hello")
+          finally client.close()
+          server.await
+        finally listener.close()
+        assert(!onShard.get(), "a fiber resumed on a uring shard instead of its own runtime")
+    finally uring.close()
+
+  test("fibers on a uring runtime can use another driver's sockets"):
+    val uring = UringPerThreadSupport(parallelism = 1)
+    val driver = SingleReactorDriver(() => UringReactor.open())
+    given UringPerThreadSupport = uring
+    given gears.io.net.TcpSupport = driver.tcpSupport
+    try
+      Async.blocking:
+        Future:
+          val listener = gears.io.net.TcpSupport.listen(java.net.InetSocketAddress("127.0.0.1", 0)).toOption.get
+          try
+            val server = Future:
+              val connection = listener.accept().toOption.get
+              try
+                val buf = java.nio.ByteBuffer.allocate(5)
+                while buf.hasRemaining && connection.readBuf(buf).isRight do ()
+                buf.flip()
+                connection.writeBuf(buf)
+              finally connection.close()
+            val client = gears.io.net.TcpSupport.connect(listener.localAddress).toOption.get
+            try
+              client.writeBuf(java.nio.ByteBuffer.wrap("hello".getBytes))
+              val reply = java.nio.ByteBuffer.allocate(5)
+              while reply.hasRemaining && client.readBuf(reply).isRight do ()
+              assertEquals(String(reply.array()), "hello")
+              assert(Thread.currentThread().getName.startsWith("uring-shard"), Thread.currentThread().getName)
+            finally client.close()
+            server.await
+          finally listener.close()
+        .await
+    finally
+      driver.close()
+      uring.close()
+
   test("closing the uring runtime resumes sleeping fibers so their cleanup can finish"):
     val support = UringPerThreadSupport(parallelism = 1)
     given UringPerThreadSupport = support

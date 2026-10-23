@@ -172,3 +172,14 @@ abstract class NetBehavior(driverName: String) extends munit.FunSuite:
         client.close()
         server.close()
         listener.close()
+
+  test("receiving into a read-only buffer is refused instead of losing the datagram"):
+    run:
+      val socket = UdpSupport.bind(InetSocketAddress("127.0.0.1", 0)).toOption.get
+      try
+        socket.sendTo(bytes("kept"), socket.localAddress)
+        intercept[IllegalArgumentException](socket.receiveFrom(ByteBuffer.allocate(16).asReadOnlyBuffer()))
+        val got = ByteBuffer.allocate(16)
+        socket.receiveFrom(got)
+        assertEquals(text(got), "kept")
+      finally socket.close()

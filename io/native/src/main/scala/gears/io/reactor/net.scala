@@ -234,6 +234,7 @@ class ReactorUdpSocket private[io] (
 
   override def receiveFrom(buf: Buffer)(using Async): Result[SocketAddress] = access.reading {
     either {
+      require(!buf.isReadOnly, "Receive buffers must be writable")
       val free = buf.slice()
       val sender = Slot[Address]()
       val target = if driver.acceptsHeapBuffers || free.hasPointer() then free else ReactorDriver.pointerView(free)

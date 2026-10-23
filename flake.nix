@@ -38,7 +38,6 @@
               llvm
               clang
               boehmgc
-              liburing
               openssl
               libunwind
               zlib
@@ -48,7 +47,8 @@
               metals
               scalafix
               scalafmt
-            ];
+            ]
+            ++ lib.optionals stdenv.isLinux [ liburing ];
             shellHook = ''
               export LLVM_BIN=${pkgs.clang}/bin
             '';

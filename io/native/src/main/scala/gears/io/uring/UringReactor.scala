@@ -361,9 +361,10 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
     * write to its buffers. A running blocking op is interrupted, and `onCancel` waits for it to return, unless the op
     * can be abandoned.
     *
-    * Returns false when it is too late to promise that `onComplete` will not run: the op finished, or its CQE has
-    * already arrived. A CQE that finishes the op still completes it, so nothing it produced is lost; one that does not
-    * finish it, such as `EAGAIN`, ends in `onCancel` instead of a resubmission.
+    * Returns false when it is too late to promise that `onComplete` will not run: the op finished, its CQE has already
+    * arrived, or its blocking body has already published its result or returned. A CQE that finishes the op still
+    * completes it, so nothing it produced is lost; one that does not finish it, such as `EAGAIN`, ends in `onCancel`
+    * instead of a resubmission.
     */
   def cancel(op: Op): Boolean = op match {
     case kernel: UringKernelOp =>
@@ -381,15 +382,18 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
         case _ => false
       }
     case blocking: UringBlockingOp =>
-      val pending = detach(blocking)
-      if pending == null then false
-      else {
-        if blocking.interrupt() && !blocking.abandonOnCancel then {
-          blocking.cancelling = pending
-          cancellingBlocking += blocking
-        } else pending.nn.cancelled()
-        true
-      }
+      if blocking.pending == null then false
+      else
+        blocking.cancelUnlessDone() match {
+          case UringBlockingOp.CancelOutcome.TooLate => false
+          case outcome                               =>
+            val pending = detach(blocking)
+            if outcome == UringBlockingOp.CancelOutcome.Interrupted && !blocking.abandonOnCancel then {
+              blocking.cancelling = pending
+              cancellingBlocking += blocking
+            } else pending.nn.cancelled()
+            true
+        }
   }
 
   /** Submits a cancel SQE for `flight`. If the queue is full, it goes to the backlog that the next `poll` retries. */

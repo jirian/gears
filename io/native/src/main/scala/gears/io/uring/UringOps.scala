@@ -156,9 +156,9 @@ final class UringOps[R] private[uring] (resolver: HostResolver) extends Ops[Owne
 /** An op a `BlockingPool` thread runs, so the reactor thread never blocks. The pool thread settles it, and the reactor
   * delivers the outcome on its own thread.
   *
-  * The pool thread and the reactor share `runner`, `cancelled` and `ended`, under this op's lock. Only the settling
-  * thread writes `outcome`, and the reactor reads it after taking the op from its resolved queue, which makes the write
-  * visible. The other fields are used by the reactor thread only.
+  * The pool thread and the reactor share `runner`, `cancelled`, `published` and `ended`, under this op's lock. Only the
+  * settling thread writes `outcome`, and the reactor reads it after taking the op from its resolved queue, which makes
+  * the write visible. The other fields are used by the reactor thread only.
   */
 sealed abstract class UringBlockingOp extends UringOp {
 
@@ -180,6 +180,7 @@ sealed abstract class UringBlockingOp extends UringOp {
 
   private var runner: Thread | Null = null
   private var cancelled = false
+  private var published = false
   private var ended = false
 
   private[uring] def failure: Throwable | Null = outcome match {
@@ -227,11 +228,29 @@ sealed abstract class UringBlockingOp extends UringOp {
     running != null
   }
 
+  /** Cancels this op like `interrupt`, unless `block` has already published its result or returned. Then this op is
+    * left to complete, so what it produced reaches the caller.
+    *
+    * @return
+    *   `TooLate` if this op was left to complete, otherwise whether `block` was running
+    */
+  private[uring] def cancelUnlessDone(): UringBlockingOp.CancelOutcome = synchronized {
+    if published || ended then UringBlockingOp.CancelOutcome.TooLate
+    else if interrupt() then UringBlockingOp.CancelOutcome.Interrupted
+    else UringBlockingOp.CancelOutcome.NotRunning
+  }
+
+  /** Returns whether `block` has returned. */
+  private[uring] def hasEnded: Boolean = synchronized(ended)
+
   /** Writes `value` into `into` unless the op was cancelled, atomically with respect to `interrupt`, so nothing is
     * written into the caller's slot after a cancel.
     */
   protected final def publish[A <: AnyRef](into: Slot[A], value: A): Unit = synchronized {
-    if !cancelled then into.set(value)
+    if !cancelled then {
+      into.set(value)
+      published = true
+    }
   }
 
   /** Waits until `block` has returned. Used by the reactor's `close`, which may not return while a pool thread still
@@ -251,6 +270,11 @@ sealed abstract class UringBlockingOp extends UringOp {
 object UringBlockingOp {
   private object Unsettled
   private final case class Failed(failure: Throwable)
+
+  /** What `cancelUnlessDone` did. */
+  private[uring] enum CancelOutcome {
+    case TooLate, Interrupted, NotRunning
+  }
 
   /** Runs `op` on `pool`, settling it with its outcome unless it was cancelled before it started. */
   private[uring] def run(op: UringBlockingOp, pool: BlockingPool): Unit =

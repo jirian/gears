@@ -1,6 +1,6 @@
 package gears.io.uring
 
-import gears.io.reactor.{Completion, Interest}
+import gears.io.reactor.{Completion, Interest, Slot}
 
 import java.nio.ByteBuffer
 
@@ -38,3 +38,27 @@ class UringCancelRaceSuite extends munit.FunSuite:
       reactor.handles.close(in)
       reactor.handles.close(out)
 
+  test("a blocking op whose body already returned its result completes despite a later cancel"):
+    val reactor = UringReactor.open()
+    try
+      val into = Slot[String]()
+      val op = reactor.ops.blocking(() => "resource", into)
+      var outcome = ""
+      reactor.submit(
+        op,
+        new Completion[reactor.Op]:
+          def onComplete(op: reactor.Op): Unit =
+            outcome = "complete"
+            reactor.stop()
+          override def onCancel(op: reactor.Op): Unit =
+            outcome = "cancel"
+            reactor.stop()
+      )
+      val deadline = System.nanoTime() + 5_000_000_000L
+      while !op.hasEnded && System.nanoTime() < deadline do Thread.sleep(1)
+      assert(op.hasEnded)
+      assert(!reactor.cancel(op), "the result was already there, so the cancel is too late")
+      reactor.run()
+      assertEquals(outcome, "complete")
+      assertEquals(into.clear(), "resource")
+    finally reactor.close()

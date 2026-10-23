@@ -61,6 +61,25 @@ jobs:
       run: sbt 'rootNative/test; shutdown'
     - name: Stress Test with Lower Memory
       run: env GC_MAXIMUM_HEAP_SIZE=140M sbt 'rootNative/testOnly StressTest'
+  test-uring:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+    - uses: coursier/cache-action@v6
+    - uses: actions/setup-java@v3
+      with:
+        distribution: temurin
+        java-version: 21
+    - uses: sbt/setup-sbt@v1
+    - name: Install scala-native dependencies
+      run: sudo apt-get install clang libstdc++-12-dev libgc-dev liburing-dev
+    - name: Test
+      run: sbt nativeAsyncioUring/test
   test-js:
     strategy:
       fail-fast: false

@@ -216,6 +216,26 @@ lazy val nativeAsyncioNWFramework =
       higherLevel.native % "test->compile;test->test"
     )
 
+// The io_uring backend: reactors over Linux's io_uring, through liburing, with its `static inline` helpers in a C shim
+// beside its resources. Linux only (5.11 or later); every executable that links it needs liburing. It shares the
+// Native implementation kept in the loop module (`asyncio.unsafe`); its tests run it on the runner.
+lazy val nativeAsyncioUring =
+  (project in file("asyncio-native/uring"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(
+      publish / skip := true,
+      libraryDependencies += "org.scalameta" %% "munit" % "1.3.6" % Test,
+      testFrameworks += MUnitFramework,
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    // Not the loop's or the runner's tests, which link kqueue.
+    .dependsOn(
+      nativeAsyncioLoop,
+      asyncio.native % "test->test",
+      nativeAsyncioGears % "test->compile",
+      higherLevel.native % "test->compile;test->test"
+    )
+
 // The gears demos, written against `asyncio` alone, so the same code runs on kqueue (Scala Native, through
 // kqueueDemo's `kqueuedemo gears ...`) and on NIO (the JVM, `gearsDemoJVM/run ...`). A demo that needs a capability
 // asks for it, so one NIO lacks does not compile against it.

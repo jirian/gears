@@ -9,9 +9,8 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
-def fileWriteExample(): Unit =
-  given support: UringPerThreadSupport = UringPerThreadSupport()
-  given fs: FileSupport = support.fileSupport
+def fileWriteExample(): Unit = withUring:
+  given fs: FileSupport = summon[UringPerThreadSupport].fileSupport
 
   val path = s"/tmp/gears-file-write-example-${scala.scalanative.posix.unistd.getpid()}.txt"
   val content = "the quick brown fox jumps over the lazy dog\n" * 50

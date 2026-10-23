@@ -8,9 +8,8 @@ import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 
-def udpExample(): Unit =
-  given support: UringPerThreadSupport = UringPerThreadSupport()
-  given udp: UdpSupport = support.udpSupport
+def udpExample(): Unit = withUring:
+  given udp: UdpSupport = summon[UringPerThreadSupport].udpSupport
 
   Async.blocking:
     val a = UdpSupport.bind(InetSocketAddress("127.0.0.1", 0)) match

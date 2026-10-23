@@ -9,9 +9,8 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
-def fileReadExample(): Unit =
-  given support: UringPerThreadSupport = UringPerThreadSupport()
-  given fs: FileSupport = support.fileSupport
+def fileReadExample(): Unit = withUring:
+  given fs: FileSupport = summon[UringPerThreadSupport].fileSupport
 
   val path = "native-examples/file-to-read.txt"
   val expected = new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8)

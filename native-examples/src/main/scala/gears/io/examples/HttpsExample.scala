@@ -23,16 +23,17 @@ private def generateSelfSignedCert(certFile: String, keyFile: String): Unit =
 private def deleteFile(path: String): Unit =
   val _ = Zone.acquire(zone => stdio.remove(toCString(path)(using zone)))
 
-private def runHttpsDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOperations): Unit =
+private def runHttpsDemo()(using Async, TcpSupport, DnsSupport, AsyncOperations): Unit =
   val pid = unistd.getpid()
   val certFile = s"/tmp/gears-https-example-$pid-cert.pem"
   val keyFile = s"/tmp/gears-https-example-$pid-key.pem"
   generateSelfSignedCert(certFile, keyFile)
   println(s"generated a throwaway self-signed certificate at $certFile")
 
-  val listener = TcpSupport.listen(InetSocketAddress("127.0.0.1", port)) match
+  val listener = TcpSupport.listen(InetSocketAddress("127.0.0.1", 0)) match
     case Right(l) => l
     case Left(e)  => throw new RuntimeException(s"listen failed: $e")
+  val port = listener.localAddress.asInstanceOf[InetSocketAddress].getPort
 
   val router = Router().get("/")(_ => HttpResponse.text("Hello over TLS!\n"))
   val serverConfig = Server(
@@ -64,10 +65,9 @@ private def runHttpsDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOp
     deleteFile(keyFile)
 
 def httpsExample(): Unit =
-  val port = 8443
   if LinktimeInfo.isLinux then
-    given support: UringPerThreadSupport = UringPerThreadSupport()
-    given tcp: TcpSupport = support.tcpSupport
-    given dns: DnsSupport = support.dnsSupport
-    Async.blocking(runHttpsDemo(port))
+    withUring:
+      given tcp: TcpSupport = summon[UringPerThreadSupport].tcpSupport
+      given dns: DnsSupport = summon[UringPerThreadSupport].dnsSupport
+      Async.blocking(runHttpsDemo())
   else throw new UnsupportedOperationException("no TCP backend wired up for this platform")

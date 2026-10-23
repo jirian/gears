@@ -19,10 +19,11 @@ private def clientDemoRouter(): Router =
     )
     .get("/items/{id}")(req => HttpResponse.text(s"item ${req.pathValue("id").getOrElse("?")}\n"))
 
-private def runClientDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncOperations): Unit =
-  val listener = TcpSupport.listen(InetSocketAddress("127.0.0.1", port)) match
+private def runClientDemo()(using Async, TcpSupport, DnsSupport, AsyncOperations): Unit =
+  val listener = TcpSupport.listen(InetSocketAddress("127.0.0.1", 0)) match
     case Right(l) => l
     case Left(e)  => throw new RuntimeException(s"listen failed: $e")
+  val port = listener.localAddress.asInstanceOf[InetSocketAddress].getPort
   println(s"demo server listening on http://127.0.0.1:$port")
 
   Async.group:
@@ -60,10 +61,9 @@ private def runClientDemo(port: Int)(using Async, TcpSupport, DnsSupport, AsyncO
     listener.close()
 
 def httpClientExample(): Unit =
-  val port = 8081
   if LinktimeInfo.isLinux then
-    given support: UringPerThreadSupport = UringPerThreadSupport()
-    given tcp: TcpSupport = support.tcpSupport
-    given dns: DnsSupport = support.dnsSupport
-    Async.blocking(runClientDemo(port))
+    withUring:
+      given tcp: TcpSupport = summon[UringPerThreadSupport].tcpSupport
+      given dns: DnsSupport = summon[UringPerThreadSupport].dnsSupport
+      Async.blocking(runClientDemo())
   else throw new UnsupportedOperationException("no TCP backend wired up for this platform")

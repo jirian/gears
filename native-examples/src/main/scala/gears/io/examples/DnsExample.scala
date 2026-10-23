@@ -4,9 +4,8 @@ import gears.async._
 import gears.io.net.DnsSupport
 import gears.io.uring.UringPerThreadSupport
 
-def dnsExample(): Unit =
-  given support: UringPerThreadSupport = UringPerThreadSupport()
-  given dns: DnsSupport = support.dnsSupport
+def dnsExample(): Unit = withUring:
+  given dns: DnsSupport = summon[UringPerThreadSupport].dnsSupport
 
   Async.blocking:
     Async.group:

@@ -277,6 +277,7 @@ final class Accept(val fd: Int, into: HandleSlot) extends UringKernelOp with Rep
     if transient(res) || res == -errno.ECONNABORTED then false
     else if res < 0 then throw failure("Failed to accept connection", res)
     else {
+      UringHandles.opened(res)
       into.set(res)
       true
     }
@@ -405,6 +406,7 @@ final class OpenAt(val path: String, flags: Int, mode: Int, into: HandleSlot) ex
     else if res == -errno.ENOENT then throw new FileNotFoundException(path)
     else if res < 0 then throw failure(s"Failed to open $path", res)
     else {
+      UringHandles.opened(res)
       into.set(res)
       true
     }

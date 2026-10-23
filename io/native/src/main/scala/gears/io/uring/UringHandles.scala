@@ -14,22 +14,32 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.fcntl
+import scala.scalanative.posix.sys.socket
 import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-/** The `Handles` of the uring reactor: handles are POSIX descriptors, opened non-blocking. `readNow` and `writeNow`
-  * take heap buffers as well as pointer buffers. A Unix socket path bound by `listen` or `datagram` is remembered, so
-  * `close` can remove it.
+/** The `Handles` of the uring reactor: handles are POSIX descriptors, opened non-blocking and close-on-exec. `readNow`
+  * and `writeNow` take heap buffers as well as pointer buffers. A Unix socket path bound by `listen` or `datagram` is
+  * remembered, so `close` can remove it.
   */
 object UringHandles extends Handles {
+  // Keyed by descriptor number. A number is only reused after its descriptor was closed, so whoever gets a new
+  // descriptor drops the entry for its number, which can only be left over from a close that bypassed `close`.
   private val boundPaths = new ConcurrentHashMap[Integer, String]()
 
+  /** Forgets a path left over under the number of `fd`, which was just opened.
+    *
+    * @param fd
+    *   the new descriptor
+    */
+  private[uring] def opened(fd: Int): Unit = boundPaths.remove(fd)
+
   def openFile(path: String, write: Boolean): Int = {
-    val fd = Zone.acquire { implicit z =>
-      fcntl.open(toCString(path), (if write then fcntl.O_WRONLY else fcntl.O_RDONLY) | fcntl.O_NONBLOCK)
-    }
+    val flags = (if write then fcntl.O_WRONLY else fcntl.O_RDONLY) | fcntl.O_NONBLOCK | LinuxConstants.O_CLOEXEC
+    val fd = Zone.acquire { implicit z => fcntl.open(toCString(path), flags) }
     if fd < 0 then throw new IOException(s"Failed to open file: ${cError()}")
+    opened(fd)
     fd
   }
 
@@ -58,9 +68,10 @@ object UringHandles extends Handles {
 
   def pipe(): (Int, Int) = {
     val ends = stackalloc[CInt](2)
-    if unistd.pipe(ends) < 0 then throw new IOException(s"Failed to create pipe: ${cError()}")
-    PosixSockets.setNonBlocking(ends(0))
-    PosixSockets.setNonBlocking(ends(1))
+    if linux.pipe2(ends, fcntl.O_NONBLOCK | LinuxConstants.O_CLOEXEC) < 0 then
+      throw new IOException(s"Failed to create pipe: ${cError()}")
+    opened(ends(0))
+    opened(ends(1))
     (ends(0), ends(1))
   }
 
@@ -85,9 +96,17 @@ object UringHandles extends Handles {
   }
 
   private def socketFor(address: Address, transport: Transport)(setup: Int => Unit): Int = {
-    val fd = PosixSockets.open(flavorOf(address), transport)
+    val family = flavorOf(address) match {
+      case Flavor.Unix => socket.AF_UNIX
+      case Flavor.IPv4 => socket.AF_INET
+      case Flavor.IPv6 => socket.AF_INET6
+    }
+    val kind = if transport == Transport.Stream then socket.SOCK_STREAM else socket.SOCK_DGRAM
+    // Non-blocking and close-on-exec from the start, so a concurrent fork cannot inherit it.
+    val fd = socket.socket(family, kind | LinuxConstants.SOCK_NONBLOCK | LinuxConstants.SOCK_CLOEXEC, 0)
+    if fd < 0 then throw new IOException(s"Failed to open socket: ${cError()}")
+    opened(fd)
     try {
-      PosixSockets.setNonBlocking(fd)
       setup(fd)
       fd
     } catch {
@@ -141,4 +160,9 @@ object UringHandles extends Handles {
       written.toInt
     }
   }
+}
+
+@extern
+private object linux {
+  def pipe2(fds: Ptr[CInt], flags: CInt): CInt = extern
 }

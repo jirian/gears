@@ -91,6 +91,9 @@ abstract class UringKernelOp extends UringOp {
       false
     } else finish(res)
 
+  /** Forgets a readiness wait that the last result started, for an op that is cancelled instead of resubmitted. */
+  private[uring] final def abandonRetry(): Unit = awaitingReadiness = false
+
   private[uring] final def discardSubmission(res: Int): Unit =
     if awaitingReadiness then awaitingReadiness = false
     else {

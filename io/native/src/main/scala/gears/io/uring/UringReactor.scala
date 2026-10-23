@@ -42,12 +42,14 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 
   /** One submission of a kernel op, keyed by the user data `id` its SQE and CQE carry. After a cancel, `pending` moves
     * to `cancelled` until the CQE arrives; `cancelQueued` records that the cancel SQE itself was submitted.
+    * `cancelAfterArrival` records a cancel that came after the CQE had arrived: the op is then cancelled instead of
+    * resubmitted, if that CQE does not finish it.
     */
   private final class InFlight(val id: Long, val op: UringKernelOp, var pending: Pending[?] | Null) {
     var cancelled: Pending[?] | Null = null
     var submissionFailure: Throwable | Null = null
-    var cancelRequested = false
     var cancelQueued = false
+    var cancelAfterArrival = false
   }
 
   private val ringStorage = new Array[Byte](sizeof[io_uring].toInt)
@@ -309,7 +311,10 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
               }
             if failure != null then pending.fail(failure.nn)
             else if done then pending.complete()
-            else
+            else if flight.cancelAfterArrival then {
+              op.abandonRetry()
+              pending.cancelled()
+            } else
               try enqueue(op, pending)
               catch case t: Throwable => pending.fail(t)
           }
@@ -355,15 +360,24 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
   /** Cancels `op`. For a kernel op, `onCancel` runs only when its CQE arrives, because until then the kernel may still
     * write to its buffers. A running blocking op is interrupted, and `onCancel` waits for it to return, unless the op
     * can be abandoned.
+    *
+    * Returns false when it is too late to promise that `onComplete` will not run: the op finished, or its CQE has
+    * already arrived. A CQE that finishes the op still completes it, so nothing it produced is lost; one that does not
+    * finish it, such as `EAGAIN`, ends in `onCancel` instead of a resubmission.
     */
   def cancel(op: Op): Boolean = op match {
     case kernel: UringKernelOp =>
       kernel.inFlight match {
-        case flight: InFlight if flight.pending != null && !completionArrived(flight.id) =>
-          flight.cancelled = flight.pending
-          flight.pending = null
-          requestCancel(flight)
-          true
+        case flight: InFlight if flight.pending != null =>
+          if completionArrived(flight.id) then {
+            flight.cancelAfterArrival = true
+            false
+          } else {
+            flight.cancelled = flight.pending
+            flight.pending = null
+            requestCancel(flight)
+            true
+          }
         case _ => false
       }
     case blocking: UringBlockingOp =>
@@ -380,7 +394,6 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 
   /** Submits a cancel SQE for `flight`. If the queue is full, it goes to the backlog that the next `poll` retries. */
   private def requestCancel(flight: InFlight): Unit =
-    flight.cancelRequested = true
     try {
       val sqe = nextSqe()
       try flight.op.prepareCancel(sqe, flight.id)

@@ -4,7 +4,6 @@ import gears.io.reactor.ResolvedAddress
 import gears.io.unsafe.PosixResolver
 
 trait HostResolver {
-
   def resolve(host: String): Either[String, List[ResolvedAddress]]
 }
 

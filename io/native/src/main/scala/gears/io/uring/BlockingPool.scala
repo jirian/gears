@@ -9,7 +9,7 @@ import scala.util.control.NonFatal
 final class BlockingPool(
     parallelism: Int = BlockingPool.defaultParallelism,
     queueCapacity: Int = BlockingPool.defaultQueueCapacity,
-    threadNamePrefix: String = "asyncio-blocking"
+    threadNamePrefix: String = "gears-io-blocking"
 ) extends AutoCloseable {
   require(parallelism > 0, "Blocking pool parallelism must be positive")
   require(queueCapacity > 0, "Blocking pool queue capacity must be positive")
@@ -48,9 +48,9 @@ final class BlockingPool(
 
 object BlockingPool {
   val defaultParallelism: Int =
-    sys.props.get("asyncio.blocking.parallelism").fold(4)(_.toInt)
+    sys.props.get("gears.io.blocking.parallelism").fold(4)(_.toInt)
   val defaultQueueCapacity: Int =
-    sys.props.get("asyncio.blocking.queueCapacity").fold(Int.MaxValue)(_.toInt)
+    sys.props.get("gears.io.blocking.queueCapacity").fold(Int.MaxValue)(_.toInt)
 
   lazy val global: BlockingPool = new BlockingPool()
 }

@@ -1,6 +1,6 @@
 // from https://github.com/armanbilge/fs2-io_uring/blob/main/uring/src/main/scala/fs2/io/uring/unsafe/uring.scala
-// Modified for gears: moved to package gears.io.uring, linked with @link("uring"), shim symbols renamed to gears_*, and
-// io_uring_sq_ready added.
+// Modified for gears: moved to package gears.io.uring, linked with @link("uring"), shim symbols renamed to gears_*,
+// io_uring_sq_ready added, and unused bindings removed.
 
 /*
  * Copyright 2022 Arman Bilge
@@ -21,7 +21,6 @@
 package gears.io.uring
 
 import scala.scalanative.libc.stddef._
-import scala.scalanative.posix.signal.sigset_t
 import scala.scalanative.posix.sys.socket._
 import scala.scalanative.runtime.Intrinsics._
 import scala.scalanative.unsafe._
@@ -30,12 +29,6 @@ import scala.scalanative.unsigned._
 @link("uring")
 @extern
 private[uring] object uring {
-  final val IORING_SETUP_SUBMIT_ALL = 1 << 7
-  final val IORING_SETUP_COOP_TASKRUN = 1 << 8
-  final val IORING_SETUP_TASKRUN_FLAG = 1 << 9
-  final val IORING_SETUP_SINGLE_ISSUER = 1 << 12
-  final val IORING_SETUP_DEFER_TASKRUN = 1 << 13
-
   final val IORING_OP_NOP = 0
   final val IORING_OP_READV = 1
   final val IORING_OP_WRITEV = 2
@@ -46,15 +39,10 @@ private[uring] object uring {
   final val IORING_OP_TIMEOUT_REMOVE = 12
   final val IORING_OP_ACCEPT = 13
   final val IORING_OP_ASYNC_CANCEL = 14
-  final val IORING_OP_CONNECT = 16
   final val IORING_OP_OPENAT = 18
-  final val IORING_OP_CLOSE = 19
   final val IORING_OP_READ = 22
   final val IORING_OP_WRITE = 23
   final val IORING_OP_SEND = 26
-  final val IORING_OP_RECV = 27
-  final val IORING_OP_SHUTDOWN = 34
-  final val IORING_OP_SOCKET = 45
 
   type __u8 = CUnsignedChar
   type __u16 = CUnsignedShort
@@ -67,13 +55,6 @@ private[uring] object uring {
 
   type __kernel_rwf_t = CUnsignedInt
 
-  // Matches glibc's <sys/uio.h>/<sys/socket.h> layout on this platform (a
-  // pointer + size_t pair, and a pointer/socklen_t/pointer/size_t/.../int
-  // struct respectively) - defined locally rather than reusing
-  // scala-native's own posix bindings for the same reason every other
-  // struct in this file is: CStruct layout here is computed from the field
-  // types/order exactly like C would, so this is no less reliable, and it
-  // keeps every struct this backend depends on in one place.
   type iovec = CStruct2[Ptr[Byte], size_t]
   type msghdr = CStruct7[Ptr[Byte], CUnsignedInt, Ptr[iovec], size_t, Ptr[Byte], size_t, CInt]
 
@@ -152,14 +133,6 @@ private[uring] object uring {
   def io_uring_sq_ready(ring: Ptr[io_uring]): CUnsignedInt = extern
 
   @blocking
-  def io_uring_submit_and_wait_timeout(
-      ring: Ptr[io_uring],
-      cqe_ptr: Ptr[Ptr[io_uring_cqe]],
-      wait_nr: CUnsignedInt,
-      ts: Ptr[__kernel_timespec],
-      sigmask: Ptr[sigset_t]
-  ): CInt = extern
-
   @blocking
   def io_uring_wait_cqe_timeout(
       ring: Ptr[io_uring],
@@ -250,14 +223,10 @@ private[uring] object uringStructOps {
     sqe.timeout_remove_flags = flags
   }
 
-  /** `mask` is a `poll(2)` event mask (`POLLIN`, `POLLOUT`, ...); the CQE's `res` is the events that fired. */
   def io_uring_prep_poll_add(sqe: Ptr[io_uring_sqe], fd: CInt, mask: CUnsignedInt): Unit = {
     io_uring_prep_rw(IORING_OP_POLL_ADD, sqe, fd, null, 0.toUInt, 0.toULong)
-    sqe.poll32_events = mask // little-endian layout, as liburing does on x86_64/aarch64
+    sqe.poll32_events = mask
   }
-
-  def io_uring_prep_close(sqe: Ptr[io_uring_sqe], fd: CInt): Unit =
-    io_uring_prep_rw(IORING_OP_CLOSE, sqe, fd, null, 0.toUInt, 0.toULong)
 
   def io_uring_prep_read(
       sqe: Ptr[io_uring_sqe],
@@ -291,9 +260,6 @@ private[uring] object uringStructOps {
       offset: __u64
   ): Unit = io_uring_prep_rw(IORING_OP_WRITEV, sqe, fd, iovecs.asInstanceOf[Ptr[Byte]], count, offset)
 
-  /** `dfd`/`path`/`flags`/`mode` match `openat(2)` exactly - pass `AT_FDCWD` for `dfd` to resolve a relative `path`
-    * against the process's current working directory the way plain `open(2)` would.
-    */
   def io_uring_prep_openat(
       sqe: Ptr[io_uring_sqe],
       dfd: CInt,
@@ -303,24 +269,6 @@ private[uring] object uringStructOps {
   ): Unit = {
     io_uring_prep_rw(IORING_OP_OPENAT, sqe, dfd, path.asInstanceOf[Ptr[Byte]], mode, 0.toULong)
     sqe.open_flags = flags.toUInt
-  }
-
-  def io_uring_prep_connect(
-      sqe: Ptr[io_uring_sqe],
-      fd: CInt,
-      addr: Ptr[sockaddr],
-      addrlen: socklen_t
-  ): Unit = io_uring_prep_rw(IORING_OP_CONNECT, sqe, fd, addr, 0.toUInt, addrlen)
-
-  def io_uring_prep_recv(
-      sqe: Ptr[io_uring_sqe],
-      sockfd: CInt,
-      buf: Ptr[Byte],
-      len: size_t,
-      flags: CInt
-  ): Unit = {
-    io_uring_prep_rw(IORING_OP_RECV, sqe, sockfd, buf, len.toUInt, 0.toULong)
-    sqe.msg_flags = flags.toUInt
   }
 
   def io_uring_prep_send(
@@ -352,20 +300,6 @@ private[uring] object uringStructOps {
   ): Unit = {
     io_uring_prep_rw(IORING_OP_RECVMSG, sqe, fd, msg.asInstanceOf[Ptr[Byte]], 1.toUInt, 0.toULong)
     sqe.msg_flags = flags.toUInt
-  }
-
-  def io_uring_prep_shutdown(sqe: Ptr[io_uring_sqe], fd: CInt, how: CInt): Unit =
-    io_uring_prep_rw(IORING_OP_SHUTDOWN, sqe, fd, null, how.toUInt, 0.toULong)
-
-  def io_uring_prep_socket(
-      sqe: Ptr[io_uring_sqe],
-      domain: CInt,
-      `type`: CInt,
-      protocol: CInt,
-      flags: CUnsignedInt
-  ): Unit = {
-    io_uring_prep_rw(IORING_OP_SOCKET, sqe, domain, null, protocol.toUInt, `type`.toULong)
-    sqe.rw_flags = flags.toUInt
   }
 
   implicit final class io_uring_sqeOps(val io_uring_sqe: Ptr[io_uring_sqe]) extends AnyVal {

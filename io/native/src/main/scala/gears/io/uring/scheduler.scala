@@ -185,7 +185,6 @@ class UringPerThreadScheduler(
   def tcpSupport = new ReactorTcpSupport(this) {}
   def udpSupport = new ReactorUdpSupport(this) {}
   def fileSupport = new ReactorFileSupport(this) {}
-
   def dnsSupport = new ReactorDnsSupport(this) {}
 
 class UringPerThreadSupport(

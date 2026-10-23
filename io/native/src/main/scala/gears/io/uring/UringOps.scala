@@ -17,12 +17,10 @@ import uring.*
 import uringStructOps.*
 
 sealed abstract class UringOp[Owner] {
-
   @volatile private[uring] var submitted = false
 }
 
 abstract class RingOp[Owner] extends UringOp[Owner] {
-
   private[uring] var inFlight: AnyRef | Null = null
 
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit
@@ -196,7 +194,6 @@ final class Resolve[Owner](val host: String, into: Slot[List[ResolvedAddress]], 
 }
 
 object Blockers {
-
   def run(blocking: UringBlocking[?], pool: BlockingPool): Unit =
     pool.execute { () =>
       if blocking.begin() then {

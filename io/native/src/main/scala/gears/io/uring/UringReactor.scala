@@ -461,7 +461,6 @@ final class UringReactor private (entries: Int, blockerPool: BlockingPool, resol
 }
 
 object UringReactor {
-
   def open(
       entries: Int = 256,
       blockerPool: BlockingPool = BlockingPool.global,

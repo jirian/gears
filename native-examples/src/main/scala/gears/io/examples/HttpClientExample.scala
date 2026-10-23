@@ -60,6 +60,7 @@ private def runClientDemo()(using Async, TcpSupport, DnsSupport, AsyncOperations
 
     listener.close()
 
+/** Runs the example of an HTTP client against a local router. */
 def httpClientExample(): Unit =
   if LinktimeInfo.isLinux then
     withUring:

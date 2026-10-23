@@ -10,6 +10,7 @@ import java.nio.channels.AsynchronousCloseException
 import java.util.concurrent.{CancellationException, TimeoutException}
 import scala.concurrent.duration.*
 
+/** Runs the example of timeouts, cancelled futures and closing a stream under a pending read. */
 def cancellationExample(): Unit = withUring:
   given TcpSupport = summon[UringPerThreadSupport].tcpSupport
   Async.blocking:

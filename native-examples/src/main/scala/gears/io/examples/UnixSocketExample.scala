@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
+/** Runs the example of stream and datagram sockets on Unix domain paths. */
 def unixSocketExample(): Unit = withUring:
   val support = summon[UringPerThreadSupport]
   given TcpSupport = support.tcpSupport

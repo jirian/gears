@@ -8,6 +8,7 @@ import gears.io.uring.UringReactor
 
 import java.net.InetSocketAddress
 
+/** Runs the example of the gears network layer on any reactor through `SingleReactorDriver`. */
 def driverExample(): Unit =
   val driver = SingleReactorDriver(() => UringReactor.open(), threadName = "example-reactor")
   try

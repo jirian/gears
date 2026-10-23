@@ -32,7 +32,7 @@ final class WebSocket private[http] (
   @volatile private var closeReceived = false
   @volatile private var receivedClose: Option[Close] = None
 
-  /** The close frame the peer sent, once `receive` has seen it. */
+  /** Returns the close frame the peer sent, once `receive` has seen it. */
   def peerClose: Option[Close] = receivedClose
 
   /** Closes the connection at once, without a close handshake; `sendClose` starts one. */
@@ -48,13 +48,25 @@ final class WebSocket private[http] (
     buf.get(bytes)
     bytes
 
-  /** Sends a text message. */
+  /** Sends a text message.
+    *
+    * @param text
+    *   the message
+    */
   def sendText(text: String)(using Async): Unit = send(Message.Text(text))
 
-  /** Sends a binary message. */
+  /** Sends a binary message.
+    *
+    * @param bytes
+    *   the message
+    */
   def sendBinary(bytes: Array[Byte])(using Async): Unit = send(Message.Binary(bytes))
 
-  /** Sends one message as one frame. A failed send closes the connection. */
+  /** Sends one message as one frame. A failed send closes the connection.
+    *
+    * @param message
+    *   the message, of at most `maxMessageSize` bytes
+    */
   def send(message: Message)(using Async): Unit =
     val (opcode, bytes) = message match
       case Message.Text(text)   => (1, encode(text))
@@ -62,13 +74,22 @@ final class WebSocket private[http] (
     require(bytes.length <= maxMessageSize, "Message exceeds maxMessageSize")
     writeFrame(opcode, bytes)
 
-  /** Sends a ping with up to 125 bytes; the peer's pong is consumed by `receive`. */
+  /** Sends a ping. The peer's pong is consumed by `receive`.
+    *
+    * @param bytes
+    *   the ping's payload, of at most 125 bytes
+    */
   def ping(bytes: Array[Byte] = Array.emptyByteArray)(using Async): Unit =
     require(bytes.length <= 125, "A ping may contain at most 125 bytes")
     writeFrame(9, bytes)
 
   /** Starts the close handshake. Afterwards nothing but the peer's close can be received, and `receive` discards any
     * data messages that arrive before it.
+    *
+    * @param code
+    *   the close code, 1000 (normal closure) by default
+    * @param reason
+    *   why the connection closes, in at most 123 UTF-8 bytes
     */
   def sendClose(code: Int = 1000, reason: String = "")(using Async): Unit =
     require(validCloseCode(code), s"Invalid close code: $code")
@@ -109,8 +130,11 @@ final class WebSocket private[http] (
         throw t
     finally permit.release()
 
-  /** The next message, reassembled from its fragments, or `None` once the peer has closed. A protocol violation by the
-    * peer sends the matching close code, closes the connection and throws `ProtocolException`.
+  /** Returns the next message, reassembled from its fragments. A protocol violation by the peer sends the matching
+    * close code, closes the connection and throws `ProtocolException`.
+    *
+    * @return
+    *   the message, or `None` once the peer has closed
     */
   def receive()(using Async): Option[Message] =
     if !reading.compareAndSet(false, true) then throw ConcurrentReceiveException()
@@ -240,7 +264,19 @@ object WebSocket:
 
   val DefaultMaxMessageSize: Int = 16 * 1024 * 1024
 
-  /** Opens a `ws` or `wss` connection on a transport of its own, offering `subprotocols`. */
+  /** Opens a `ws` or `wss` connection on a transport of its own.
+    *
+    * @param url
+    *   a `ws` or `wss` URL
+    * @param headers
+    *   extra headers for the handshake request
+    * @param subprotocols
+    *   the subprotocols to offer, in order of preference
+    * @param maxMessageSize
+    *   the largest message to send or receive, in bytes
+    * @param tls
+    *   makes `wss` connections
+    */
   def connect(
       url: String,
       headers: Headers = Headers.empty,
@@ -252,7 +288,19 @@ object WebSocket:
     try connectWith(transport, url, headers, subprotocols, maxMessageSize)
     finally transport.close()
 
-  /** Opens a `ws` or `wss` connection over a connection from `transport`, which keeps no hold on it afterwards. */
+  /** Opens a `ws` or `wss` connection over a connection from `transport`, which keeps no hold on it afterwards.
+    *
+    * @param transport
+    *   makes the connection
+    * @param url
+    *   a `ws` or `wss` URL
+    * @param headers
+    *   extra headers for the handshake request
+    * @param subprotocols
+    *   the subprotocols to offer, in order of preference
+    * @param maxMessageSize
+    *   the largest message to send or receive, in bytes
+    */
   def connectWith(
       transport: Transport,
       url: String,
@@ -334,7 +382,19 @@ object WebSocket:
         stream.close()
         throw t
 
-  /** `connect` as a gears `Resource`, closed when released. */
+  /** Returns `connect` as a gears `Resource`, closed when released.
+    *
+    * @param url
+    *   a `ws` or `wss` URL
+    * @param headers
+    *   extra headers for the handshake request
+    * @param subprotocols
+    *   the subprotocols to offer, in order of preference
+    * @param maxMessageSize
+    *   the largest message to send or receive, in bytes
+    * @param tls
+    *   makes `wss` connections
+    */
   def resource(
       url: String,
       headers: Headers = Headers.empty,
@@ -344,8 +404,16 @@ object WebSocket:
   )(using TcpSupport, DnsSupport): Resource[WebSocket] =
     Resource(connect(url, headers, subprotocols, maxMessageSize, tls), _.close())
 
-  /** A server handler that upgrades each valid request and runs `body` on the WebSocket, closing it afterwards. By
-    * default only same-origin browsers, and clients that send no `Origin`, are accepted.
+  /** Returns a server handler that upgrades each valid request and runs `body` on the WebSocket, closing it afterwards.
+    *
+    * @param body
+    *   what to do with each WebSocket
+    * @param subprotocols
+    *   the subprotocols this server speaks, in order of preference
+    * @param maxMessageSize
+    *   the largest message to send or receive, in bytes
+    * @param originAllowed
+    *   which requests to accept; by default only same-origin browsers, and clients that send no `Origin`
     */
   def handler(
       body: WebSocket => Async ?=> Unit,
@@ -360,9 +428,21 @@ object WebSocket:
           try body(socket)
           finally socket.close()
 
-  /** Upgrades `request` to a WebSocket from inside a handler, or answers it with an error and returns `None` if it is
-    * not a valid upgrade request or `originAllowed` refuses it. Picks the first of `subprotocols` that the client
-    * offered.
+  /** Upgrades `request` to a WebSocket from inside a handler, or answers it with an error. It picks the first of
+    * `subprotocols` that the client offered.
+    *
+    * @param w
+    *   the handler's response writer
+    * @param request
+    *   the handler's request
+    * @param subprotocols
+    *   the subprotocols this server speaks, in order of preference
+    * @param maxMessageSize
+    *   the largest message to send or receive, in bytes
+    * @param originAllowed
+    *   which requests to accept; by default only same-origin browsers, and clients that send no `Origin`
+    * @return
+    *   the WebSocket, or `None` if `request` is not a valid upgrade request or `originAllowed` refuses it
     */
   def upgrade(
       w: ResponseWriter,

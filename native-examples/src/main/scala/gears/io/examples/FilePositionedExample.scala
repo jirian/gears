@@ -8,6 +8,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
+/** Runs the example of positioned reads and writes, seek, metadata, truncate and write options. */
 def filePositionedExample(): Unit = withUring:
   given FileSupport = summon[UringPerThreadSupport].fileSupport
   val path = s"/tmp/gears-positioned-example-${scala.scalanative.posix.unistd.getpid()}.txt"

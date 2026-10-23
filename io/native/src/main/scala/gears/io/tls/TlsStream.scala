@@ -17,6 +17,16 @@ import openssl._
 /** An OpenSSL `SSL_CTX`. Closing it frees the context; sessions already opened from it keep their own reference. */
 private final class OpenSslContext(ctx: Ptr[SSL_CTX]) extends TlsContext:
   private var closed = false
+
+  /** Runs `create` with this context, unless it is closed.
+    *
+    * @tparam A
+    *   the result type
+    * @param create
+    *   makes a session from the context
+    * @return
+    *   the result of `create`
+    */
   def session[A](create: Ptr[SSL_CTX] => A): A = synchronized:
     if closed then throw new ClosedChannelException()
     create(ctx)
@@ -25,7 +35,7 @@ private final class OpenSslContext(ctx: Ptr[SSL_CTX]) extends TlsContext:
       closed = true
       SSL_CTX_free(ctx)
 
-/** The text of the oldest error in OpenSSL's per-thread error queue, for exception messages. */
+/** Returns the text of the oldest error in OpenSSL's per-thread error queue, for exception messages. */
 private[tls] def lastOpenSslError(): String =
   val code = ERR_get_error()
   if code == 0.toULong then "no OpenSSL error recorded"
@@ -41,8 +51,13 @@ object NativeTlsSupport extends TlsSupport:
     SSL_CTX_free(ctx)
     throw new IOException(s"$what: $msg")
 
-  /** A client context. With `verify`, servers must present a certificate trusted by the system's store or by `caFile`,
-    * and matching the name given to `wrapClient`; without it, any certificate is accepted.
+  /** Returns a client context.
+    *
+    * @param verify
+    *   whether servers must present a certificate that is trusted by the system's store or by `caFile`, and that
+    *   matches the name given to `wrapClient`; without it, any certificate is accepted
+    * @param caFile
+    *   a PEM file of extra trusted certificates
     */
   def clientContext(verify: Boolean = true, caFile: Option[String] = None): TlsContext =
     val ctx = SSL_CTX_new(TLS_client_method())
@@ -58,7 +73,13 @@ object NativeTlsSupport extends TlsSupport:
     else SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, null)
     OpenSslContext(ctx)
 
-  /** A server context with a PEM certificate chain and private key. */
+  /** Returns a server context.
+    *
+    * @param certFile
+    *   a PEM certificate chain
+    * @param keyFile
+    *   the PEM private key of its first certificate
+    */
   def serverContext(certFile: String, keyFile: String): TlsContext =
     val ctx = SSL_CTX_new(TLS_server_method())
     if ctx == null then throw new IOException(s"SSL_CTX_new failed: ${lastOpenSslError()}")
@@ -70,8 +91,17 @@ object NativeTlsSupport extends TlsSupport:
       if SSL_CTX_check_private_key(ctx) != 1 then freeAndFail(ctx, "private key does not match certificate")
     OpenSslContext(ctx)
 
-  /** Runs a client handshake on `stream`, sending `serverName` as SNI and verifying the certificate against it (a host
-    * name, or an IP literal checked against the certificate's IP addresses). Closes `stream` if the handshake fails.
+  /** Runs a client handshake on `stream`. It closes `stream` if the handshake fails.
+    *
+    * @param stream
+    *   the connection to secure
+    * @param context
+    *   a context from `clientContext`
+    * @param serverName
+    *   sent as SNI, and checked against the server's certificate: a host name, or an IP literal checked against the
+    *   certificate's IP addresses
+    * @return
+    *   the secured stream
     */
   def wrapClient(stream: TcpStream, context: TlsContext, serverName: String)(using Async): TcpStream =
     val tls =
@@ -84,7 +114,15 @@ object NativeTlsSupport extends TlsSupport:
         tls.close()
         throw t
 
-  /** Runs a server handshake on `stream`. Closes `stream` if the handshake fails. */
+  /** Runs a server handshake on `stream`. It closes `stream` if the handshake fails.
+    *
+    * @param stream
+    *   the accepted connection to secure
+    * @param context
+    *   a context from `serverContext`
+    * @return
+    *   the secured stream
+    */
   def wrapServer(stream: TcpStream, context: TlsContext)(using Async): TcpStream =
     val tls = context.asInstanceOf[OpenSslContext].session(ctx => TlsStream.open(stream, ctx, isServer = true, ""))
     try
@@ -164,8 +202,10 @@ final class TlsStream private (
           finally unsentFrom = out.position()
     finally guard.release()
 
-  /** Reads more ciphertext from `underlying` into OpenSSL. False at end of stream. Bytes read before a cancel are still
-    * fed in.
+  /** Reads more ciphertext from `underlying` into OpenSSL. Bytes read before a cancel are still fed in.
+    *
+    * @return
+    *   false at end of stream
     */
   private def fillNetworkIn()(using Async): Boolean =
     val guard = inbound.acquire()
@@ -198,8 +238,12 @@ final class TlsStream private (
     if e == SSL_ERROR_SSL || e == SSL_ERROR_SYSCALL then failureDetail = lastOpenSslError()
     (r, e)
 
-  /** Runs an OpenSSL call until it stops asking for network I/O, doing that I/O in between. Returns its result and
-    * `SSL_get_error` code; `PeerClosed` if it wanted input at end of stream.
+  /** Runs an OpenSSL call until it stops asking for network I/O, doing that I/O in between.
+    *
+    * @param op
+    *   the OpenSSL call
+    * @return
+    *   its result and `SSL_get_error` code; the code is `PeerClosed` if it wanted input at end of stream
     */
   private def pump(op: () => Int)(using Async): (Int, Int) =
     var (result, error) = call(op)

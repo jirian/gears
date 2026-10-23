@@ -8,6 +8,7 @@ import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 
+/** Runs the example of UDP datagrams between two bound sockets. */
 def udpExample(): Unit = withUring:
   given udp: UdpSupport = summon[UringPerThreadSupport].udpSupport
 

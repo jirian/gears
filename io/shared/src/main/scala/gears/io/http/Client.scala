@@ -15,10 +15,10 @@ import scala.concurrent.duration.*
   */
 final case class Url(scheme: String, host: String, port: Int, path: String, query: String):
 
-  /** The request target: the path and query. */
+  /** Returns the request target: the path and query. */
   def target: String = if query.isEmpty then path else s"$path?$query"
 
-  /** The `Host` header value: brackets around IPv6, and the port unless it is the scheme's default. */
+  /** Returns the `Host` header value: brackets around IPv6, and the port unless it is the scheme's default. */
   def hostHeader: String =
     val bracketed = if host.contains(':') then s"[$host]" else host
     if port == Url.defaultPort(scheme) then bracketed else s"$bracketed:$port"
@@ -26,8 +26,12 @@ final case class Url(scheme: String, host: String, port: Int, path: String, quer
 object Url:
   private def defaultPort(scheme: String): Int = if scheme == "https" then 443 else 80
 
-  /** Parses an absolute `http` or `https` URL. Throws `IllegalArgumentException` for other schemes, a malformed port,
-    * whitespace or control characters.
+  /** Parses an absolute `http` or `https` URL.
+    *
+    * @param raw
+    *   the URL
+    * @throws IllegalArgumentException
+    *   for other schemes, a malformed port, whitespace or control characters
     */
   def parse(raw: String): Url =
     if raw.exists(c => c <= ' ' || c == '\u007f') then
@@ -60,7 +64,13 @@ object Url:
       case i  => (pathAndQuery.substring(0, i), pathAndQuery.substring(i + 1))
     Url(scheme, host, port, if path.isEmpty then "/" else path, query)
 
-  /** Resolves a redirect's `Location` against the URL that was requested. */
+  /** Resolves a redirect's `Location` against the URL that was requested.
+    *
+    * @param base
+    *   the URL that was requested
+    * @param location
+    *   the `Location` header's value, absolute or relative
+    */
   def resolve(base: Url, location: String): Url =
     if location.contains("://") then parse(location)
     else
@@ -75,15 +85,40 @@ object Url:
 /** A client request with its whole body. The transport adds `Host`, `Content-Length` and `Connection` itself. */
 final case class ClientRequest(method: HttpMethod, url: Url, headers: Headers, body: Array[Byte]):
 
-  /** This request with `name` set to `value`. */
+  /** Returns this request with `name` set to `value`, replacing earlier values.
+    *
+    * @param name
+    *   the header's name
+    * @param value
+    *   the header's value
+    */
   def withHeader(name: String, value: String): ClientRequest = copy(headers = headers.set(name, value))
 
-  /** This request with `cookie` added. */
+  /** Returns this request with `cookie` added.
+    *
+    * @param cookie
+    *   the cookie to send
+    */
   def addCookie(cookie: Cookie): ClientRequest = copy(headers = headers.add("Cookie", cookie.rendered))
 
 object ClientRequest:
+  /** Returns a GET request without body.
+    *
+    * @param url
+    *   an absolute `http` or `https` URL
+    */
   def get(url: String): ClientRequest =
     ClientRequest(HttpMethod.GET, Url.parse(url), Headers.empty, Array.emptyByteArray)
+
+  /** Returns a POST request.
+    *
+    * @param url
+    *   an absolute `http` or `https` URL
+    * @param body
+    *   the request body
+    * @param contentType
+    *   the body's `Content-Type`
+    */
   def post(url: String, body: Array[Byte], contentType: String = "application/octet-stream"): ClientRequest =
     ClientRequest(HttpMethod.POST, Url.parse(url), Headers("Content-Type" -> contentType), body)
 
@@ -216,7 +251,11 @@ final class Transport(
           raw.close()
           throw e
 
-  /** Sends `request` and reads the whole response. Redirects are not followed; `Client` does that. */
+  /** Sends `request` and reads the whole response. Redirects are not followed; `Client` does that.
+    *
+    * @param request
+    *   the request to send
+    */
   def roundTrip(request: ClientRequest)(using Async): HttpResponse =
     val response = execute(
       () =>
@@ -235,6 +274,9 @@ final class Transport(
 
   /** Sends `request`, streaming its body while the response arrives, and returns once the response head is in. The
     * caller must close or finish the response.
+    *
+    * @param request
+    *   the request to send
     */
   def roundTripStreaming(request: StreamingRequest)(using Async): StreamingResponse =
     roundTripStreaming(request, Async.current.group)
@@ -244,7 +286,11 @@ final class Transport(
   ): StreamingResponse =
     execute(() => request, replayable = false, owner = owner)
 
-  /** `roundTripStreaming` as a gears `Resource`, finished when released. */
+  /** Returns `roundTripStreaming` as a gears `Resource`, finished when released.
+    *
+    * @param request
+    *   the request to send
+    */
   def response(request: StreamingRequest): Resource[StreamingResponse] =
     Resource(roundTripStreaming(request), _.finish())
 
@@ -450,20 +496,47 @@ final class Client(transport: Transport, maxRedirects: Int = 10, timeout: Option
   /** Closes the transport's unused pooled connections. */
   def closeIdleConnections(): Unit = transport.closeIdleConnections()
 
-  /** Sends a streaming request without following redirects. The caller must close or finish the response. */
+  /** Sends a streaming request without following redirects. The caller must close or finish the response.
+    *
+    * @param request
+    *   the request to send
+    */
   def sendStreaming(request: StreamingRequest)(using Async): StreamingResponse =
     val owner = Async.current.group
     Bodies.timedOwned(timeout, (response: StreamingResponse) => response.finish())(
       transport.roundTripStreaming(request, owner)
     )
 
-  /** `sendStreaming` as a gears `Resource`. */
+  /** Returns `sendStreaming` as a gears `Resource`, finished when released.
+    *
+    * @param request
+    *   the request to send
+    */
   def response(request: StreamingRequest): Resource[StreamingResponse] = Resource(sendStreaming(request), _.finish())
 
-  /** Sends `request`, following redirects, and reads the whole response. */
+  /** Sends `request`, following redirects, and reads the whole response.
+    *
+    * @param request
+    *   the request to send
+    */
   def send(request: ClientRequest)(using Async): HttpResponse = Bodies.timed(timeout)(follow(request, maxRedirects))
 
+  /** Sends a GET request, following redirects, and reads the whole response.
+    *
+    * @param url
+    *   an absolute `http` or `https` URL
+    */
   def get(url: String)(using Async): HttpResponse = send(ClientRequest.get(url))
+
+  /** Sends a POST request, following redirects, and reads the whole response.
+    *
+    * @param url
+    *   an absolute `http` or `https` URL
+    * @param body
+    *   the request body
+    * @param contentType
+    *   the body's `Content-Type`
+    */
   def post(url: String, body: Array[Byte], contentType: String = "application/octet-stream")(using
       Async
   ): HttpResponse =
@@ -488,11 +561,21 @@ final class Client(transport: Transport, maxRedirects: Int = 10, timeout: Option
 
 object Client:
 
-  /** A client for plain `http`. */
+  /** Returns a client for plain `http`. */
   def apply()(using TcpSupport, DnsSupport): Client = new Client(Transport())
+
+  /** Returns a client on `transport`.
+    *
+    * @param transport
+    *   sends the requests
+    */
   def apply(transport: Transport): Client = new Client(transport)
 
-  /** A client for `http` and `https`, verifying servers against the system's trusted certificates. */
+  /** Returns a client for `http` and `https`, verifying servers against the system's trusted certificates.
+    *
+    * @param tls
+    *   makes the `https` connections
+    */
   def apply(tls: TlsSupport)(using TcpSupport, DnsSupport): Client = new Client(Transport(tls = Some(tls)))
 
   private[http] def redirectMethod(status: Int, method: HttpMethod): HttpMethod =

@@ -32,7 +32,15 @@ final class Router extends Handler:
       }
     )
 
-  /** Serves every method on `pattern` with `handler`, which may stream. */
+  /** Serves every method on `pattern` with `handler`, which may stream.
+    *
+    * @param pattern
+    *   the path pattern
+    * @param handler
+    *   serves the requests
+    * @return
+    *   this router
+    */
   def handle(pattern: String)(handler: Handler): this.type =
     registrationFor(pattern).anyMethod = Some(handler)
     this
@@ -41,15 +49,63 @@ final class Router extends Handler:
     registrationFor(pattern).handlers.update(method, handler)
     this
 
-  /** Serves one method on `pattern` with a function from the request to a whole response. */
+  /** Serves GET, and HEAD, on `pattern` with a function from the request to a whole response.
+    *
+    * @param pattern
+    *   the path pattern
+    * @param handler
+    *   computes the response
+    * @return
+    *   this router
+    */
   def get(pattern: String)(handler: HttpRequest => Async ?=> HttpResponse): this.type =
     register(HttpMethod.GET, pattern, Handler.of(handler))
+
+  /** Serves POST on `pattern` with a function from the request to a whole response.
+    *
+    * @param pattern
+    *   the path pattern
+    * @param handler
+    *   computes the response
+    * @return
+    *   this router
+    */
   def post(pattern: String)(handler: HttpRequest => Async ?=> HttpResponse): this.type =
     register(HttpMethod.POST, pattern, Handler.of(handler))
+
+  /** Serves PUT on `pattern` with a function from the request to a whole response.
+    *
+    * @param pattern
+    *   the path pattern
+    * @param handler
+    *   computes the response
+    * @return
+    *   this router
+    */
   def put(pattern: String)(handler: HttpRequest => Async ?=> HttpResponse): this.type =
     register(HttpMethod.PUT, pattern, Handler.of(handler))
+
+  /** Serves DELETE on `pattern` with a function from the request to a whole response.
+    *
+    * @param pattern
+    *   the path pattern
+    * @param handler
+    *   computes the response
+    * @return
+    *   this router
+    */
   def delete(pattern: String)(handler: HttpRequest => Async ?=> HttpResponse): this.type =
     register(HttpMethod.DELETE, pattern, Handler.of(handler))
+
+  /** Serves PATCH on `pattern` with a function from the request to a whole response.
+    *
+    * @param pattern
+    *   the path pattern
+    * @param handler
+    *   computes the response
+    * @return
+    *   this router
+    */
   def patch(pattern: String)(handler: HttpRequest => Async ?=> HttpResponse): this.type =
     register(HttpMethod.PATCH, pattern, Handler.of(handler))
 
@@ -124,7 +180,13 @@ final class Router extends Handler:
         }
         selected.serveStream(w, request.copy(pathValues = values), body)
 
-  /** Routes `request` without a connection and returns the response, for tests and in-process use. */
+  /** Routes `request` without a connection, for tests and in-process use.
+    *
+    * @param request
+    *   the request to route
+    * @return
+    *   the response
+    */
   def dispatch(request: HttpRequest)(using Async): HttpResponse =
     var captured: HttpResponse = null
     var status = HttpStatus.Ok
@@ -138,4 +200,5 @@ final class Router extends Handler:
     if captured == null then HttpResponse(status, headers.toHeaders, Array.emptyByteArray) else captured
 
 object Router:
+  /** Returns an empty router. */
   def apply(): Router = new Router

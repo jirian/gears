@@ -29,14 +29,29 @@ trait ReactorDriver:
     */
   type R <: Reactor
 
-  /** Builds an op on the driver's reactor thread with `build`, submits it, and suspends until it completes; a failure
+  /** Builds an op with `build` on this driver's reactor thread, submits it, and suspends until it completes; a failure
     * is thrown. If the caller is cancelled, the op is cancelled, and the caller still waits until the reactor has
-    * finished with the op's buffers before the cancellation is thrown. With a `guard`, the op is registered with it:
-    * closing the guard cancels the op, and the op fails with `AsynchronousCloseException`.
+    * finished with the op's buffers before the cancellation is thrown.
+    *
+    * @param guard
+    *   the guard of the handle the op uses, or null. The op is registered with it: closing the guard cancels the op,
+    *   and the op fails with `AsynchronousCloseException`.
+    * @param build
+    *   builds the op on the reactor that will run it
     */
   def await(guard: IoGuard | Null)(build: (r: R) => r.Op)(using Async): Unit
 
-  /** Opens `path` like `open(2)`, close-on-exec, without blocking the reactor. */
+  /** Opens `path` like `open(2)`, close-on-exec, without blocking the reactor.
+    *
+    * @param path
+    *   the file to open
+    * @param flags
+    *   the `open(2)` flags
+    * @param mode
+    *   the permissions of a file that `O_CREAT` creates
+    * @return
+    *   the new descriptor
+    */
   def openFile(path: String, flags: Int, mode: Int)(using Async): Int =
     // The open may finish after this fiber was cancelled; whatever descriptor it produced is then closed below.
     val owned = new java.util.concurrent.atomic.AtomicInteger(-1)
@@ -47,8 +62,14 @@ trait ReactorDriver:
       val fd = owned.getAndSet(-1)
       if fd >= 0 then scala.scalanative.posix.unistd.close(fd)
 
-  /** `await` for an op that produces a handle, returning it. A handle produced for a caller that no longer waits is
-    * closed.
+  /** Runs `await` for an op that produces a handle. A handle produced for a caller that no longer waits is closed.
+    *
+    * @param guard
+    *   the guard of the handle the op uses, or null
+    * @param build
+    *   builds the op, which writes its handle into the given slot
+    * @return
+    *   the handle
     */
   final def awaitHandle(guard: IoGuard | Null)(build: (r: R, into: HandleSlot) => r.Op)(using Async): Int =
     val opened = HandleSlot()
@@ -62,12 +83,20 @@ trait ReactorDriver:
         if fd >= 0 then scala.scalanative.posix.unistd.close(fd)
         throw t
 
-  /** Whether the reactor takes heap `ByteBuffer`s directly. If not, `awaitFilling` and `awaitDraining` pass it a
-    * pointer view of the buffer's array instead.
+  /** Returns whether the reactor takes heap `ByteBuffer`s directly. If not, `awaitFilling` and `awaitDraining` pass it
+    * a pointer view of the buffer's array instead.
     */
   def acceptsHeapBuffers: Boolean = false
 
-  /** `await` for an op that fills `buf`, such as a read. Bytes that arrived before a cancel are kept. */
+  /** Runs `await` for an op that fills `buf`, such as a read. Bytes that arrived before a cancel are kept.
+    *
+    * @param guard
+    *   the guard of the handle the op uses, or null
+    * @param buf
+    *   the buffer to fill
+    * @param build
+    *   builds the op, filling the given buffer, which may be a view of `buf`
+    */
   final def awaitFilling(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: R, into: ByteBuffer) => r.Op)(using
       Async
   ): Unit =
@@ -86,7 +115,16 @@ trait ReactorDriver:
             staged.flip()
             buf.put(staged)
 
-  /** `await` for an op that consumes `buf`, such as a write. `buf` advances by what was consumed, even on a cancel. */
+  /** Runs `await` for an op that consumes `buf`, such as a write. `buf` advances by what was consumed, even on a
+    * cancel.
+    *
+    * @param guard
+    *   the guard of the handle the op uses, or null
+    * @param buf
+    *   the buffer to drain
+    * @param build
+    *   builds the op, draining the given buffer, which may be a view of `buf`
+    */
   final def awaitDraining(guard: IoGuard | Null, buf: ByteBuffer)(build: (r: R, from: ByteBuffer) => r.Op)(using
       Async
   ): Unit =
@@ -107,20 +145,56 @@ trait ReactorDriver:
           try await(guard)(r => build(r, staged))
           finally buf.position(buf.position() + staged.position())
 
-  /** Reads from a file at its position. By default with `read(2)` on a blocking-pool thread. */
+  /** Reads from a file at its position, by default with `read(2)` on a blocking-pool thread.
+    *
+    * @param guard
+    *   the file's guard, or null
+    * @param fd
+    *   the file to read from
+    * @param buf
+    *   the buffer to fill
+    */
   def readFile(guard: IoGuard | Null, fd: Int, buf: ByteBuffer)(using Async): Unit =
     blockingFileIo(guard, fd, buf, -1L, write = false)
 
-  /** Writes to a file at its position. By default with `write(2)` on a blocking-pool thread. */
+  /** Writes to a file at its position, by default with `write(2)` on a blocking-pool thread.
+    *
+    * @param guard
+    *   the file's guard, or null
+    * @param fd
+    *   the file to write to
+    * @param buf
+    *   the buffer to drain
+    */
   def writeFile(guard: IoGuard | Null, fd: Int, buf: ByteBuffer)(using Async): Unit =
     blockingFileIo(guard, fd, buf, -1L, write = true)
 
-  /** Reads at `offset` without moving the file position, like `pread(2)`. */
+  /** Reads at `offset` without moving the file position, like `pread(2)`.
+    *
+    * @param guard
+    *   the file's guard
+    * @param fd
+    *   the file to read from
+    * @param buf
+    *   the buffer to fill
+    * @param offset
+    *   the position in the file to read at, which must not be negative
+    */
   def readAt(guard: IoGuard, fd: Int, buf: ByteBuffer, offset: Long)(using Async): Unit =
     require(offset >= 0, "offset must be nonnegative")
     blockingFileIo(guard, fd, buf, offset, write = false)
 
-  /** Writes at `offset` without moving the file position, like `pwrite(2)`. */
+  /** Writes at `offset` without moving the file position, like `pwrite(2)`.
+    *
+    * @param guard
+    *   the file's guard
+    * @param fd
+    *   the file to write to
+    * @param buf
+    *   the buffer to drain
+    * @param offset
+    *   the position in the file to write at, which must not be negative
+    */
   def writeAt(guard: IoGuard, fd: Int, buf: ByteBuffer, offset: Long)(using Async): Unit =
     require(offset >= 0, "offset must be nonnegative")
     blockingFileIo(guard, fd, buf, offset, write = true)
@@ -188,6 +262,9 @@ object ReactorDriver:
   /** Waits for an op's future. `link` makes cancelling the caller cancel the op; `uninterruptible` makes the caller
     * keep waiting after its own cancellation until the op has settled, because until then the kernel or a pool thread
     * may still use the caller's buffers.
+    *
+    * @param future
+    *   the op's future
     */
   private[io] def waitFor(future: Future[Unit])(using Async): Unit =
     future.link()
@@ -207,8 +284,23 @@ object ReactorDriver:
       throw failure
     fd
 
-  /** Builds and submits one op on `reactor`, which must be called on its thread, resolving `resolver` when it settles.
-    * Returns the cancel action, which goes through `onLoop` because cancelling also has to happen on that thread.
+  /** Builds and submits one op on `reactor`, resolving `resolver` when it settles. It must be called on the reactor's
+    * thread.
+    *
+    * @tparam R
+    *   the kind of reactor
+    * @param reactor
+    *   the reactor to submit to
+    * @param onLoop
+    *   runs its argument on the reactor's thread
+    * @param guard
+    *   the guard of the handle the op uses, or null
+    * @param build
+    *   builds the op
+    * @param resolver
+    *   settles the caller's future
+    * @return
+    *   the cancel action, which goes through `onLoop` because cancelling also has to happen on the reactor's thread
     */
   private[io] def submitOn[R <: Reactor](
       reactor: R,
@@ -261,11 +353,17 @@ private[io] final class SharedJob[S](start: S => (() => Unit), whenCancelledFirs
   private var cancelled = false
   private var started = false
 
+  /** Starts the submission on `on`, unless it was cancelled or already started.
+    *
+    * @param on
+    *   the shard or loop that starts it
+    */
   def run(on: S): Unit = synchronized:
     if !cancelled && !started then
       started = true
       cancelTaken = start(on)
 
+  /** Cancels the submission, the first time it is called. */
   def cancel(): Unit =
     val (first, action) = synchronized:
       val first = !cancelled

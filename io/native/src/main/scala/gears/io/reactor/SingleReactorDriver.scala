@@ -6,9 +6,9 @@ import gears.io.reactor.Reactor
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch}
 import scala.util.control.NonFatal
 
-/** A `ReactorDriver` that runs any `Reactor` on one thread of its own, opened with `factory`. Fibers stay on whatever
-  * runtime they use, and every op is handed to the reactor thread. Closing it closes the reactor, which cancels the ops
-  * still pending.
+/** A `ReactorDriver` that runs any kind of reactor `A` on one thread of its own, opened with `factory`. Fibers stay on
+  * whatever runtime they use, and every op is handed to the reactor thread. Closing it closes the reactor, which
+  * cancels the ops still pending.
   */
 final class SingleReactorDriver[A <: Reactor](factory: Reactor.Factory[A], threadName: String = "gears-reactor")
     extends ReactorDriver
@@ -68,6 +68,13 @@ final class SingleReactorDriver[A <: Reactor](factory: Reactor.Factory[A], threa
       tasks.offer(() => body)
       reactor.nn.wakeup()
 
+  /** Hands the op that `build` makes to the reactor thread and waits for it; see [[ReactorDriver.await]].
+    *
+    * @param guard
+    *   the guard of the handle the op uses, or null
+    * @param build
+    *   builds the op on the reactor thread
+    */
   def await(guard: IoGuard | Null)(build: (r: A) => r.Op)(using Async): Unit =
     if closed then throw IllegalStateException("The reactor driver is closed")
     val r = reactor.nn

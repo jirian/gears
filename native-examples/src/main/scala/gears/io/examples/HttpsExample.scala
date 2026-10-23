@@ -64,6 +64,7 @@ private def runHttpsDemo()(using Async, TcpSupport, DnsSupport, AsyncOperations)
     deleteFile(certFile)
     deleteFile(keyFile)
 
+/** Runs the example of HTTPS with certificate verification. */
 def httpsExample(): Unit =
   if LinktimeInfo.isLinux then
     withUring:

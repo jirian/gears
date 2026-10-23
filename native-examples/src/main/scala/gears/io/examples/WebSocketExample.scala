@@ -9,6 +9,7 @@ import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
 
+/** Runs the example of a WebSocket endpoint and client: text, binary, ping and close. */
 def webSocketExample(): Unit = withUring:
   val support = summon[UringPerThreadSupport]
   given TcpSupport = support.tcpSupport

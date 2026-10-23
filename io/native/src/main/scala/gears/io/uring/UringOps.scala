@@ -49,22 +49,44 @@ object Owned {
 abstract class UringKernelOp extends UringOp {
   private[uring] var inFlight: AnyRef | Null = null
 
-  /** Fills in `sqe` for one submission. Called again for each resubmission. */
+  /** Fills in `sqe` for one submission of this op. It is called again for each resubmission.
+    *
+    * @param sqe
+    *   the submission queue entry to fill in
+    */
   private[uring] def prepare(sqe: Ptr[io_uring_sqe]): Unit
 
-  /** Handles the result of a submission: true when the op is done, false to submit it again. Throws to fail it. */
+  /** Handles the result of one submission, and throws to fail this op.
+    *
+    * @param res
+    *   the completion's result: a count or descriptor, or a negated `errno`
+    * @return
+    *   true when this op is done, false to submit it again
+    */
   private[uring] def finish(res: Int): Boolean
 
   /** Releases what a submission produced when nobody will see it, such as a descriptor an accept returned after its
     * cancel.
+    *
+    * @param res
+    *   the result of the submission nobody will see
     */
   private[uring] def discard(res: Int): Unit = ()
 
-  /** Records the bytes a cancelled submission still moved, so a read or write that raced its cancel loses nothing. */
+  /** Records the bytes a cancelled submission still moved, so a read or write that raced its cancel loses nothing.
+    *
+    * @param res
+    *   the number of bytes the cancelled submission moved
+    */
   private[uring] def keepProgress(res: Int): Unit = ()
 
   /** Fills in `sqe` to cancel the submission whose user data is `userData`. Timers override it, because the kernel
     * cancels those with `TIMEOUT_REMOVE` instead of `ASYNC_CANCEL`.
+    *
+    * @param sqe
+    *   the submission queue entry to fill in
+    * @param userData
+    *   the user data of the submission to cancel
     */
   private[uring] def prepareCancel(sqe: Ptr[io_uring_sqe], userData: Long): Unit =
     io_uring_prep_cancel64(sqe, userData.toULong, 0)
@@ -122,32 +144,80 @@ final class UringOps[R] private[uring] (resolver: HostResolver) extends Ops[Owne
   def resolve(host: String, into: Slot[List[ResolvedAddress]]): Owned[R] & Resolve =
     Owned(new Resolve(host, into, resolver))
 
-  /** Fills `bufs` in order with one `readv(2)`. Completes once at least one byte was read, or at end of stream. */
+  /** Returns an op that fills `bufs` in order with one `readv(2)`. It completes once at least one byte was read, or at
+    * end of stream.
+    *
+    * @param fd
+    *   the descriptor to read from
+    * @param bufs
+    *   the buffers to fill, between position and limit
+    */
   def readv(fd: Int, bufs: Array[ByteBuffer]): Owned[R] & ReadVector = Owned(new ReadVector(fd, bufs))
 
-  /** Drains `bufs` in order with one `sendmsg(2)`, or `writev(2)` if `fd` is not a socket. Completes once at least one
-    * byte was written.
+  /** Returns an op that drains `bufs` in order with one `sendmsg(2)`, or `writev(2)` if `fd` is not a socket. It
+    * completes once at least one byte was written.
+    *
+    * @param fd
+    *   the descriptor to write to
+    * @param bufs
+    *   the buffers to drain, between position and limit
     */
   def writev(fd: Int, bufs: Array[ByteBuffer]): Owned[R] & WriteVector = Owned(new WriteVector(fd, bufs))
 
-  /** Like `write`, but with `write(2)` from the start instead of trying `send(2)` first: for files and pipes. */
+  /** Returns an op like `write` that uses `write(2)` from the start instead of trying `send(2)` first, for files and
+    * pipes.
+    *
+    * @param fd
+    *   the descriptor to write to
+    * @param buf
+    *   the buffer to drain
+    */
   def writeFile(fd: Int, buf: ByteBuffer): Owned[R] & Write = Owned(new Write(fd, buf, plain = true))
 
-  /** Reads at `offset` without moving the file position, like `pread(2)`. */
+  /** Returns an op that reads at `offset` without moving the file position, like `pread(2)`.
+    *
+    * @param fd
+    *   the file to read from
+    * @param buf
+    *   the buffer to fill
+    * @param offset
+    *   the position in the file to read at, which must not be negative
+    */
   def readAt(fd: Int, buf: ByteBuffer, offset: Long): Owned[R] & Read =
     require(offset >= 0, "offset must be nonnegative")
     Owned(new Read(fd, buf, offset))
 
-  /** Writes at `offset` without moving the file position, like `pwrite(2)`. */
+  /** Returns an op that writes at `offset` without moving the file position, like `pwrite(2)`.
+    *
+    * @param fd
+    *   the file to write to
+    * @param buf
+    *   the buffer to drain
+    * @param offset
+    *   the position in the file to write at, which must not be negative
+    */
   def writeAt(fd: Int, buf: ByteBuffer, offset: Long): Owned[R] & Write =
     require(offset >= 0, "offset must be nonnegative")
     Owned(new Write(fd, buf, plain = true, offset = offset))
 
-  /** Completes once `duration` has passed, with nanosecond precision. */
+  /** Returns an op that completes once `duration` has passed, with nanosecond precision.
+    *
+    * @param duration
+    *   how long to wait, which must not be negative
+    */
   def timer(duration: FiniteDuration): Owned[R] & UringTimer = Owned(new UringTimer(duration.toNanos))
 
-  /** Opens `path` like `openat(2)` relative to the current directory, and completes after writing the new descriptor
-    * into `into`. A missing file fails with `FileNotFoundException`.
+  /** Returns an op that opens `path` like `openat(2)` relative to the current directory, and completes after writing
+    * the new descriptor into `into`. A missing file fails it with `FileNotFoundException`.
+    *
+    * @param path
+    *   the file to open
+    * @param flags
+    *   the `open(2)` flags, such as `O_RDONLY`
+    * @param mode
+    *   the permissions of a file that `O_CREAT` creates
+    * @param into
+    *   the empty slot that receives the new descriptor
     */
   def openAt(path: String, flags: Int, mode: Int, into: HandleSlot): Owned[R] & OpenAt =
     Owned(new OpenAt(path, flags, mode, into))
@@ -162,11 +232,11 @@ final class UringOps[R] private[uring] (resolver: HostResolver) extends Ops[Owne
   */
 sealed abstract class UringBlockingOp extends UringOp {
 
-  /** The blocking work, run on a pool thread. It may be interrupted when the op is cancelled. */
+  /** Runs the blocking work on a pool thread. It may be interrupted when this op is cancelled. */
   def block(): Unit
 
-  /** Whether a cancel may report `onCancel` at once instead of waiting for `block` to return. That is safe only for an
-    * op whose `block` touches nothing of the caller's after a cancel.
+  /** Returns whether a cancel may report `onCancel` at once instead of waiting for `block` to return. That is safe only
+    * for an op whose `block` touches nothing of the caller's after a cancel.
     */
   private[uring] def abandonOnCancel: Boolean = false
 
@@ -199,7 +269,11 @@ sealed abstract class UringBlockingOp extends UringOp {
     if owner != null then owner.resolved(this)
   }
 
-  /** Called by the pool thread before `block`: false if the op was cancelled first, so `block` must not run. */
+  /** Marks this op as running on the calling pool thread, before `block`.
+    *
+    * @return
+    *   false if this op was cancelled first, so `block` must not run
+    */
   private[uring] def begin(): Boolean = synchronized {
     if cancelled then false
     else {
@@ -208,8 +282,8 @@ sealed abstract class UringBlockingOp extends UringOp {
     }
   }
 
-  /** Called by the pool thread after `block`. Clears an interrupt aimed at this op, so it cannot hit the pool's next
-    * task.
+  /** Marks this op as no longer running, after `block`. It clears an interrupt aimed at this op, so the interrupt
+    * cannot hit the pool's next task.
     */
   private[uring] def end(): Unit = {
     synchronized {
@@ -220,7 +294,11 @@ sealed abstract class UringBlockingOp extends UringOp {
     Thread.interrupted()
   }
 
-  /** Marks the op cancelled and interrupts `block` if it is running. Returns whether it was running. */
+  /** Marks this op cancelled and interrupts `block` if it is running.
+    *
+    * @return
+    *   whether `block` was running
+    */
   private[uring] def interrupt(): Boolean = synchronized {
     cancelled = true
     val running = runner
@@ -243,8 +321,15 @@ sealed abstract class UringBlockingOp extends UringOp {
   /** Returns whether `block` has returned. */
   private[uring] def hasEnded: Boolean = synchronized(ended)
 
-  /** Writes `value` into `into` unless the op was cancelled, atomically with respect to `interrupt`, so nothing is
+  /** Writes `value` into `into` unless this op was cancelled. It is atomic with respect to `interrupt`, so nothing is
     * written into the caller's slot after a cancel.
+    *
+    * @tparam A
+    *   the type of the result
+    * @param into
+    *   the caller's slot
+    * @param value
+    *   the result to write
     */
   protected final def publish[A <: AnyRef](into: Slot[A], value: A): Unit = synchronized {
     if !cancelled then {
@@ -253,8 +338,8 @@ sealed abstract class UringBlockingOp extends UringOp {
     }
   }
 
-  /** Waits until `block` has returned. Used by the reactor's `close`, which may not return while a pool thread still
-    * uses the caller's memory.
+  /** Waits until `block` has returned. The reactor's `close` uses it, because it may not return while a pool thread
+    * still uses the caller's memory.
     */
   private[uring] def awaitEnd(): Unit = {
     var interrupted = false
@@ -276,7 +361,13 @@ object UringBlockingOp {
     case TooLate, Interrupted, NotRunning
   }
 
-  /** Runs `op` on `pool`, settling it with its outcome unless it was cancelled before it started. */
+  /** Runs `op` on `pool`, settling it with its outcome unless it was cancelled before it started.
+    *
+    * @param op
+    *   the op to run
+    * @param pool
+    *   the pool whose thread runs it
+    */
   private[uring] def run(op: UringBlockingOp, pool: BlockingPool): Unit =
     pool.execute { () =>
       if op.begin() then {

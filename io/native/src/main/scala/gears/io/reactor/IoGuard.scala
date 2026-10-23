@@ -11,7 +11,15 @@ final class IoGuard:
   private val inFlight = mutable.ArrayBuffer.empty[IoGuard.Registration]
   private var closeHandle: (() => Unit) | Null = null
 
-  /** Registers an op with its cancel action and runs `submit`, or returns null if the guard is already closed. */
+  /** Registers an op with its cancel action and runs `submit`.
+    *
+    * @param cancel
+    *   cancels the op, for `close`
+    * @param submit
+    *   submits the op, given its registration
+    * @return
+    *   the registration, or null if this guard is already closed
+    */
   def submit(cancel: () => Unit)(submit: IoGuard.Registration => Unit): IoGuard.Registration | Null = synchronized:
     if closed then null
     else
@@ -24,7 +32,11 @@ final class IoGuard:
           throw t
       registration
 
-  /** The op has finished. If the guard is closed and this was the last op, the deferred close runs now. */
+  /** Records that an op has finished. If this guard is closed and this was the last op, the deferred close runs now.
+    *
+    * @param registration
+    *   what `submit` returned for the op
+    */
   def release(registration: IoGuard.Registration): Unit =
     val action = synchronized:
       inFlight -= registration
@@ -36,15 +48,27 @@ final class IoGuard:
     // Outside the lock: the action closes the descriptor and may run other callbacks.
     if action != null then action()
 
+  /** Returns whether this guard is closed. */
   def isClosed: Boolean = synchronized(closed)
 
-  /** Runs `body` if the guard is open, else throws `ClosedChannelException`. */
+  /** Runs `body` if this guard is open, else throws `ClosedChannelException`.
+    *
+    * @tparam A
+    *   the result type
+    * @param body
+    *   what to run
+    * @return
+    *   the result of `body`
+    */
   def whileOpen[A](body: => A): A = synchronized:
     if closed then throw java.nio.channels.ClosedChannelException()
     body
 
-  /** Closes the guard: runs `releaseHandle` now if no op is in flight, else cancels them all and runs it after the last
-    * has finished. Closing twice does nothing.
+  /** Closes this guard: runs `releaseHandle` now if no op is in flight, else cancels them all and runs it after the
+    * last has finished. Closing twice does nothing.
+    *
+    * @param releaseHandle
+    *   closes the handle
     */
   def close(releaseHandle: => Unit): Unit = close((), releaseHandle)
 

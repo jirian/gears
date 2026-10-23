@@ -51,6 +51,7 @@ private def runTlsServer(port: Int)(using Async, TcpSupport, AsyncOperations): U
 
   serverConfig.serve(listener)
 
+/** Runs a long-running HTTPS server on port 8443. */
 def httpsServer(): Unit =
   val port = 8443
   if LinktimeInfo.isLinux then

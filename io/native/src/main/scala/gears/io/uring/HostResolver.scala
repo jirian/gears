@@ -6,7 +6,11 @@ import gears.io.unsafe.PosixResolver
 /** Looks up host names for `Ops.resolve`. It is called on a `BlockingPool` thread, so it may block. */
 trait HostResolver {
 
-  /** The numeric addresses of `host`, or an error message. */
+  /** Returns the numeric addresses of `host`, or an error message.
+    *
+    * @param host
+    *   the name to look up
+    */
   def resolve(host: String): Either[String, List[ResolvedAddress]]
 }
 

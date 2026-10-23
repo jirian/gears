@@ -14,7 +14,7 @@ abstract class TcpStream extends Reader, Writer, Closeable:
   def localAddress: SocketAddress
   def remoteAddress: SocketAddress
 
-  /** Half-closes the stream: the peer reads end of stream, and this side can still read. */
+  /** Half-closes this stream: the peer reads end of stream, and this side can still read. */
   def shutdownOutput()(using Async): Unit
 
   /** Stops reading: a pending or later read returns end of stream. */
@@ -53,13 +53,26 @@ object TcpSupport:
 
 /** A bound datagram socket, IP or Unix. */
 abstract class UdpSocket extends Closeable:
+
+  /** Returns the address this socket is bound to. */
   def localAddress: SocketAddress
 
-  /** Sends the remaining bytes of `buf` as one datagram to `target`. */
+  /** Sends the remaining bytes of `buf` as one datagram.
+    *
+    * @param buf
+    *   the datagram
+    * @param target
+    *   where to send it
+    */
   def sendTo(buf: Buffer, target: SocketAddress)(using Async): Result[Unit]
 
-  /** Receives one datagram into `buf`, advancing its position by the datagram's size, and returns its sender. A
-    * datagram larger than the room in `buf` is truncated.
+  /** Receives one datagram into `buf`, advancing its position by the datagram's size. A datagram larger than the room
+    * in `buf` is truncated.
+    *
+    * @param buf
+    *   where to put the datagram, which must be writable
+    * @return
+    *   the datagram's sender
     */
   def receiveFrom(buf: Buffer)(using Async): Result[SocketAddress]
 
@@ -67,11 +80,26 @@ abstract class UdpSocket extends Closeable:
 trait UdpSupport:
   type Socket <: UdpSocket
 
+  /** Opens a datagram socket bound to `address`.
+    *
+    * @param address
+    *   the local address; port 0 picks a free port
+    * @param options
+    *   the options to set before binding
+    */
   def bind(address: SocketAddress, options: Seq[SocketOption])(using
       Async
   ): Result[Socket]
 
 object UdpSupport:
+
+  /** Opens a datagram socket bound to `address` with the given `UdpSupport`.
+    *
+    * @param address
+    *   the local address; port 0 picks a free port
+    * @param options
+    *   the options to set before binding
+    */
   def bind(address: SocketAddress, options: SocketOption*)(using
       udp: UdpSupport,
       async: Async
@@ -84,25 +112,68 @@ trait TlsContext extends java.io.Closeable
 /** TLS over existing TCP streams. */
 trait TlsSupport:
 
-  /** A client configuration; `verify` checks the server's certificate against the system store and `caFile`. */
+  /** Returns a client configuration.
+    *
+    * @param verify
+    *   whether to check the server's certificate against the system store and `caFile`
+    * @param caFile
+    *   a PEM file of extra trusted certificates
+    */
   def clientContext(verify: Boolean = true, caFile: Option[String] = None): TlsContext
 
-  /** A server configuration from PEM files. */
+  /** Returns a server configuration from PEM files.
+    *
+    * @param certFile
+    *   the certificate chain
+    * @param keyFile
+    *   the private key of its first certificate
+    */
   def serverContext(certFile: String, keyFile: String): TlsContext
 
-  /** Runs a client handshake on `stream` for `serverName` and returns the encrypted stream. */
+  /** Runs a client handshake on `stream`.
+    *
+    * @param stream
+    *   the connection to secure
+    * @param context
+    *   a client configuration
+    * @param serverName
+    *   the name the server's certificate must match
+    * @return
+    *   the encrypted stream
+    */
   def wrapClient(stream: TcpStream, context: TlsContext, serverName: String)(using Async): TcpStream
 
-  /** Runs a server handshake on `stream` and returns the encrypted stream. */
+  /** Runs a server handshake on `stream`.
+    *
+    * @param stream
+    *   the accepted connection to secure
+    * @param context
+    *   a server configuration
+    * @return
+    *   the encrypted stream
+    */
   def wrapServer(stream: TcpStream, context: TlsContext)(using Async): TcpStream
 
 /** Host name lookup that suspends the caller instead of blocking its thread. */
 trait DnsSupport:
 
-  /** The addresses of `host`; throws `UnknownHostException` if there are none. */
+  /** Returns the addresses of `host`.
+    *
+    * @param host
+    *   a host name or a numeric address
+    * @throws java.net.UnknownHostException
+    *   if there are none
+    */
   def resolve(host: String)(using Async): Array[java.net.InetAddress]
 
 object DnsSupport:
+  /** Returns the addresses of `host`, looked up with the given `DnsSupport`.
+    *
+    * @param host
+    *   a host name or a numeric address
+    * @throws java.net.UnknownHostException
+    *   if there are none
+    */
   def resolve(host: String)(using dns: DnsSupport, async: Async): Array[java.net.InetAddress] =
     dns.resolve(host)
 

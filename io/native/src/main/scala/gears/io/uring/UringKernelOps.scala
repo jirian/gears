@@ -31,12 +31,28 @@ private[uring] object Ring {
   /** The offset that makes a read or write use and advance the file position, like `read(2)` and `write(2)`. */
   val currentPosition: __u64 = (-1L).toULong
 
-  /** Whether a negative result only means "try again". */
+  /** Returns whether a negative result only means "try again".
+    *
+    * @param res
+    *   the result of a submission
+    */
   def transient(res: Int): Boolean = res == -errno.EINTR || res == -errno.EAGAIN
 
+  /** Returns the exception for a failed submission.
+    *
+    * @param what
+    *   what failed, which starts the message
+    * @param res
+    *   the submission's result, a negated `errno`
+    */
   def failure(what: String, res: Int): IOException =
     new IOException(s"$what: ${fromCString(string.strerror(-res))}")
 
+  /** Returns the poll events that `interest` waits for.
+    *
+    * @param interest
+    *   reading or writing
+    */
   def pollMask(interest: Interest): CUnsignedInt =
     (if interest == Interest.Read then POLLIN else POLLOUT).toUInt
 }
@@ -67,7 +83,7 @@ private[uring] final class BufferRegion(buf: ByteBuffer) {
   def validateFill(): Unit =
     require(!buf.isReadOnly, "Read buffers must be writable")
 
-  /** Where the kernel should write the buffer's remaining bytes. */
+  /** Returns where the kernel should write this buffer's remaining bytes. */
   def toFill(): Ptr[Byte] = {
     validateFill()
     val direct = inPlace()
@@ -75,7 +91,7 @@ private[uring] final class BufferRegion(buf: ByteBuffer) {
     if copied then scratchOf(buf.remaining()) else direct.asInstanceOf[Ptr[Byte]]
   }
 
-  /** Where the kernel should read the buffer's remaining bytes from, copying them first if needed. */
+  /** Returns where the kernel should read this buffer's remaining bytes from, copying them first if needed. */
   def toDrain(): Ptr[Byte] = {
     val direct = inPlace()
     copied = direct == null && buf.remaining() > 0
@@ -86,11 +102,19 @@ private[uring] final class BufferRegion(buf: ByteBuffer) {
     } else direct.asInstanceOf[Ptr[Byte]]
   }
 
-  /** Accounts for `n` bytes the kernel wrote: copies them out of scratch if used, and advances the position. */
+  /** Accounts for bytes the kernel wrote: copies them out of scratch if it was used, and advances the position.
+    *
+    * @param n
+    *   the number of bytes written
+    */
   def filled(n: Int): Unit =
     if copied then buf.put(scratch.nn, 0, n) else buf.position(buf.position() + n)
 
-  /** Accounts for `n` bytes the kernel consumed. */
+  /** Accounts for bytes the kernel consumed by advancing the position.
+    *
+    * @param n
+    *   the number of bytes consumed
+    */
   def drained(n: Int): Unit = buf.position(buf.position() + n)
 }
 
@@ -101,7 +125,13 @@ private[uring] final class VectorBufferRegion(bufs: Array[ByteBuffer]) {
   private val regions = bufs.map(new BufferRegion(_))
   private var filling = false
 
-  /** Fills in the `iovec`s for a read (`fill`) or a write, and returns them. */
+  /** Fills in the `iovec`s for a read or a write.
+    *
+    * @param fill
+    *   true for a read, which fills the buffers, false for a write, which drains them
+    * @return
+    *   the first `iovec`
+    */
   def prepare(fill: Boolean): Ptr[iovec] =
     filling = fill
     val base = vectors.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[iovec]]
@@ -113,7 +143,11 @@ private[uring] final class VectorBufferRegion(bufs: Array[ByteBuffer]) {
       i += 1
     base
 
-  /** Spreads `count` transferred bytes over the buffers in order. */
+  /** Spreads transferred bytes over the buffers in order.
+    *
+    * @param count
+    *   the number of bytes transferred
+    */
   def advance(count: Int): Unit =
     var left = count
     var i = 0
@@ -133,9 +167,18 @@ private[uring] final class MessageHeader {
   private val vector = new Array[Byte](sizeof[iovec].toInt)
   val name: Array[Byte] = SocketAddresses.storage()
 
+  /** Returns the `msghdr` to hand to the kernel. */
   def msg: Ptr[msghdr] = header.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[msghdr]]
 
-  /** Points the header at one data range, with an address of `nameLength` bytes in `name`, or none if 0. */
+  /** Points this header at one data range.
+    *
+    * @param data
+    *   the start of the range
+    * @param length
+    *   the size of the range in bytes
+    * @param nameLength
+    *   the size of the address in `name`, or 0 for none
+    */
   def set(data: Ptr[Byte], length: Int, nameLength: Int): Unit = {
     val iov = vector.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[iovec]]
     iov.iov_base = data
@@ -143,7 +186,15 @@ private[uring] final class MessageHeader {
     setIovecs(iov, 1, nameLength)
   }
 
-  /** Points the header at `count` existing `iovec`s. */
+  /** Points this header at existing `iovec`s.
+    *
+    * @param iov
+    *   the first `iovec`
+    * @param count
+    *   the number of `iovec`s
+    * @param nameLength
+    *   the size of the address in `name`, or 0 for none
+    */
   def setIovecs(iov: Ptr[iovec], count: Int, nameLength: Int): Unit = {
     val m = uringStructOps.msghdrOps(msg)
     m.msg_name = if nameLength > 0 then SocketAddresses.pointer(name).asInstanceOf[Ptr[Byte]] else null

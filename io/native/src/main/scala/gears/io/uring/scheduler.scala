@@ -72,7 +72,11 @@ class UringPerThreadScheduler(
   private def currentShard = UringShard.current().filter(_.scheduler eq this)
   private def pickShard(): UringShard = shards(Math.floorMod(nextShard.getAndIncrement(), shards.length))
 
-  /** Runs `body` on the current shard, or from any other thread, on the next free shard via the global queue. */
+  /** Runs `body` on the current shard, or, from any other thread, on the next free shard through the global queue.
+    *
+    * @param body
+    *   the task to run
+    */
   override def execute(body: Runnable): Unit =
     currentShard match
       case Some(shard) => shard.execute(body, calledFromOwnThread = true)
@@ -89,8 +93,13 @@ class UringPerThreadScheduler(
       sharedJobs.offer(job)
       pickShard().wake()
 
-  /** Runs the op `build` makes and waits for it. On a shard of this scheduler, the op goes into that shard's ring;
+  /** Runs the op that `build` makes and waits for it. On a shard of this scheduler, the op goes into that shard's ring;
     * otherwise it becomes a shared job that the next free shard starts.
+    *
+    * @param guard
+    *   the guard of the handle the op uses, which cancels the op when it closes, or null
+    * @param build
+    *   builds the op on the reactor that will run it
     */
   override def await(guard: IoGuard | Null)(build: (r: UringReactor) => r.Op)(using Async): Unit =
     if closed then throw closedError()
@@ -109,15 +118,34 @@ class UringPerThreadScheduler(
             submitShared(job)
     ReactorDriver.waitFor(pending)
 
-  /** Opens with `IORING_OP_OPENAT` instead of a pool thread, always adding `O_CLOEXEC`. */
+  /** Opens `path` with `IORING_OP_OPENAT` instead of a pool thread, always adding `O_CLOEXEC`.
+    *
+    * @param path
+    *   the file to open
+    * @param flags
+    *   the `open(2)` flags
+    * @param mode
+    *   the permissions of a file that `O_CREAT` creates
+    * @return
+    *   the new descriptor
+    */
   override def openFile(path: String, flags: Int, mode: Int)(using Async): Int =
     val closeOnExec = gears.io.uring.LinuxConstants.O_CLOEXEC
     awaitHandle(null)((r, opened) => r.ops.openAt(path, flags | closeOnExec, mode, opened))
 
-  /** io_uring takes heap buffers in place. */
+  /** Returns true: io_uring takes heap buffers in place. */
   override def acceptsHeapBuffers: Boolean = true
 
-  /** File I/O goes through the ring too, not through the blocking pool. */
+  /** Reads from a file at its position through the ring, not through the blocking pool. So do the other file methods
+    * here.
+    *
+    * @param guard
+    *   the file's guard, or null
+    * @param fd
+    *   the file to read from
+    * @param buf
+    *   the buffer to fill
+    */
   override def readFile(guard: IoGuard | Null, fd: Int, buf: ByteBuffer)(using Async): Unit =
     await(guard)(r => r.ops.read(fd, buf))
 
@@ -128,7 +156,15 @@ class UringPerThreadScheduler(
   override def writeAt(guard: IoGuard, fd: Int, buf: ByteBuffer, offset: Long)(using Async): Unit =
     await(guard)(r => r.ops.writeAt(fd, buf, offset))
 
-  /** Runs `body` after `delay`, using a ring timer on the current shard or on the next free one. */
+  /** Runs `body` after `delay`, using a ring timer on the current shard or on the next free one.
+    *
+    * @param delay
+    *   how long to wait
+    * @param body
+    *   the task to run
+    * @return
+    *   what cancels the timer
+    */
   override def schedule(delay: FiniteDuration, body: Runnable): Cancellable =
     if closed then throw closedError()
     def start(shard: UringShard): () => Unit =
@@ -171,7 +207,11 @@ class UringPerThreadScheduler(
     if cause == null then IllegalStateException("The scheduler is closed")
     else IllegalStateException("The scheduler stopped after a fatal error on one of its shards", cause)
 
-  /** Called by a shard that hit a fatal error: closes the scheduler, and later calls fail with `cause`. */
+  /** Closes this scheduler after a shard hit a fatal error. Later calls fail with `cause`.
+    *
+    * @param cause
+    *   the shard's error
+    */
   private[uring] def failed(cause: Throwable): Unit =
     synchronized:
       if failure == null && !closed then failure = cause
@@ -199,10 +239,16 @@ class UringPerThreadScheduler(
         UringShard.afterClose(task)
         task = globalQueue.poll()
 
-  /** TCP, UDP, files and DNS on this scheduler. Fibers on any runtime may use them; see `await`. */
+  /** Returns TCP and Unix stream sockets on this scheduler. Fibers on any runtime may use them; see `await`. */
   def tcpSupport = new ReactorTcpSupport(this) {}
+
+  /** Returns UDP and Unix datagram sockets on this scheduler. */
   def udpSupport = new ReactorUdpSupport(this) {}
+
+  /** Returns file I/O on this scheduler. */
   def fileSupport = new ReactorFileSupport(this) {}
+
+  /** Returns host name resolution on this scheduler. */
   def dnsSupport = new ReactorDnsSupport(this) {}
 
 /** The io_uring runtime for gears: a `UringPerThreadScheduler` that is also the `AsyncSupport` and `AsyncOperations`
@@ -228,7 +274,11 @@ class UringPerThreadSupport(
     with native.NativeSuspend:
   type Scheduler = this.type
 
-  /** Sleeps on a ring timer, so a sleeping fiber doesn't hold a thread. */
+  /** Sleeps on a ring timer, so a sleeping fiber doesn't hold a thread.
+    *
+    * @param millis
+    *   how long to sleep, in milliseconds
+    */
   override def sleep(millis: Long)(using Async): Unit =
     require(millis >= 0, "sleep duration must be nonnegative")
     await(null)(r => r.ops.timer(millis.millis))

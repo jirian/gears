@@ -4,6 +4,7 @@ import gears.async._
 import gears.io.net.DnsSupport
 import gears.io.uring.UringPerThreadSupport
 
+/** Runs the example of host name resolution that does not block a shard. */
 def dnsExample(): Unit = withUring:
   given dns: DnsSupport = summon[UringPerThreadSupport].dnsSupport
 

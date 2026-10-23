@@ -22,6 +22,7 @@ private def runServer(port: Int, backendName: String)(using Async, TcpSupport, A
   println(s"listening on http://127.0.0.1:$port ($backendName)")
   serve(listener, demoRouter())
 
+/** Runs a long-running HTTP server on port 8080. */
 def httpServer(): Unit =
   val port = 8080
   if LinktimeInfo.isLinux then

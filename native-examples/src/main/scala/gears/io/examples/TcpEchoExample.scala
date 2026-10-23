@@ -7,6 +7,7 @@ import gears.io.net.{SocketOption, TcpSupport}
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 
+/** Runs the example of TCP listen, accept, connect, socket options and half-close. */
 def tcpEchoExample(): Unit = withUring:
   given TcpSupport = summon[gears.io.uring.UringPerThreadSupport].tcpSupport
   Async.blocking:

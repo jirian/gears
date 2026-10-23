@@ -11,6 +11,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
 
+/** Runs the example of streamed uploads, chunked responses and path parameters. */
 def httpStreamingExample(): Unit = withUring:
   val support = summon[UringPerThreadSupport]
   given TcpSupport = support.tcpSupport

@@ -27,8 +27,12 @@ final class BlockingPool(
     worker.start()
   }
 
-  /** Queues `task`. Throws `RejectedExecutionException` once closed, or if a bounded queue is full. A task that throws
-    * is ignored: blocking ops catch their own failures.
+  /** Queues `task`. A task that throws is ignored, since blocking ops catch their own failures.
+    *
+    * @param task
+    *   the task to run on a pool thread
+    * @throws java.util.concurrent.RejectedExecutionException
+    *   once this pool is closed, or if a bounded queue is full
     */
   def execute(task: Runnable): Unit = lifecycleLock.synchronized {
     if !accepting.get() || !queue.offer(task) then

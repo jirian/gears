@@ -11,8 +11,19 @@ import scala.util.Success
 
 private[http] object Bodies:
 
-  /** Like `timed`, but if `body` produced a value and the caller is cancelled or times out before it receives it, the
-    * value is disposed of instead of leaking, such as a connection opened just as the timeout fired.
+  /** Runs `body` like `timed`, but disposes of its value instead of leaking it if the caller is cancelled or times out
+    * before receiving it, such as a connection opened just as the timeout fired.
+    *
+    * @tparam A
+    *   the result type
+    * @param timeout
+    *   the time limit, or `None` for none
+    * @param dispose
+    *   releases a value that never reached the caller; it closes it by default
+    * @param body
+    *   produces the value
+    * @return
+    *   the value of `body`
     */
   def timedOwned[A <: Closeable](
       timeout: Option[FiniteDuration],
@@ -31,7 +42,11 @@ private[http] object Bodies:
       val remaining = owned.getAndSet(null)
       if remaining != null then dispose(remaining.nn)
 
-  /** A reader over `data`. */
+  /** Returns a reader over `data`.
+    *
+    * @param data
+    *   the bytes to read
+    */
   def bytes(data: Array[Byte]): Reader = new Reader:
     private val input = ByteBuffer.wrap(data)
     def readBuf(out: ByteBuffer)(using Async): Result[Unit] =
@@ -45,7 +60,13 @@ private[http] object Bodies:
         input.position(input.position() + n)
         Right(())
 
-  /** Reads `reader` to its end. */
+  /** Reads `reader` to its end.
+    *
+    * @param reader
+    *   the reader to drain
+    * @return
+    *   everything it read
+    */
   def collect(reader: Reader)(using Async): Array[Byte] =
     val out = ByteArrayOutputStream()
     val buf = ByteBuffer.allocate(8192)
@@ -59,7 +80,19 @@ private[http] object Bodies:
           out.write(buf.array(), 0, buf.position())
     out.toByteArray
 
-  /** Runs `body`, failing with `TimeoutException` if it takes longer than `timeout`. */
+  /** Runs `body`, failing with `TimeoutException` if it takes longer than `timeout`.
+    *
+    * @tparam A
+    *   the result type
+    * @param timeout
+    *   the time limit, or `None` for none
+    * @param armed
+    *   receives the timer once it is set, so the caller can cancel it early
+    * @param body
+    *   what to run
+    * @return
+    *   the value of `body`
+    */
   def timed[A](timeout: Option[FiniteDuration], armed: Cancellable => Unit = _ => ())(
       body: Async ?=> A
   )(using Async): A = timeout match
@@ -164,20 +197,28 @@ final class ResponseBody private[http] (
           awaitUpload
           throw t
 
-  /** Reads the rest of the body. */
+  /** Reads the rest of this body.
+    *
+    * @return
+    *   the bytes not read yet
+    */
   def readAll()(using Async): Array[Byte] = Bodies.collect(this)
 
-  /** Stops reading. The connection is reused only if the body was complete. */
+  /** Stops reading. The connection is reused only if this body was complete. */
   def close(): Unit = release(decoder.complete)
 
-  /** Like `close`, and also stops a request body that is still uploading and waits for it to end. */
+  /** Closes this body like `close`, and also stops a request body that is still uploading and waits for it to end. */
   def finish()(using Async): Unit =
     close()
     awaitUpload
 
 /** A client response whose body is read as it arrives. Close or finish it to release the connection. */
 final case class StreamingResponse(status: HttpStatus, headers: Headers, body: ResponseBody) extends Closeable:
+
+  /** Closes the body; see [[ResponseBody.close]]. */
   def close(): Unit = body.close()
+
+  /** Finishes the body; see [[ResponseBody.finish]]. */
   def finish()(using Async): Unit = body.finish()
 
 /** A client request whose body is streamed from `body`: with `Content-Length` if `contentLength` is given, chunked

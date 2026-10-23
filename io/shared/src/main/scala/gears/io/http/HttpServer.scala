@@ -42,11 +42,18 @@ final case class Server(
   require(maxConnections > 0 && maxBodySize >= 0)
   private[http] val lifecycle = ServerLifecycle(maxConnections)
 
-  /** Serves connections from `listener` until it closes or the server shuts down. */
+  /** Serves connections from `listener` until it closes or this server shuts down.
+    *
+    * @param listener
+    *   where connections come from
+    */
   def serve(listener: TcpListener)(using Async, AsyncOperations): Unit = gears.io.http.serve(listener, this)
 
   /** Stops accepting, ends idle connections, and lets requests in progress finish for up to `grace`; then closes the
     * rest.
+    *
+    * @param grace
+    *   how long requests in progress may take to finish
     */
   def shutdown(grace: FiniteDuration)(using Async): Unit =
     require(grace.toNanos >= 0, "shutdown grace must be nonnegative")
@@ -57,12 +64,23 @@ final case class Server(
   /** Closes the listener and every connection at once. */
   def close(): Unit = lifecycle.stopNow()
 
-/** Serves `handler` on `listener` with the default configuration, until the listener closes. */
+/** Serves `handler` on `listener` with the default configuration, until the listener closes.
+  *
+  * @param listener
+  *   where connections come from
+  * @param handler
+  *   serves the requests
+  */
 def serve(listener: TcpListener, handler: Handler)(using Async, AsyncOperations): Unit =
   serve(listener, Server(handler))
 
-/** Serves `server` on `listener`: one fiber per connection, each handling its requests in turn with keep-alive. Returns
-  * once the listener has closed and every connection has finished.
+/** Serves `server` on `listener`: one fiber per connection, each handling its requests in turn with keep-alive. It
+  * returns once the listener has closed and every connection has finished.
+  *
+  * @param listener
+  *   where connections come from
+  * @param server
+  *   the handler and configuration
   */
 def serve(listener: TcpListener, server: Server)(using Async, AsyncOperations): Unit =
   server.lifecycle.start(listener)

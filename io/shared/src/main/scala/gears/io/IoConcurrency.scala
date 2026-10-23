@@ -15,11 +15,31 @@ private[io] final class IoConcurrency:
   private val readPending = AtomicBoolean(false)
   private val writes = Semaphore(1)
 
+  /** Runs the read `body`, unless another read is pending.
+    *
+    * @tparam A
+    *   the result type
+    * @param body
+    *   the read
+    * @return
+    *   the result of `body`
+    * @throws ConcurrentReadException
+    *   if another read is pending
+    */
   def reading[A](body: => A): A =
     if !readPending.compareAndSet(false, true) then throw ConcurrentReadException()
     try body
     finally readPending.set(false)
 
+  /** Runs the write `body` after the writes queued before it.
+    *
+    * @tparam A
+    *   the result type
+    * @param body
+    *   the write
+    * @return
+    *   the result of `body`
+    */
   def writing[A](body: => A)(using Async): A =
     val permit = writes.acquire()
     try body

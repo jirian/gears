@@ -42,7 +42,13 @@ private[uring] final class UringShard(
 
   private val MaxSharedJobsPerTurn = 64
 
-  /** Queues a fiber task. A task from another thread also wakes the loop. */
+  /** Queues a fiber task. A task from another thread also wakes the loop.
+    *
+    * @param body
+    *   the task
+    * @param calledFromOwnThread
+    *   whether the caller is this shard's thread, which needs no wake-up
+    */
   private[uring] def execute(body: Runnable, calledFromOwnThread: Boolean): Unit =
     taskQueue.offer(body)
     if !calledFromOwnThread then wake()
@@ -53,7 +59,11 @@ private[uring] final class UringShard(
     case t: UringShardThread => t.shard eq this
     case _                   => false
 
-  /** Runs `body` on this shard's thread, the only one that may use its reactor: now if already there, else next turn.
+  /** Runs `body` on this shard's thread, the only one that may use its reactor: now if already there, else in the next
+    * turn.
+    *
+    * @param body
+    *   what to run
     */
   private[uring] def onLoop(body: => Unit): Unit =
     if isCurrent then body
@@ -73,7 +83,11 @@ private[uring] final class UringShard(
       r = loopQueue.poll()
     ran
 
-  /** Starts up to 64 ops submitted from outside the scheduler, so a burst of them cannot starve this shard's fibers. */
+  /** Starts up to 64 ops submitted from outside the scheduler, so a burst of them cannot starve this shard's fibers.
+    *
+    * @return
+    *   whether any job ran
+    */
   private def drainSharedJobs(): Boolean =
     var taken = 0
     var job = sharedJobs.poll()
@@ -90,7 +104,12 @@ private[uring] final class UringShard(
     val thread = Thread.currentThread()
     thread.getUncaughtExceptionHandler().uncaughtException(thread, e)
 
-  /** Runs one task. `Continuations.handlersReset` clears continuation state a task may leave behind on this thread. */
+  /** Runs one task. `Continuations.handlersReset` clears continuation state that a task may leave behind on this
+    * thread.
+    *
+    * @param task
+    *   the task to run
+    */
   private def runTask(task: Runnable): Unit =
     Continuations.handlersReset()
     try busy(task.run())
@@ -152,8 +171,8 @@ private[uring] final class UringShard(
     running = false
     wake()
 
-  /** The thread's body. A fatal error stops the whole scheduler, so its fibers fail instead of hanging. On the way out
-    * it closes the reactor and hands its leftover tasks to `afterClose`.
+  /** Runs this shard's thread. A fatal error stops the whole scheduler, so its fibers fail instead of hanging. On the
+    * way out it closes the reactor and hands its leftover tasks to `afterClose`.
     */
   private[uring] def loop(): Unit =
     Continuations.handlersReset()
@@ -189,6 +208,9 @@ private[uring] object UringShard:
 
   /** Runs a task that arrived after its scheduler closed on gears' default runtime, so the fiber it resumes can see the
     * closed scheduler and finish its cleanup.
+    *
+    * @param task
+    *   the task to run
     */
   def afterClose(task: Runnable): Unit = gears.async.default.DefaultSupport.execute(() =>
     Continuations.handlersReset()
@@ -196,7 +218,7 @@ private[uring] object UringShard:
     finally Continuations.handlersReset()
   )
 
-  /** The shard whose thread this is, if any. */
+  /** Returns the shard whose thread this is, if any. */
   def current(): Option[UringShard] = Thread.currentThread() match
     case t: UringShardThread => Some(t.shard)
     case _                   => None

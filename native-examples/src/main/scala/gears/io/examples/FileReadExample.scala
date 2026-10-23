@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
+/** Runs the example of reading a file, directly and buffered. */
 def fileReadExample(): Unit = withUring:
   given fs: FileSupport = summon[UringPerThreadSupport].fileSupport
 

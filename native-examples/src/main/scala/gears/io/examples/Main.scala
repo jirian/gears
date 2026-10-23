@@ -32,6 +32,11 @@ object Main:
     ("https-server", "a long-running HTTPS server on port 8443", httpsServer)
   )
 
+  /** Runs the examples named in `args`, or lists them if `args` is empty or names an unknown one.
+    *
+    * @param args
+    *   the names of the examples to run
+    */
   def main(args: Array[String]): Unit =
     if args.isEmpty || !args.forall(name => examples.exists(_._1 == name)) then
       println("usage: nativeExamples/run <example>...")
@@ -50,26 +55,57 @@ object Main:
 
 private val failures = java.util.concurrent.atomic.AtomicInteger()
 
-/** Prints a check's result and counts failures. */
+/** Prints a check's result and counts a failure.
+  *
+  * @param ok
+  *   whether the check passed
+  * @param what
+  *   what was checked
+  */
 private[examples] def check(ok: Boolean, what: String): Unit =
   println(s"  $what: ${if ok then "ok" else "FAILED"}")
   if !ok then failures.incrementAndGet()
 
+/** Prints a failure and counts it.
+  *
+  * @param message
+  *   what went wrong
+  */
 private[examples] def fail(message: String): Unit =
   println(s"  FAILED: $message")
   failures.incrementAndGet()
 
-/** Runs `body` with a fresh io_uring runtime and closes it afterwards. */
+/** Runs `body` with a fresh io_uring runtime and closes the runtime afterwards.
+  *
+  * @param body
+  *   the example, given the runtime
+  */
 private[examples] def withUring(body: UringPerThreadSupport ?=> Unit): Unit =
   val support = UringPerThreadSupport()
   try body(using support)
   finally support.close()
 
-/** The value of `result`, or an exception naming `what`. */
+/** Returns the value of `result`, or throws an exception naming `what`.
+  *
+  * @tparam E
+  *   the error type
+  * @tparam A
+  *   the value type
+  * @param what
+  *   what produced `result`
+  * @param result
+  *   the outcome to unwrap
+  */
 private[examples] def orFail[E, A](what: String)(result: Either[E, A]): A =
   result.fold(e => throw RuntimeException(s"$what failed: $e"), identity)
 
-/** Reads `reader` to its end as UTF-8. */
+/** Reads `reader` to its end as UTF-8.
+  *
+  * @param reader
+  *   the reader to drain
+  * @return
+  *   everything it read, decoded
+  */
 private[examples] def readToEnd(reader: Reader)(using Async): String =
   val out = java.io.ByteArrayOutputStream()
   val buf = ByteBuffer.allocate(1024)

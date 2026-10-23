@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
+/** Runs the example of writing a file and reading it back. */
 def fileWriteExample(): Unit = withUring:
   given fs: FileSupport = summon[UringPerThreadSupport].fileSupport
 

@@ -23,8 +23,14 @@ import scala.scalanative.unsigned.*
 object SocketAddresses {
   final val storageSize = sizeOf[socket.sockaddr_storage].toInt
 
+  /** Returns zeroed memory large enough for any socket address. */
   def storage(): Array[Byte] = new Array[Byte](storageSize)
 
+  /** Returns `storage` as a pointer to a `sockaddr`.
+    *
+    * @param storage
+    *   memory from `storage()`
+    */
   def pointer(storage: Array[Byte]): Ptr[socket.sockaddr] =
     storage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[socket.sockaddr]]
 
@@ -64,12 +70,29 @@ object SocketAddresses {
       index
     }
 
+  /** Encodes `address` as a `sockaddr` into `storage`.
+    *
+    * @param address
+    *   the address to encode
+    * @param storage
+    *   memory from `storage()`
+    * @return
+    *   the length of the encoded address
+    */
   def encode(address: Address, storage: Array[Byte]): socket.socklen_t =
     withAddress(address) { (addr, length) =>
       string.memcpy(pointer(storage).asInstanceOf[Ptr[Byte]], addr.asInstanceOf[Ptr[Byte]], length.toLong.toCSize)
       length
     }
 
+  /** Returns the `Address` that a kernel `sockaddr` holds. A nonzero IPv6 scope becomes a numeric `%` suffix of the
+    * host.
+    *
+    * @param addr
+    *   the encoded address
+    * @param length
+    *   its length in bytes
+    */
   def decode(addr: Ptr[socket.sockaddr], length: socket.socklen_t): Address = {
     require(length.toLong >= sizeOf[socket.sa_family_t].toLong, s"Short socket address: ${length.toInt} bytes")
     require(length.toLong <= storageSize, s"Oversized socket address: ${length.toInt} bytes")

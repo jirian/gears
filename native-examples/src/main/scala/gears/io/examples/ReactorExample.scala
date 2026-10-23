@@ -6,6 +6,7 @@ import gears.io.uring.UringReactor
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 
+/** Runs the example of the `gears.io.reactor.Reactor` interface used directly: ops, runOnce and wakeup. */
 def reactorExample(): Unit =
   given Reactor.Factory[Reactor] = () => UringReactor.open()
   Reactor.scoped: r =>

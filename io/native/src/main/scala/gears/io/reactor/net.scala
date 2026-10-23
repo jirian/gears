@@ -97,17 +97,25 @@ private[io] def getPeerAddress(fd: Int): SocketAddress =
     throw IOException(s"getpeername returned oversized address: ${(!addrLen).toLong} bytes")
   parseSockAddr(addr, !addrLen)
 
+// An IPv6 scope id, which names the interface of a link-local address, travels as a numeric `%` suffix of the host.
 private[io] def toAddress(address: InetSocketAddress): Address =
   address.getAddress match
     case null             => throw IllegalArgumentException(s"Unresolved address: $address")
-    case a6: Inet6Address => Address.IPv6(a6.getHostAddress.takeWhile(_ != '%'), address.getPort)
-    case a4               => Address.IPv4(a4.getHostAddress, address.getPort)
+    case a6: Inet6Address =>
+      val host = a6.getHostAddress.takeWhile(_ != '%')
+      Address.IPv6(if a6.getScopeId == 0 then host else s"$host%${a6.getScopeId}", address.getPort)
+    case a4 => Address.IPv4(a4.getHostAddress, address.getPort)
 
 private[io] def fromAddress(address: Address): SocketAddress =
   address match
     case Address.IPv4(host, port) => InetSocketAddress(InetAddress.getByName(host), port)
-    case Address.IPv6(host, port) => InetSocketAddress(InetAddress.getByName(host), port)
-    case Address.Unix(path)       => UnixSocketAddress(path)
+    case Address.IPv6(host, port) =>
+      val percent = host.indexOf('%')
+      if percent < 0 then InetSocketAddress(InetAddress.getByName(host), port)
+      else
+        val bytes = InetAddress.getByName(host.substring(0, percent)).getAddress
+        InetSocketAddress(Inet6Address.getByAddress(null, bytes, host.substring(percent + 1).toInt), port)
+    case Address.Unix(path) => UnixSocketAddress(path)
 
 private[io] def toAddress(address: SocketAddress): Address = address match
   case unix: UnixSocketAddress => Address.Unix(unix.path)

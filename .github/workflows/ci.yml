@@ -111,7 +111,7 @@ jobs:
         java-version: 27
     - uses: sbt/setup-sbt@v1
     - name: Test
-      run: sbt 'ioNio/test; ioTestkitJVM/test; ioNioDemos/compile; ioBenchJVM/compile'
+      run: sbt 'ioNio/test; ioTestkitJVM/test; ioNioDemos/compile; ioBenchJVM/compile; ioHttpJVM/test'
     - name: Report failed tests
       if: failure()
       # sbt 2 runs commands through its server, so CI's log shows only which suites failed; the JUnit reports have each
@@ -155,6 +155,47 @@ jobs:
     - name: Test the demos
       if: ${{ !cancelled() }}
       run: sbt 'ioTestkitNative/test; ioDemosTests/test'
+    - name: Report failed tests
+      if: failure()
+      # sbt 2 runs commands through its server, so CI's log shows only which suites failed; the JUnit reports have each
+      # failed test and its failure.
+      run: |
+        find . -path '*/test-reports/*.xml' -print0 | xargs -0 -r awk '
+          /<testsuite / { match($0, / name="[^"]*"/); suite = substr($0, RSTART + 7, RLENGTH - 8) }
+          /<testcase / { match($0, / name="[^"]*"/); test = substr($0, RSTART + 7, RLENGTH - 8) }
+          /<(failure|error)[ >]/ { print "FAILED " suite " > " test; shown = 25 }
+          shown > 0 { print "    " $0; shown--; if ($0 ~ /<\/(failure|error)>/) shown = 0 }'
+    - name: Upload test reports
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-reports-${{ github.job }}
+        path: '**/test-reports/*.xml'
+  # The backend for Linux alone, io_uring, which neither builds nor runs on macOS. ubuntu-latest's kernel is newer than
+  # the 6.0 it needs.
+  test-io-linux:
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+    - uses: coursier/cache-action@v6
+    - uses: actions/setup-java@v3
+      with:
+        distribution: temurin
+        java-version: 27
+    - uses: sbt/setup-sbt@v1
+    - name: Install scala-native dependencies
+      run: sudo apt-get install clang libstdc++-12-dev libgc-dev liburing-dev libssl-dev
+    - name: Test io_uring
+      # Against the Scala Native nightly (see project/plugins.sbt): 0.5.12's String#indexOf(String) gives wrong indices
+      # when a match sits next to a NUL, which the contract's checks of paths and host names with a NUL in them hit.
+      env:
+        SCALA_NATIVE_NIGHTLY: "1"
+      run: sbt 'ioUring/test; ioUringDemos/compile; ioHttpNative/test'
     - name: Report failed tests
       if: failure()
       # sbt 2 runs commands through its server, so CI's log shows only which suites failed; the JUnit reports have each

@@ -46,7 +46,9 @@
               metals
               scalafix
               scalafmt
-            ];
+            ]
+            # The io_uring backend links liburing.
+            ++ lib.optionals stdenv.isLinux [ liburing ];
             shellHook = ''
               export LLVM_BIN=${pkgs.clang}/bin
             '';

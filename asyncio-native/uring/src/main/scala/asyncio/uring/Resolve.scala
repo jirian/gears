@@ -1,0 +1,18 @@
+package asyncio.uring
+
+import java.io.IOException
+
+import asyncio.ResolvedAddress
+import asyncio.Slot
+import asyncio.unsafe.PosixResolver
+
+/** Resolves a host name without blocking the reactor. io_uring has no name resolution, so the lookup runs on the
+  * reactor's blocker pool, the way libuv and tokio do it. Completes after writing the addresses into `into`, or fails
+  * with an `IOException` carrying the resolver's error.
+  */
+final class Resolve(val host: String, into: Slot[List[ResolvedAddress]]) extends UringBlocking {
+  def block(): Unit = PosixResolver.lookup(host) match {
+    case Right(addresses) => publish(into, addresses) // not if cancelled during the lookup
+    case Left(error)      => throw new IOException(s"Failed to resolve $host: $error")
+  }
+}

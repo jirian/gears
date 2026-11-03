@@ -6,6 +6,7 @@ The build uses sbt 2 and Scala 3.9.0 on all platforms. It requires:
 
 - **JDK 21+** to run sbt and use virtual threads on the JVM.
 - **On Scala Native**: Clang/LLVM 16+ and the [Scala Native prerequisites](https://scala-native.org/en/stable/user/setup.html). The build selects Scala Native 0.5.12.
+- **For the io_uring backend and the HTTP library on Scala Native** (Linux): Linux 6.0+, liburing (`liburing-dev`), and OpenSSL 1.1 or 3 (`libssl-dev`) for TLS. The Nix shell (`flake.nix`) and CI install both.
 - **On Scala.js**: Node.js 26+ to run the WebAssembly backend with JSPI. The build selects Scala.js 1.22.0.
 
 All of the needed dependencies can be loaded by the included Nix Flake. If you have `nix` with `flake` enabled, run

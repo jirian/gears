@@ -120,6 +120,61 @@ lazy val ioKqueue =
     )
     .dependsOn(root.native, ioTestkit.native % Test)
 
+// The io_uring backend (Linux 6.0 or later, Scala Native), through liburing, whose `static inline` helpers, and a
+// synchronous cancel, are in a C shim among its native resources. Every program that links it needs liburing.
+lazy val ioUring =
+  (project in file("io-backends/uring"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(
+      ioLibrary("gears-io-uring"),
+      libraryDependencies += munit % Test,
+      testFrameworks += MUnitFramework,
+      // Its tests run reactors on several threads.
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    .dependsOn(root.native, ioTestkit.native % Test)
+
+// The higher level for programs: byte streams over connections, TLS, and an HTTP/1.1 server and client with WebSockets
+// (`gears.io.net`, `gears.io.tls`, `gears.io.http`), written against `gears.async.io` and run on each platform's
+// default backend: NIO on the JVM, io_uring on Scala Native, which also needs OpenSSL for TLS.
+lazy val ioHttp =
+  crossProject(JVMPlatform, NativePlatform)
+    .crossType(CrossType.Full)
+    .in(file("io-http"))
+    .settings(
+      ioLibrary("gears-io-http"),
+      libraryDependencies += munit % Test,
+      testFrameworks += MUnitFramework
+    )
+    .jvmSettings(
+      scalacOptions += "-release:21",
+      Test / fork := true
+    )
+    .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
+    .jvmConfigure(_.dependsOn(ioNio))
+    .nativeConfigure(_.dependsOn(ioUring))
+
+// The HTTP bench's server: gears-io-http serving the routes its Go counterpart serves, for a load generator to measure
+// against both (`ioHttpBenchNative/nativeLink`, `ioHttpBenchJVM/run <port> [caller|reactors]`).
+lazy val ioHttpBench =
+  crossProject(JVMPlatform, NativePlatform)
+    .crossType(CrossType.Full)
+    .in(file("bench/http-bench"))
+    .settings(
+      publish / skip := true,
+      Compile / mainClass := Some("httpbench.Main")
+    )
+    .jvmSettings(
+      run / fork := true,
+      run / javaOptions ++= Seq(
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+        "--add-opens=java.base/jdk.internal.vm=ALL-UNNAMED"
+      )
+    )
+    .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
+    .jvmConfigure(_.dependsOn(ioHttp.jvm))
+    .nativeConfigure(_.dependsOn(ioHttp.native))
+
 // The JVM's backends: NIO selectors over the JDK's selectable channels, and threads for what the JDK can only block
 // on (`NioBackend`), or each op on the calling thread (`NioOnCaller`).
 lazy val ioNio =
@@ -152,6 +207,20 @@ lazy val ioKqueueDemos =
       nativeConfig ~= { _.withMultithreading(true) }
     )
     .dependsOn(ioKqueue, ioTestkit.native)
+
+// io_uring's demo application: the testkit's gears demos over io_uring, as `ioUringDemos/run <command>`, and the gears
+// bench (`GearsBench`, from bench/io-bench) over it, as `ioUringDemos/run bench` (see docs/io/bench.md).
+lazy val ioUringDemos =
+  (project in file("io-backends/uring/demos"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(
+      publish / skip := true,
+      Compile / mainClass := Some("uringdemos.UringDemos"),
+      Compile / unmanagedSourceDirectories += (ThisBuild / baseDirectory).value / "bench/io-bench/shared/src/main/scala",
+      // The gears demos run futures on a pool of worker threads.
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    .dependsOn(ioUring, ioTestkit.native)
 
 // NIO's demo application: the testkit's gears demos over NIO's backends, `NioOnCaller` (`--backend caller`, the
 // default) and `NioBackend` (`reactors`), as `ioNioDemos/run <command>`.

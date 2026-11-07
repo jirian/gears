@@ -118,3 +118,18 @@ lazy val ioReferenceDemos =
       run / fork := true
     )
     .dependsOn(ioReference, ioTestkit.jvm)
+
+// NIO on the calling thread (`NioOnCaller`): the reference backend's ops with a faster way of waiting, retries and a
+// selector per handle, which needs no JDK flags. The JVM's default backend.
+lazy val ioNio =
+  (project in file("io-backends/nio"))
+    .settings(
+      name := "gears-io-nio",
+      publish / skip := false,
+      versionScheme := Some("early-semver"),
+      scalacOptions += "-release:21",
+      libraryDependencies += munit % Test,
+      testFrameworks += MUnitFramework,
+      Test / fork := true
+    )
+    .dependsOn(root.jvm, ioTestkit.jvm % Test)

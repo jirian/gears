@@ -169,3 +169,25 @@ lazy val ioNio =
       Test / fork := true
     )
     .dependsOn(root.jvm, ioTestkit.jvm % Test)
+
+// The higher level for programs: byte streams over connections, TLS, and an HTTP/1.1 server and client with WebSockets
+// (`gears.io.net`, `gears.io.tls`, `gears.io.http`), written against `gears.async.io` and run on each platform's
+// default backend: NIO (`NioOnCaller`) on the JVM, io_uring on Scala Native, which also needs OpenSSL for TLS.
+lazy val ioHttp =
+  crossProject(JVMPlatform, NativePlatform)
+    .crossType(CrossType.Full)
+    .in(file("io-http"))
+    .settings(
+      name := "gears-io-http",
+      publish / skip := false,
+      versionScheme := Some("early-semver"),
+      libraryDependencies += munit % Test,
+      testFrameworks += MUnitFramework
+    )
+    .jvmSettings(
+      scalacOptions += "-release:21",
+      Test / fork := true
+    )
+    .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
+    .jvmConfigure(_.dependsOn(ioNio))
+    .nativeConfigure(_.dependsOn(ioUring))

@@ -40,13 +40,17 @@
               boehmgc
               libunwind
               zlib
+              # gears-io-http's TLS on Scala Native links OpenSSL.
+              openssl
               # Scala.js deps
               nodejs_26
               # Dev deps
               metals
               scalafix
               scalafmt
-            ];
+            ]
+            # The io_uring backend links liburing.
+            ++ lib.optionals stdenv.isLinux [ liburing ];
             shellHook = ''
               export LLVM_BIN=${pkgs.clang}/bin
             '';

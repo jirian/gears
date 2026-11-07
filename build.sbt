@@ -191,3 +191,44 @@ lazy val ioHttp =
     .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
     .jvmConfigure(_.dependsOn(ioNio))
     .nativeConfigure(_.dependsOn(ioUring))
+
+// io_uring's demo application: the testkit's gears demos over io_uring, as `ioUringDemos/run <command>`, and the gears
+// bench (`GearsBench`, from bench/io-bench) over it, as `ioUringDemos/run bench`.
+lazy val ioUringDemos =
+  (project in file("io-backends/uring/demos"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(
+      publish / skip := true,
+      Compile / mainClass := Some("uringdemos.UringDemos"),
+      Compile / unmanagedSourceDirectories += (ThisBuild / baseDirectory).value / "bench/io-bench/shared/src/main/scala",
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    .dependsOn(ioUring, ioTestkit.native)
+
+// NIO's demo application: the testkit's gears demos over `NioOnCaller`, as `ioNioDemos/run <command>`, and the gears
+// bench over it, as `ioNioDemos/run bench`.
+lazy val ioNioDemos =
+  (project in file("io-backends/nio/demos"))
+    .settings(
+      publish / skip := true,
+      scalacOptions += "-release:21",
+      Compile / mainClass := Some("niodemos.NioDemos"),
+      Compile / unmanagedSourceDirectories += (ThisBuild / baseDirectory).value / "bench/io-bench/shared/src/main/scala",
+      run / fork := true
+    )
+    .dependsOn(ioNio, ioTestkit.jvm)
+
+// The HTTP bench's server: gears-io-http serving the routes its Go counterpart serves, for a load generator to measure
+// against both (`ioHttpBenchNative/nativeLink`, `ioHttpBenchJVM/run <port>`).
+lazy val ioHttpBench =
+  crossProject(JVMPlatform, NativePlatform)
+    .crossType(CrossType.Full)
+    .in(file("bench/http-bench"))
+    .settings(
+      publish / skip := true,
+      Compile / mainClass := Some("httpbench.Main")
+    )
+    .jvmSettings(scalacOptions += "-release:21", run / fork := true)
+    .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
+    .jvmConfigure(_.dependsOn(ioHttp.jvm))
+    .nativeConfigure(_.dependsOn(ioHttp.native))

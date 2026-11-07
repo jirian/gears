@@ -139,6 +139,22 @@ lazy val ioRuntime =
     )
     .dependsOn(root.native, ioTestkit.native % Test)
 
+// The io_uring backend (Linux 6.0 or later, Scala Native) on the shared runtime, through liburing, whose `static
+// inline` helpers, and a synchronous cancel, are in a C shim among its native resources. Every program that links it
+// needs liburing.
+lazy val ioUring =
+  (project in file("io-backends/uring"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(
+      name := "gears-io-uring",
+      publish / skip := false,
+      versionScheme := Some("early-semver"),
+      libraryDependencies += munit % Test,
+      testFrameworks += MUnitFramework,
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    .dependsOn(ioRuntime, ioTestkit.native % Test)
+
 // NIO on the calling thread (`NioOnCaller`): the reference backend's ops with a faster way of waiting, retries and a
 // selector per handle, which needs no JDK flags. The JVM's default backend.
 lazy val ioNio =

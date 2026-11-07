@@ -119,6 +119,26 @@ lazy val ioReferenceDemos =
     )
     .dependsOn(ioReference, ioTestkit.jvm)
 
+// The runtime the native backends share (`gears.async.io.shareable`): a pool of workers, each with an inbox and a heap
+// of timers, that is the program's scheduler and performs its ops, cancelling them safely. A backend gives each worker
+// its poller by overriding `Poller.waitForDeadline` and `wake`. Scala Native only: on the JVM gears' fibers are
+// virtual threads, which do not run on threads of ours. Its four files are Jamie Thompson's, from his branch
+// `async-io-kqueue-basepoint` (44bb011): `Poller` and `TimerHeap` unchanged, `TimerHeapOp` and `WorkpoolScheduler`
+// with small changes for completion-based backends (work already done is delivered, a time limit takes its op back
+// first, atomic entry), to be offered back to him.
+lazy val ioRuntime =
+  (project in file("io-runtime"))
+    .enablePlugins(ScalaNativePlugin)
+    .settings(
+      name := "gears-io-runtime",
+      publish / skip := false,
+      versionScheme := Some("early-semver"),
+      libraryDependencies += munit % Test,
+      testFrameworks += MUnitFramework,
+      nativeConfig ~= { _.withMultithreading(true) }
+    )
+    .dependsOn(root.native, ioTestkit.native % Test)
+
 // NIO on the calling thread (`NioOnCaller`): the reference backend's ops with a faster way of waiting, retries and a
 // selector per handle, which needs no JDK flags. The JVM's default backend.
 lazy val ioNio =

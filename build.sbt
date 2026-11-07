@@ -4,6 +4,10 @@ import sbtcrossproject.CrossPlugin.autoImport.{CrossType, crossProject}
 
 scalaVersion := "3.9.0"
 
+// The Scala Native nightly selected in project/plugins.sbt brings its libraries from the snapshot repository.
+ThisBuild / resolvers ++= (if (sys.env.get("SCALA_NATIVE_NIGHTLY").contains("1")) Seq(Resolver.sonatypeCentralSnapshots)
+                           else Nil)
+
 LocalRootProject / publish / skip := true
 
 val MUnitFramework = new TestFramework("munit.Framework")

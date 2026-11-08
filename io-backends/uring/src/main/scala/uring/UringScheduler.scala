@@ -4,7 +4,6 @@ package uring
 import gears.async.io.shareable.WorkpoolScheduler
 import gears.async.native.NativeSuspend
 
-import java.util.concurrent.CancellationException
 import scala.scalanative.posix.errno
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
@@ -23,25 +22,27 @@ import uringStructOps.*
   * which returns once the kernel has let go of it (Linux 6.0). A performer that resumed on another worker hands the
   * withdrawal to the op's, and waits for the op to settle.
   */
-private[uring] final class UringScheduler(workers: Int)
-    extends WorkpoolScheduler[UringOp, UringBackend.type](UringBackend, workers)
+private[uring] final class UringScheduler private (rings: Array[Ring])
+    extends WorkpoolScheduler[UringOp, UringBackend.type](UringBackend, rings.length)
     with NativeSuspend {
   override protected def selectWorker() = workerOfCurrentThread()
 
-  override def makeWorker(id: Int): UringWorker = new UringWorker(id)
+  // A class parameter is set before the superclass's constructor runs, which makes the workers.
+  override def makeWorker(id: Int): UringWorker = new UringWorker(id, rings(id))
 
   private def isWorkerOf(worker: UringWorker): Boolean =
     try workerOfCurrentThread() eq worker
     catch case _: IllegalStateException => false
 
-  final class UringWorker(id: Int) extends WorkpoolScheduler.Worker[UringOp, UringBackend.type](id, UringBackend) {
+  final class UringWorker(id: Int, givenRing: Ring)
+      extends WorkpoolScheduler.Worker[UringOp, UringBackend.type](id, UringBackend) {
 
     // Lazy: `Worker` starts its thread in its constructor, which uses these before this class's fields are set.
     private lazy val own = new Own
 
     /** What only the worker's thread touches, but for `ring.wake` and `ring.cancelFd`. */
     private final class Own {
-      val ring = new Ring(UringScheduler.Entries)
+      val ring = givenRing
 
       /** The commands in the kernel or prepared, by the user data of their entry. */
       val inFlight = scala.collection.mutable.LongMap.empty[Command]
@@ -58,14 +59,15 @@ private[uring] final class UringScheduler(workers: Int)
       // still prepared as the close begins is turned into a no-op here and its command failed; one submitted as the
       // close begins, which the close's cancel may have missed, is cancelled after the submission, once woken.
       ring.onSubmit = () => {
-        val closed = scala.collection.mutable.ArrayBuffer.empty[Command]
+        var closed: scala.collection.mutable.ArrayBuffer[Command] | Null = null // rarely any
         prepared.foreach { c =>
           if c.state == Command.Prepared then {
             if c.handle.isClosing then {
               ring.nop(c.sqe)
               inFlight.remove(c.id)
               c.state = Command.Idle
-              closed += c
+              if closed == null then closed = scala.collection.mutable.ArrayBuffer.empty[Command]
+              closed.nn += c
             } else {
               c.state = Command.Submitted
               submitted += c
@@ -73,10 +75,11 @@ private[uring] final class UringScheduler(workers: Int)
           }
         }
         prepared.clear()
-        closed.foreach { c =>
-          c.discardSubmission()
-          settle(c, Failure(c.handle.closedFailure))
-        }
+        if closed != null then
+          closed.nn.foreach { c =>
+            c.discardSubmission()
+            settle(c, Failure(c.handle.closedFailure))
+          }
       }
 
       ring.afterSubmit = () => {
@@ -134,7 +137,7 @@ private[uring] final class UringScheduler(workers: Int)
         passTurn(command)
         true
       } else {
-        handle.rings.add(own.ring)
+        handle.onRing(own.ring)
         try submit(command)
         catch {
           case failure: Throwable =>
@@ -181,12 +184,14 @@ private[uring] final class UringScheduler(workers: Int)
       if command != null then {
         command.state = Command.Idle
         val handle = command.handle
-        if res == -errno.ECANCELED && handle.isClosing then {
+        // A file's op fails once a close has come, even having finished, as `FileOps` has it, so that every backend
+        // leaves its buffer and offset as they were: the close waited for it.
+        if (res == -errno.ECANCELED || handle.isInstanceOf[FileHandle]) && handle.isClosing then {
           command.discardSubmission()
           settle(command, Failure(handle.closedFailure))
         } else if res == -errno.ECANCELED && command.wantOut then {
           command.discardSubmission()
-          settle(command, Failure(new CancellationException()))
+          settle(command, Failure(gears.async.cancellation()))
         } else
           try
             if command.finishSubmission(res) then {
@@ -197,7 +202,7 @@ private[uring] final class UringScheduler(workers: Int)
               settle(command, Failure(handle.closedFailure))
             } else if command.wantOut then {
               command.discardSubmission()
-              settle(command, Failure(new CancellationException()))
+              settle(command, Failure(gears.async.cancellation()))
             } else submit(command)
           catch case failure: Throwable => settle(command, Failure(failure))
       }
@@ -229,7 +234,7 @@ private[uring] final class UringScheduler(workers: Int)
       val run: Runnable = () => {
         val handle = command.handle
         if command.wantOut || handle.isClosing then
-          settle(command, Failure(if handle.isClosing then handle.closedFailure else new CancellationException()))
+          settle(command, Failure(if handle.isClosing then handle.closedFailure else gears.async.cancellation()))
         else
           try {
             val finished = command.nothingToDo || (handle.triesAtOnce && command.tryAtOnce())
@@ -237,7 +242,7 @@ private[uring] final class UringScheduler(workers: Int)
               command.done = true
               settle(command, WorkpoolScheduler.SuccessUnit)
             } else {
-              handle.rings.add(own.ring)
+              handle.onRing(own.ring)
               submit(command)
             }
           } catch case failure: Throwable => settle(command, Failure(failure))
@@ -292,7 +297,7 @@ private[uring] final class UringScheduler(workers: Int)
         else {
           val handedOver = submit(() =>
             if withdrawHere(command) then {
-              command.outcome = Failure(new CancellationException())
+              command.outcome = Failure(gears.async.cancellation())
               fire(command)
             }
           )
@@ -327,6 +332,25 @@ private[uring] final class UringScheduler(workers: Int)
 }
 
 private[uring] object UringScheduler {
+
+  /** A runtime of `workers` workers, each with its ring, made here, so that one that cannot be set up, past a limit on
+    * locked memory or on rings, fails this call rather than its worker's thread.
+    */
+  def apply(workers: Int): UringScheduler = {
+    val rings = new Array[Ring](workers)
+    var made = 0
+    try
+      while made < workers do {
+        rings(made) = new Ring(Entries)
+        made += 1
+      }
+    catch {
+      case e: Throwable =>
+        for i <- 0 until made do rings(i).close()
+        throw e
+    }
+    new UringScheduler(rings)
+  }
 
   /** Submission queue entries of each worker's ring. */
   inline val Entries = 256

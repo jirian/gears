@@ -3,7 +3,6 @@ package gears.async.io.shareable
 import scala.util.Try
 import java.util.concurrent.atomic.AtomicReference
 import gears.async.Async
-import java.util.concurrent.CancellationException
 import gears.async.Listener
 import scala.util.Failure
 import scala.util.control.NonFatal
@@ -15,6 +14,13 @@ import gears.async.io.Deadline
 object TimerHeapOp {
   sealed trait Hooks {
     def onEntry(): Unit = ()
+  }
+
+  /** An op's time running out, without a stack trace, which is the cost of a timeout on Scala Native, where the stack
+    * is walked with libunwind; a read given a deadline is how a protocol waits, so it is common.
+    */
+  private[async] final class TimedOut extends TimeoutException("operation timed out") {
+    override def fillInStackTrace(): Throwable = this
   }
 }
 
@@ -125,7 +131,7 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
       // A throwing `wakeup` becomes the outcome: only `complete` releases the consumer's lock, and resumes it.
       val result =
         try
-          if timedOut && !committed then Failure(new TimeoutException("operation timed out"))
+          if timedOut && !committed then Failure(TimerHeapOp.TimedOut())
           else wakeup(resumedAt)
         catch case NonFatal(ex) => Failure(ex)
       settle(result)
@@ -134,7 +140,7 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
       // Its work can't be undone, so its performer, cancelled meanwhile, gets it all the same (`succeeded`).
       settle(try wakeup(resumedAt) catch case NonFatal(ex) => Failure(ex))
     else
-      settle(Failure(new CancellationException()))
+      settle(Failure(gears.async.cancellation()))
 
   /** Whether the poller has done the op's work already, as io_uring does a read's: its outcome is then delivered even
     * to a performer cancelled or out of time meanwhile, since the work can't be undone. False for an op whose work is

@@ -7,9 +7,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import scala.scalanative.posix.unistd
 
-/** The failure of an op on a closed handle, naming it: a closed channel's, as `Ops.close` has it. */
+/** The failure of an op on a closed handle, naming it: a closed channel's, as `Ops.close` has it. It has no stack
+  * trace, which on Scala Native costs about 250 µs, a dozen round trips, and every op a close fails makes one.
+  */
 final class HandleClosedException(handle: AnyRef) extends ClosedChannelException {
   override def getMessage: String = s"$handle is closed"
+  override def fillInStackTrace(): Throwable = this
 }
 
 /** A handle of the io_uring backend: a descriptor, the rings that have had entries on it, and the uses of its number in
@@ -27,6 +30,9 @@ sealed abstract class UringHandle(val fd: Int, kind: String) {
 
   /** The rings that have had entries on the descriptor, which a close cancels them on. */
   private[uring] val rings: java.util.Set[Ring] = ConcurrentHashMap.newKeySet[Ring]()
+
+  /** Adds `ring` to `rings`, with only a read once it is there, as it is for every op after a handle's first. */
+  private[uring] def onRing(ring: Ring): Unit = if !rings.contains(ring) then rings.add(ring): Unit
 
   /** One read at a time on a stream, and one write. */
   private[uring] val reading = new AtomicBoolean()

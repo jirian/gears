@@ -10,7 +10,6 @@ import gears.async.io.shareable.WorkpoolScheduler
 
 import java.io.IOException
 import java.nio.ByteBuffer
-import java.util.concurrent.CancellationException
 import scala.concurrent.duration.FiniteDuration
 import scala.scalanative.libc.string
 import scala.scalanative.memory.PointerBufferOps.given
@@ -268,7 +267,7 @@ private[uring] final class Staging(bufs: Array[ByteBuffer], copyIn: Boolean, cop
   }
 }
 
-private object Staging {
+private[uring] object Staging {
 
   /** A buffer over `buf`'s remaining bytes, in its own array, positioned at 0. */
   def inArray(buf: ByteBuffer): ByteBuffer = {
@@ -913,7 +912,7 @@ private[uring] class BlockingTask[A](body: () => A, deliver: A => Unit, slots: L
         } else
           result match {
             case Failure(e) if !isStopped => Failure(e)
-            case _                        => Failure(new CancellationException())
+            case _                        => Failure(gears.async.cancellation())
           }
       fire()
       result match {

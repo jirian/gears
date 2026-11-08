@@ -67,3 +67,8 @@ op's.
 - The handle's lock on every op: a counter of ops in progress, with the close waiting for it to reach zero, would do
   without it, if the remaining gap matters.
 - Measuring on a quiet machine.
+- A handle keeps a selector for each direction it has waited in until it is closed, each an epoll instance and an
+  eventfd on Linux: 10,000 idle kept-alive connections hold 20,000 of them, which the pool of 256 does not bound. One
+  selector per handle, or a bounded shared set, would.
+- Performing one op twice at once fails with an `IllegalArgumentException` here and an `IllegalStateException` on the
+  shared native runtime; the contract does not say which.

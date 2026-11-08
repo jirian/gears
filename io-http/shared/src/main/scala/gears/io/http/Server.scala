@@ -58,8 +58,10 @@ final case class Limits(
   * cancels the handler if it has, as Go's server cancels a request's context: the handler sees a
   * `CancellationException` at its next suspension, and the futures it started are cancelled with it. A connection is
   * watched only once the handler has read the request's body, and not while the client has sent the next request
-  * already; a handler that finishes sooner costs nothing. `Duration.Inf` never cancels: for a handler whose work must
-  * not stop halfway; a handler can instead protect just that part, running it with
+  * already; a handler that finishes sooner costs nothing. A client that shuts its output down once it has sent its
+  * request, as `StreamSocketOps.shutdownOutput` suggests, looks gone too, and its handler is cancelled: as with Go's
+  * server, such a client is served with `Duration.Inf`. `Duration.Inf` never cancels: for a handler whose work must not
+  * stop halfway; a handler can instead protect just that part, running it with
   * `Async.current.withGroup(CompletionGroup.Unlinked)`.
   */
 final case class ServerConfig(
@@ -266,7 +268,7 @@ private[http] object Server {
       idle = input.buffered == 0
       if idle && state.stopping.get() then return false
       val head =
-        try Wire.readRequestHead(input, config.limits, t.idle, t.header)
+        try Wire.readRequestHead(input, config.limits, t.idle, t.header, () => idle = false)
         catch {
           case e: Wire.Malformed =>
             idle = false
@@ -427,7 +429,10 @@ private[http] object Server {
                 catch case _: IOException => true
               if gone then a.group.cancel()
               a.state.set(Answering.Settled)
-            } else gears.async.AsyncOperations.sleep(after / 1_000_000) // its body is not read yet, or it was watched
+            } else
+              gears.async.AsyncOperations.sleep(
+                math.max(after / 1_000_000, 1L)
+              ) // its body is not read yet, or it was watched
           }
         }
       } catch {
@@ -492,14 +497,25 @@ private[http] object Server {
     /** Writes `response`: framed by its length if known, else chunked for HTTP/1.1, else up to the close. Whether the
       * connection carries on: false if a failure cut the body short, or it was framed by the close.
       */
-    private def writeResponse(stream: Stream, response: Response, h: Wire.RequestHead, reusable: Boolean)(using
+    private def writeResponse(stream: Stream, handed: Response, h: Wire.RequestHead, reusable: Boolean)(using
         Async
     ): Boolean = {
+      var response = handed
       val noBody = response.status.forbidsBody
       val head = h.method == Method.Head
-      val length = response.body.length
-      val chunked = !noBody && length.isEmpty && h.version == "HTTP/1.1" && !response.headers.contains("Content-Length")
-      val untilClose = !noBody && length.isEmpty && !chunked && !response.headers.contains("Content-Length")
+      // A handler's own Content-Length on a body of unknown length is held to as the body's is, so that a body longer
+      // or shorter than it says cannot leave a kept-alive connection out of step.
+      val length = response.body.length.orElse(response.headers.getAll("Content-Length") match {
+        case Seq(text) if text.trim.nonEmpty && text.trim.length <= 18 && text.trim.forall(c => c >= '0' && c <= '9') =>
+          Some(text.trim.toLong)
+        case Seq() => None
+        case other =>
+          config.log(s"The response to ${h.method} ${h.target} had a malformed Content-Length, dropped: $other")
+          response = response.copy(headers = response.headers.remove("Content-Length"))
+          None
+      })
+      val chunked = !noBody && length.isEmpty && h.version == "HTTP/1.1"
+      val untilClose = !noBody && length.isEmpty && !chunked
       val keep = reusable && !untilClose
       val out = responseHead(response, h, keep, chunked)
       val writer = new Wire.Out(stream, out, chunked, length.getOrElse(-1L), noBody || head, t.write)

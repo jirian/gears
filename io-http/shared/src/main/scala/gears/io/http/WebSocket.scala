@@ -26,11 +26,13 @@ import scala.concurrent.duration.FiniteDuration
   * with the closing handshake.
   *
   * A future of the session's reads the peer's frames as they come, so that pings are answered and the peer's close is
-  * seen whether or not the session is receiving: it hands messages over one at a time, waiting while the session does
-  * not take them, which holds the peer back. `receive` takes the next, and `messages` iterates them until the peer
-  * closes. `send` may be called from many futures at once: frames go out whole, one after another. With `pingEvery`,
-  * the socket pings the peer that often, and closes if nothing comes from it for twice as long, which is how a peer
-  * that vanished without closing is found.
+  * seen while the session is busy: it hands messages over one at a time, and while one waits for the session to take it
+  * reads nothing more, which holds the peer back. `receive` takes the next, and `messages` iterates them until the peer
+  * closes. `send` may be called from many futures at once: frames go out whole, one after another, each within
+  * `writeTimeout`; one that is not, or that is cancelled once part of it has gone, closes the socket, since the peer
+  * would read the next frame as the rest of it. With `pingEvery`, the socket pings the peer that often, and closes if
+  * nothing comes from it for twice as long while it is read, which is how a peer that vanished without closing is
+  * found.
   */
 final class WebSocket private (
     stream: Stream,
@@ -38,6 +40,7 @@ final class WebSocket private (
     client: Boolean,
     val protocol: Option[String],
     maxMessage: Int,
+    writeTimeout: FiniteDuration,
     timers: gears.async.AsyncOperations
 ) {
   import WebSocket.*
@@ -47,6 +50,7 @@ final class WebSocket private (
   @volatile private var closeSent = false
   @volatile private var ended = false
   @volatile private var lastHeard = System.nanoTime()
+  @volatile private var handing = false // a message waits for the session, so the peer is not read
   @volatile private var received: Option[Close] = None
 
   /** The peer's close, once it has come. */
@@ -131,7 +135,15 @@ final class WebSocket private (
           masked
         }
       head.flip()
-      stream.write(Array(head, ByteBuffer.wrap(body)), scala.concurrent.duration.Duration.Inf)
+      try stream.write(Array(head, ByteBuffer.wrap(body)), writeTimeout)
+      catch {
+        case e: java.util.concurrent.TimeoutException =>
+          stream.close()
+          throw new IOException(s"A frame was not written within $writeTimeout: the WebSocket is closed", e)
+        case e: CancellationException if head.position() > 0 =>
+          stream.close() // part of the frame went: the stream is no longer framed
+          throw e
+      }
     }
 
   /** Reads frames until the peer closes, or the stream ends or fails, handing messages to the session. */
@@ -169,7 +181,14 @@ final class WebSocket private (
                   )
                 else Message.Binary(bytes)
               kind = 0
-              if !closeSent then inbox.send(value) // after our close, data is dropped until the peer's
+              if !closeSent then { // after our close, data is dropped until the peer's
+                handing = true
+                try inbox.send(value)
+                finally {
+                  handing = false
+                  lastHeard = System.nanoTime()
+                }
+              }
             }
         }
       }
@@ -247,7 +266,7 @@ final class WebSocket private (
           Future {
             while true do {
               timers.sleep(every.toMillis)
-              if System.nanoTime() - lastHeard > 2 * every.toNanos then {
+              if !handing && System.nanoTime() - lastHeard > 2 * every.toNanos then {
                 stream.close() // the peer went away without closing: the reader ends
                 throw new CancellationException()
               }
@@ -300,7 +319,8 @@ object WebSocket {
       protocols: Seq[String] = Nil,
       maxMessage: Int = 1024 * 1024,
       pingEvery: Option[FiniteDuration] = Some(30.seconds),
-      origin: Request => Boolean = sameOrigin
+      origin: Request => Boolean = sameOrigin,
+      writeTimeout: FiniteDuration = 30.seconds
   )(session: WebSocket => Async ?=> Unit)(using ops: gears.async.AsyncOperations): Response = {
     require(maxMessage > 0, "maxMessage is positive")
     val h = request.headers
@@ -325,7 +345,7 @@ object WebSocket {
       Status.SwitchingProtocols,
       headers,
       Body.Upgrade { (stream, input) =>
-        new WebSocket(stream, input, client = false, chosen, maxMessage, ops).run(session, pingEvery)
+        new WebSocket(stream, input, client = false, chosen, maxMessage, writeTimeout, ops).run(session, pingEvery)
       }
     )
   }
@@ -365,7 +385,7 @@ object WebSocket {
         .set("Sec-WebSocket-Version", "13")
       if protocols.nonEmpty then request = request.set("Sec-WebSocket-Protocol", protocols.mkString(", "))
       config.userAgent.foreach(ua => request = request.setIfAbsent("User-Agent", ua))
-      stream.write(Wire.head(s"GET ${target.target} HTTP/1.1", request), t.read)
+      stream.write(Wire.head(s"GET ${target.target} HTTP/1.1", request), t.write)
       val input = new BufferedInput(stream, 8192, 64 * 1024)
       val head = Wire.readResponseHead(input, 64 * 1024, t.responseHead)
       if head.status != Status.SwitchingProtocols then throw new HttpStatusException(head.status, head.headers, "")
@@ -376,7 +396,11 @@ object WebSocket {
       val chosen = r.getAll("Sec-WebSocket-Protocol")
       if chosen.size > 1 || chosen.exists(!protocols.contains(_)) then
         throw new IOException("The server chose a subprotocol not offered")
-      new WebSocket(stream, input, client = true, chosen.headOption, maxMessage, io).run(session, pingEvery)
+      val frames = Stream.limit(t.write) match {
+        case null              => 30.seconds
+        case d: FiniteDuration => d
+      }
+      new WebSocket(stream, input, client = true, chosen.headOption, maxMessage, frames, io).run(session, pingEvery)
     } finally stream.close()
   }
 

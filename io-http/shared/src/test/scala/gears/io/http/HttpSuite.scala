@@ -25,7 +25,7 @@ class HttpSuite extends FunSuite {
 
   /** Runs `body` with a server of `routes` on a port of its own, and the client the module shares. */
   private def withServer[A](routes: Routes, config: ServerConfig = quiet)(
-      body: Server => (Io[DefaultCapabilities], Async.Spawn, AsyncOperations) ?=> A
+      body: Server => (Io[DefaultCapabilities], Async.Spawn) ?=> A
   ): A = Http.testServer(routes, config)(body)
 
   /** Sends `raw` on a new connection and returns all the server answers until it closes, or `wait` passes. */
@@ -289,6 +289,79 @@ class HttpSuite extends FunSuite {
       assertEquals(slow.await, "finished")
       assertEquals(server.connections, 0)
       idle.close()
+    }
+  }
+
+  test("the module's client lives as long as its run; under another Io each request has a client of its own") {
+    val routes = Routes(GET("/") { _ => "ok" })
+    withServer(routes) { server =>
+      assertEquals(Http.get(server.url.resolve("/")).text(), "ok")
+      assert(Http.client eq Http.client, "one client for the run")
+    }
+    Io.run(using gears.io.net.Platform.backend) {
+      Async.group {
+        val server = Http.server(routes, quiet)
+        intercept[IllegalStateException](Http.client)
+        assertEquals(Http.get(server.url.resolve("/")).text(), "ok")
+        assertEquals(Http.get(server.url.resolve("/")).text(), "ok")
+      }
+    }
+  }
+
+  test("a server's URL is the address it listens on, loopback for every interface") {
+    val routes = Routes(GET("/") { _ => "ok" })
+    Http.run {
+      Async.group {
+        val any = Http.server(routes, quiet.copy(host = "0.0.0.0"))
+        assertEquals(any.url.toString, s"http://127.0.0.1:${any.port}/")
+        val v6 =
+          try Some(Http.server(routes, quiet.copy(host = "::1")))
+          catch case _: IOException => None // no IPv6 here
+        for s <- v6 do {
+          assertEquals(s.url.toString, s"http://[::1]:${s.port}/")
+          assertEquals(Http.get(s.url.resolve("/")).text(), "ok")
+        }
+      }
+    }
+  }
+
+  test("a WebSocket session busy with a message is not taken for a peer gone away by its pings") {
+    val routes = Routes(GET("/ws") { r =>
+      WebSocket.accept(r, pingEvery = Some(100.millis)) { ws =>
+        for m <- ws.messages do {
+          AsyncOperations.sleep(500) // while the next waits for it, and the reader reads nothing
+          ws.send(m)
+        }
+      }
+    })
+    withServer(routes) { server =>
+      val got = WebSocket.connect(s"ws://127.0.0.1:${server.port}/ws") { ws =>
+        for i <- 1 to 3 do ws.send(s"m$i")
+        (1 to 3).map(_ => ws.receive())
+      }
+      assertEquals(got, (1 to 3).map(i => Some(WebSocket.Message.Text(s"m$i"))))
+    }
+  }
+
+  test("a WebSocket frame its peer does not read fails within the write timeout, and closes the socket") {
+    val failed = Future.Promise[String]()
+    val routes = Routes(GET("/ws") { r =>
+      WebSocket.accept(r, pingEvery = None, writeTimeout = 300.millis) { ws =>
+        val big = new Array[Byte](256 * 1024)
+        try while true do ws.send(big)
+        catch case e: IOException => failed.complete(scala.util.Success(e.getMessage))
+      }
+    })
+    withServer(routes) { server =>
+      val stream = Tcp.connect("127.0.0.1", server.port)
+      try {
+        val handshake = s"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: Upgrade\r\n" +
+          "Upgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        stream.write(ByteBuffer.wrap(handshake.getBytes(StandardCharsets.ISO_8859_1)))
+        // Nothing is read from here on.
+        val message = gears.async.withTimeout(10.seconds)(failed.asFuture.await)
+        assert(message.contains("not written within"), message)
+      } finally stream.close()
     }
   }
 }

@@ -104,6 +104,7 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
   private val outbound = Semaphore(1)
   private val inbound = Semaphore(1)
   private val netOut = new Array[Byte](OpenSslStream.NetBufSize)
+  private val outPending = ByteBuffer.wrap(netOut).limit(0) // taken from the BIO, not yet written
   private val netIn = new Array[Byte](OpenSslStream.NetBufSize)
   private var failureDetail = ""
 
@@ -125,16 +126,21 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
     (r, e)
   }
 
-  /** Writes what OpenSSL has for the network. */
+  /** Writes what OpenSSL has for the network. What a write that timed out or was cancelled had not written stays in
+    * `outPending`, to go first next time, so that no record is cut or lost.
+    */
   private def flushNetworkOut(timeout: Duration)(using Async): Unit =
     Stream.holding(outbound) {
       var done = false
       while !done do {
-        val pending = native(BIO_ctrl(networkBio, BIO_CTRL_PENDING, 0.toSize, null).toInt)
-        val n =
-          if pending <= 0 then 0
-          else native(BIO_read(networkBio, netOut.asInstanceOf[ByteArray].at(0), math.min(pending, netOut.length)))
-        if n > 0 then underlying.write(ByteBuffer.wrap(netOut, 0, n), timeout) else done = true
+        if outPending.hasRemaining then underlying.write(outPending, timeout)
+        else {
+          val pending = native(BIO_ctrl(networkBio, BIO_CTRL_PENDING, 0.toSize, null).toInt)
+          val n =
+            if pending <= 0 then 0
+            else native(BIO_read(networkBio, netOut.asInstanceOf[ByteArray].at(0), math.min(pending, netOut.length)))
+          if n > 0 then outPending.position(0).limit(n): Unit else done = true
+        }
       }
     }
 
@@ -181,11 +187,26 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
     val direct = buf.hasArray && !buf.isReadOnly
     val tmp = if direct then buf.array() else new Array[Byte](cap)
     val at = if direct then buf.arrayOffset() + buf.position() else 0
-    val (n, err) = pump(() => SSL_read(ssl, tmp.asInstanceOf[ByteArray].at(at), cap), timeout)
-    if n > 0 then {
-      if direct then buf.position(buf.position() + n) else buf.put(tmp, 0, n)
-      n
-    } else
+    var got = 0
+    val (n, err) =
+      try
+        pump(
+          () => {
+            val r = SSL_read(ssl, tmp.asInstanceOf[ByteArray].at(at), cap)
+            if r > 0 then {
+              got = r
+              if direct then buf.position(buf.position() + r) else buf.put(tmp, 0, r)
+            }
+            r
+          },
+          timeout
+        )
+      catch {
+        // The bytes are read; what OpenSSL had to send with them, such as a key update's answer, goes next time.
+        case _: java.util.concurrent.TimeoutException if got > 0 => (got, SSL_ERROR_NONE)
+      }
+    if n > 0 then n
+    else
       err match {
         case SSL_ERROR_ZERO_RETURN =>
           notified = true
@@ -205,12 +226,22 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
       if !direct then buf.duplicate().get(arr)
       var written = 0
       while written < n do {
-        val (r, err) = pump(() => SSL_write(ssl, arr.asInstanceOf[ByteArray].at(start + written), n - written), timeout)
+        // `buf` is advanced as OpenSSL takes its bytes, before they are flushed: a write that times out or is cancelled
+        // has taken what its position says, and the records go out first on the next write.
+        val (r, err) = pump(
+          () => {
+            val r = SSL_write(ssl, arr.asInstanceOf[ByteArray].at(start + written), n - written)
+            if r > 0 then {
+              written += r
+              buf.position(buf.position() + r)
+            }
+            r
+          },
+          timeout
+        )
         if r <= 0 then
           if err == OpenSslStream.PeerClosed then throw new IOException("The peer closed the connection")
           else throw new IOException(s"TLS write failed (SSL_get_error=$err): $failureDetail")
-        written += r
-        buf.position(buf.position() + r)
       }
     }
   }
@@ -265,6 +296,13 @@ private object OpenSslStream {
       throw new IOException(s"BIO_new_bio_pair failed: ${TlsPlatform.lastError()}")
     }
     SSL_set_bio(ssl, !internal, !internal)
+    // A write that timed out is taken up again with what is left of its buffer, maybe in another array.
+    SSL_ctrl(
+      ssl,
+      SSL_CTRL_MODE,
+      (SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER).toSize,
+      null
+    ): Unit
     if host == null then SSL_set_accept_state(ssl)
     else {
       SSL_set_connect_state(ssl)

@@ -18,15 +18,17 @@ import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 
 /** How long a client waits: `connect`, for a connection and its TLS handshake; `responseHead`, from sending a request
-  * to its response's head; `read`, for each read of a response's body; `total`, for all of a request, unless the
-  * request sets its own (`Request.withTimeout`). Each but `total` is finite by default, so that a host that stops
-  * answering cannot hang its caller; `total` is not, so that a long download is not cut off.
+  * to its response's head; `read`, for each read of a response's body; `write`, for each write of a request, and of a
+  * WebSocket's frame; `total`, for all of a request, unless the request sets its own (`Request.withTimeout`). Each but
+  * `total` is finite by default, so that a host that stops answering cannot hang its caller; `total` is not, so that a
+  * long download is not cut off.
   */
 final case class ClientTimeouts(
     connect: Duration = 10.seconds,
     responseHead: Duration = 30.seconds,
     read: Duration = 30.seconds,
-    total: Duration = Duration.Inf
+    total: Duration = Duration.Inf,
+    write: Duration = 30.seconds
 )
 
 /** Whether a client follows redirects: `Follow` up to `max` of them, never from `https` to `http` unless
@@ -227,7 +229,7 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
     if !Headers.isToken(request.method.name) then
       throw new IllegalArgumentException(s"Not a method token: '${request.method.name}'")
     val head = Wire.head(s"${request.method.name} ${url.target} HTTP/1.1", headers)
-    val out = new Wire.Out(stream, head, chunked, body.length.getOrElse(-1L), false, config.timeouts.read)
+    val out = new Wire.Out(stream, head, chunked, body.length.getOrElse(-1L), false, config.timeouts.write)
     if hasBody then body.writeTo(out)
     out.finish()
   }

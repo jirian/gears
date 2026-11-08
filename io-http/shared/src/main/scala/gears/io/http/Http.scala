@@ -1,7 +1,6 @@
 package gears.io.http
 
 import gears.async.Async
-import gears.async.AsyncOperations
 import gears.async.Future
 import gears.async.io.Io
 import gears.async.io.IpStreams
@@ -25,7 +24,7 @@ import scala.util.Success
   *   Http.run { println(Http.get("https://example.com").ensureSuccess().text()) }
   * }}}
   * A program that already runs with an `Io` uses `Http.server`, which serves in the caller's scope, and an
-  * `HttpClient`, or the module's functions, which share one client per `Io`.
+  * `HttpClient`, or the module's functions, which share one client per run (see `client`).
   */
 object Http {
 
@@ -66,7 +65,7 @@ object Http {
     * its own (`run`), so it is not for use inside one.
     */
   def testServer[A](routes: Routes, config: ServerConfig = ServerConfig())(
-      body: Server => (Io[DefaultCapabilities], Async.Spawn, AsyncOperations) ?=> A
+      body: Server => (Io[DefaultCapabilities], Async.Spawn) ?=> A
   ): A =
     run {
       Async.group {
@@ -78,37 +77,53 @@ object Http {
   /** Runs `program` with an `Io` over the platform's default backend, and returns what it returns: for a script, or a
     * `main`. The client the module's functions share is closed as it returns.
     */
-  def run[T](program: Io[DefaultCapabilities] ?=> (Async.Spawn, AsyncOperations) ?=> T): T =
-    Defaults.run {
-      val io = summon[Io[DefaultCapabilities]]
-      try program
-      finally
-        clients.synchronized(Option(clients.remove(io))).foreach(_.close())
-    }
+  def run[T](program: Io[DefaultCapabilities] ?=> Async.Spawn ?=> T): T = Defaults.run(program)
 
-  private val clients = new java.util.WeakHashMap[Io[?], HttpClient]()
+  private val clients = new java.util.IdentityHashMap[Io[?], HttpClient]()
 
-  /** The client the module's functions share on `io`: made the first time, with the default configuration. */
+  /** The client the module's functions share on `io`, made the first time with the default configuration and closed as
+    * `io`'s run returns: for an `Io` of `run`, `serve`, `testServer` or `Defaults.run`. Another `Io`'s run cannot close
+    * it, so there the module's functions use a client for each request, which keeps no connection, and this throws
+    * `IllegalStateException`: a program with such an `Io` that sends many requests keeps an `HttpClient`.
+    */
   def client(using io: Io[IpStreams & Resolving]): HttpClient =
+    shared(io).getOrElse(
+      throw new IllegalStateException(
+        "The module's client is shared in a run of Http's or Defaults'; make an HttpClient"
+      )
+    )
+
+  private def shared(io: Io[IpStreams & Resolving]): Option[HttpClient] =
     clients.synchronized {
-      var c = clients.get(io)
-      if c == null then {
-        c = new HttpClient()
-        clients.put(io, c)
+      val c = clients.get(io)
+      if c != null then Some(c)
+      else {
+        if !Defaults.atEnd(io)(Option(clients.synchronized(clients.remove(io))).foreach(_.close())) then scala.None
+        else {
+          val made = new HttpClient()(using io)
+          clients.put(io, made)
+          Some(made)
+        }
       }
-      c
     }
 
-  def send(request: Request)(using Io[IpStreams & Resolving], Async): Response = client.send(request)
+  /** Runs `body` with the shared client, or with one of its own, closed after, where there is none. */
+  private def withClient[A](body: HttpClient => A)(using io: Io[IpStreams & Resolving], async: Async): A =
+    shared(io) match {
+      case Some(c) => body(c)
+      case _       => new HttpClient()(using io).use(body)
+    }
+
+  def send(request: Request)(using Io[IpStreams & Resolving], Async): Response = withClient(_.send(request))
   def get(url: String | Url, headers: (String, String)*)(using Io[IpStreams & Resolving], Async): Response =
-    client.send(Request.get(url).withHeaders(headers*))
+    send(Request.get(url).withHeaders(headers*))
   def post(url: String | Url, body: Body)(using Io[IpStreams & Resolving], Async): Response =
-    client.send(Request.post(url, body))
+    send(Request.post(url, body))
   def put(url: String | Url, body: Body)(using Io[IpStreams & Resolving], Async): Response =
-    client.send(Request.put(url, body))
-  def delete(url: String | Url)(using Io[IpStreams & Resolving], Async): Response = client.send(Request.delete(url))
+    send(Request.put(url, body))
+  def delete(url: String | Url)(using Io[IpStreams & Resolving], Async): Response = send(Request.delete(url))
 
   /** Sends `request` and runs `use` with its response as it arrives (see `HttpClient.stream`). */
   def stream[A](request: Request)(use: Response => Async ?=> A)(using Io[IpStreams & Resolving], Async): A =
-    client.stream(request)(use)
+    withClient(_.stream(request)(use))
 }

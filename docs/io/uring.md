@@ -89,8 +89,9 @@ again, and a peer sees the end of the stream, even while the worker that holds a
 any thread (`UringHandle.close`):
 
 1. marks the handle closing, so that no use of it begins;
-2. cancels the entries on the descriptor on every ring that has had entries on it (`IORING_ASYNC_CANCEL_FD | ALL`),
-   and wakes each, from its own thread; each completes with `ECANCELED` and fails as closed;
+2. cancels the entries on the descriptor on every ring that has entries on it (`IORING_ASYNC_CANCEL_FD | ALL`), counted
+   per ring by the handle, and wakes each, from its own thread; each completes with `ECANCELED` and fails as closed. A
+   ring with none is left alone, so a close costs nothing on the workers a connection's futures merely passed through;
 3. closes the descriptor once the last use has ended, which completes the close op.
 
 An entry prepared but not yet submitted as the close begins is turned into a no-op when its worker submits, and its
@@ -99,15 +100,24 @@ right after the submission, once the close's wake-up has woken its worker (`Urin
 `afterSubmit`). Without that a read on an idle pipe kept its use for ever and the close never completed
 (`UringSuite`, "a close between a read's preparation and its submission").
 
-An op on a regular file whose completion arrives once a close has begun fails as closed even if it finished, its
-buffer's position and offset left as they were, as `FileOps` promises on every backend: the close waited for it.
+An op whose completion arrives once a close has begun fails as closed even if it finished, as `Ops.close` has it: its
+buffer's position and a file's offset left as they were, an accepted connection closed; the close waited for it.
+
+## A ring that fails
+
+`io_uring_enter` failing other than for time, a signal, an overflow or a passing shortage of memory (`EAGAIN`,
+`ENOMEM`) breaks the worker's ring. The worker then tears it down, so that the kernel lets go of every entry, fails the
+ops it had with an `IOException`, and goes on running its timers and inbox without it, parking between them; every op
+that would use the ring fails at once. Before, the worker's thread died and its inbox went on taking work, so every op
+sent to it hung.
 
 ## Turns
 
 Datagram receives on one socket, and its sends, are served in the order they began (`Turns`): the kernel does not
 keep that order among entries waiting together. Accepts take no turns: `Ops` says a listener's accepts are served
 first come, first served, which NIO keeps and this backend does not, among accepts waiting on one listener together. Only the head is in the kernel; when it ends, the next is started on
-its own worker. A withdrawal of one still waiting just takes it out; a close fails those waiting.
+its own worker. A withdrawal of one still waiting just takes it out; a close fails those waiting. The head is tried at
+once with one non-blocking `recvmsg` or `sendmsg` before it goes to the ring.
 
 ## Buffers
 
@@ -124,8 +134,11 @@ So reads waiting on idle streams hold at most half the pool between them (`Uring
 ## Blocking work
 
 Blocking ops, name resolution (`getaddrinfo`) and opening a file run on a pool of threads (`BlockingPool`). A cancel or
-a time limit skips one not yet started and interrupts one running (not a resolve or an open, which nothing interrupts),
-and `perform` returns only once it has returned. Its outcome is handed back to the op's worker through the inbox and
+a time limit skips one not yet started and interrupts a blocking op running, and `perform` returns only once it has
+returned. A resolve or an open, which nothing interrupts and which touches nothing of the caller's but its slot, is
+abandoned instead, so that the cancel or the limit holds at once, as `ResolveOps` promises: its value, once it comes, is
+not written, and a file it opened is closed. An op's outcome is written before it counts as delivered (`committed`), so
+that a time limit landing as the body returns never delivers an empty slot. Its outcome is handed back to the op's worker through the inbox and
 fired there: the runtime takes a firing that finds no listener to mean that the performer was cancelled, and the
 worker's inbox runs only once the performer has suspended.
 

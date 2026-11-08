@@ -28,17 +28,23 @@ private[uring] object NativeBuffer {
   }
 
   /** Runs `body` with a buffer the kernel can address standing for `buf`, and returns what it returns: `buf` itself if
-    * it has native memory behind it, as `allocate` and `PointerBuffer.wrap` make; else, for one on the heap, as
-    * `ByteBuffer.allocate` and, on Scala Native, `allocateDirect` make, or a read-only one, a stand-in over memory of
-    * its own, holding `buf`'s remaining bytes if `copyIn`, so that an op takes any buffer, at a copy's cost for such a
-    * one. What `body` moves the stand-in's position over is then `buf`'s: copied back into it if `copyOut`, its
-    * position advanced as far.
+    * it has native memory behind it, as `allocate` and `PointerBuffer.wrap` make; one over its own array where it is on
+    * the heap, as `ByteBuffer.allocate` and, on Scala Native, `allocateDirect` make, which the collector does not move
+    * and `buf` keeps alive through the call; else, for a read-only one, a stand-in over memory of its own, holding
+    * `buf`'s remaining bytes if `copyIn`, so that an op takes any buffer, at a copy's cost for such a one. What `body`
+    * moves the stand-in's position over is then `buf`'s: copied back into it if `copyOut`, its position advanced as
+    * far. For a call that is done as it returns: the kernel keeps none of these.
     */
   inline def staged[A](buf: ByteBuffer, inline copyIn: Boolean, inline copyOut: Boolean)(
       inline body: ByteBuffer => A
   ): A =
     if buf.hasPointer() then body(buf)
-    else {
+    else if buf.hasArray() && buf.hasRemaining() then {
+      val stand = Staging.inArray(buf)
+      val result = body(stand)
+      buf.position(buf.position() + stand.position())
+      result
+    } else {
       val zone = Zone.open()
       try {
         val stand = standIn(buf, stagingMemory(buf.remaining())(using zone), copyIn)
@@ -57,14 +63,25 @@ private[uring] object NativeBuffer {
     if bufs.forall(_.hasPointer()) then body(bufs)
     else {
       val stands = bufs.clone()
-      val zone = Zone.open() // the stand-ins' memory, all of it freed as the op is done
+      var zone: Zone | Null = null // the copies' memory, if any, all of it freed as the op is done
       try {
-        for i <- bufs.indices if !bufs(i).hasPointer() do
-          stands(i) = standIn(bufs(i), stagingMemory(bufs(i).remaining())(using zone), copyIn)
+        for i <- bufs.indices if !bufs(i).hasPointer() do {
+          val b = bufs(i)
+          stands(i) =
+            if b.hasArray() && b.hasRemaining() then Staging.inArray(b)
+            else {
+              if zone == null then zone = Zone.open()
+              standIn(b, stagingMemory(b.remaining())(using zone.nn), copyIn)
+            }
+        }
         val result = body(stands)
-        for i <- bufs.indices if stands(i) ne bufs(i) do settle(bufs(i), stands(i), copyOut)
+        for i <- bufs.indices if stands(i) ne bufs(i) do {
+          val b = bufs(i)
+          if b.hasArray() && b.hasRemaining() then b.position(b.position() + stands(i).position())
+          else settle(b, stands(i), copyOut)
+        }
         result
-      } finally zone.close()
+      } finally if zone != null then zone.nn.close()
     }
 
   /** Memory for a stand-in of `size` bytes, in `zone`. */

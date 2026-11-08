@@ -99,18 +99,23 @@ right after the submission, once the close's wake-up has woken its worker (`Urin
 `afterSubmit`). Without that a read on an idle pipe kept its use for ever and the close never completed
 (`UringSuite`, "a close between a read's preparation and its submission").
 
+An op on a regular file whose completion arrives once a close has begun fails as closed even if it finished, its
+buffer's position and offset left as they were, as `FileOps` promises on every backend: the close waited for it.
+
 ## Turns
 
 Datagram receives on one socket, and its sends, are served in the order they began (`Turns`): the kernel does not
-keep that order among entries waiting together. Only the head is in the kernel; when it ends, the next is started on
+keep that order among entries waiting together. Accepts take no turns: `Ops` says a listener's accepts are served
+first come, first served, which NIO keeps and this backend does not, among accepts waiting on one listener together. Only the head is in the kernel; when it ends, the next is started on
 its own worker. A withdrawal of one still waiting just takes it out; a close fails those waiting.
 
 ## Buffers
 
 A buffer with native memory (a pool's, or `PointerBuffer.wrap`) is handed to the kernel as it is. One over a heap array
-the kernel may write is handed over at its array's address, at no cost: sound because Scala Native's collectors never
-move an object, and the command keeps the array alive. Only a read-only buffer is copied through a stand-in
-(`Staging`).
+is handed over at its array's address, at no cost, both to an entry and to a call tried at once (`NativeBuffer.staged`):
+sound because Scala Native's collectors never move an object, and the command, or the call's caller, keeps the array
+alive. Only a read-only buffer is copied through a stand-in (`Staging`). Until 2026-11-08 a call tried at once copied
+every heap buffer through zone memory, a `malloc`, a copy and a `free` for each read and write of io-http's.
 
 A read into a pool's buffer takes a buffer as it is submitted, and the kernel receives straight into it, only while more
 than half the pool is free; otherwise the kernel waits for readiness with a `POLL_ADD`, and the buffer is taken then.
@@ -197,7 +202,11 @@ against 4.6–5.0 ms), with no errors; Go is still ahead.
 
 - Measuring on a quiet machine, against the build before the move (`bench-builds/iouringdemos`).
 - The backend's own exceptions on hot paths (`CancellationException` in a withdrawal, `TimeoutException`,
-  `HandleClosedException`) still have stack traces: `gears.async.cancellation()` once the core change is merged.
+  `HandleClosedException`) are stackless since 2026-11-08, the first with the core change's `gears.async.cancellation()`:
+  this backend depends on it until that is merged.
+- A time limit on a file op: the synchronous cancel waits for an io-wq worker's read or write to finish, a slow disk's
+  or a network file system's time, and holds the op's worker, and every future on it, meanwhile. Cancelling without
+  waiting, the completion then settling the op, would not.
 - The try heuristic, if the measurements show the extra `read(2)` on a busy connection.
 - A completion-queue overflow test and a kernel < 6.0 refusal test, which this machine cannot run.
 - A `perform` in a cancelled group: the reference and NIO backends refuse it, so a `close` in a cancelled future's

@@ -7,8 +7,6 @@ import gears.async.cancellationScope
 import java.nio.channels.SelectableChannel
 import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
-import java.util.concurrent.CancellationException
-import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** One performance of an op: its wait, when it began, and its deadline, `Long.MaxValue` for none. */
@@ -27,8 +25,8 @@ final class Ctx(val waiter: Wait, val start: Long, val deadline: Long) {
 
   /** Throws if the op has been cancelled, or its time limit has passed. */
   def checkStop(op: AnyRef)(using ac: Async): Unit = {
-    if waiter.cancelled || ac.group.isCancelled then throw new CancellationException()
-    if expired then throw new TimeoutException(s"$op timed out")
+    if waiter.cancelled || ac.group.isCancelled then throw gears.async.cancellation()
+    if expired then throw TimedOut(op)
   }
 
   /** Parks until signalled, cancelled, or the deadline. */
@@ -107,7 +105,7 @@ abstract class NioOp {
   protected def body(ctx: Ctx)(using Async): Unit
 
   final def perform(timeoutMillis: Int)(using ac: Async): Unit = {
-    if ac.group.isCancelled then throw new CancellationException()
+    if ac.group.isCancelled then throw gears.async.cancellation()
     if !this.isInstanceOf[Repeatable] && !used.compareAndSet(false, true) then
       throw new IllegalStateException(s"$this is not Repeatable, and has been performed already")
     if !busy.compareAndSet(false, true) then throw new IllegalArgumentException(s"$this is already being performed")

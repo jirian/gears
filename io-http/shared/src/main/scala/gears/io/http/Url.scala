@@ -104,8 +104,8 @@ object Url {
         val c = s.charAt(i)
         if c == '%' then {
           if i + 2 >= s.length then throw new IllegalArgumentException(s"A truncated percent-escape in $s")
-          val hi = Character.digit(s.charAt(i + 1), 16)
-          val lo = Character.digit(s.charAt(i + 2), 16)
+          val hi = hexDigit(s.charAt(i + 1))
+          val lo = hexDigit(s.charAt(i + 2))
           if hi < 0 || lo < 0 then throw new IllegalArgumentException(s"A malformed percent-escape in $s")
           out.write(hi * 16 + lo)
           i += 3
@@ -123,6 +123,12 @@ object Url {
       try decoder.decode(java.nio.ByteBuffer.wrap(out.toByteArray)).toString
       catch case e: java.nio.charset.CharacterCodingException => throw new IllegalArgumentException(s"Not UTF-8: $s", e)
     }
+
+  /** An ASCII hex digit's value, or -1: `Character.digit` takes other scripts' digits too. */
+  private def hexDigit(c: Char): Int =
+    if c >= '0' && c <= '9' then c - '0'
+    else if (c | 0x20) >= 'a' && (c | 0x20) <= 'f' then (c | 0x20) - 'a' + 10
+    else -1
 
   private val hex = "0123456789ABCDEF"
 

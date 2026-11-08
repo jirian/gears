@@ -72,7 +72,8 @@ final case class Request(
   def withAttr[A](key: Attribute[A], value: A): Request = copy(attributes = attributes.updated(key, value))
   def withHeader(name: String, value: String): Request = copy(headers = headers.set(name, value))
 
-  def header(name: String, value: String): Request = copy(headers = headers.add(name, value))
+  /** This request with a field `name: value` added beside any it has: `withHeader` replaces them. */
+  def addHeader(name: String, value: String): Request = copy(headers = headers.add(name, value))
   def withHeaders(fields: (String, String)*): Request =
     copy(headers = fields.foldLeft(headers)((h, f) => h.set(f._1, f._2)))
   def withBody(body: Body): Request = copy(body = body)
@@ -152,7 +153,8 @@ final case class Response(status: Status, headers: Headers = Headers.empty, body
 
   def withHeader(name: String, value: String): Response = copy(headers = headers.set(name, value))
 
-  def header(name: String, value: String): Response = copy(headers = headers.add(name, value))
+  /** This response with a field `name: value` added beside any it has: `withHeader` replaces them. */
+  def addHeader(name: String, value: String): Response = copy(headers = headers.add(name, value))
   def withStatus(status: Status): Response = copy(status = status)
 
   /** This response with a `Set-Cookie` header for `cookie`. */
@@ -271,6 +273,16 @@ final case class Cookie(
 ) {
   require(Headers.isToken(name), s"Not a cookie name: $name")
   require(value.forall(c => c > ' ' && c < 127 && c != '"' && c != ',' && c != ';' && c != '\\'), s"Not a cookie value")
+  // An attribute's value ends at a `;`, so one in it would add attributes of its own (RFC 6265, 4.1.1).
+  require(path.forall(Cookie.isAttributeValue), s"Not a cookie path: ${path.get}")
+  require(
+    domain.forall(d => d.nonEmpty && d.forall(c => c.isLetterOrDigit && c < 127 || c == '-' || c == '.')),
+    s"Not a cookie domain: ${domain.get}"
+  )
+  require(
+    sameSite.forall(s => Set("strict", "lax", "none").contains(s.toLowerCase)),
+    s"Not a SameSite value: ${sameSite.get}"
+  )
 
   /** The `Set-Cookie` value. */
   def rendered: String = {
@@ -287,6 +299,9 @@ final case class Cookie(
 
 object Cookie {
 
+  /** Printable ASCII, no `;`. */
+  private def isAttributeValue(v: String): Boolean = v.forall(c => c >= ' ' && c < 127 && c != ';')
+
   /** A `Set-Cookie` value's cookie, if it has a `name=value`; unknown attributes are ignored. */
   def parse(setCookie: String): Option[Cookie] = {
     val parts = setCookie.split(';').map(_.trim).toList
@@ -299,15 +314,18 @@ object Cookie {
             attrs.foldLeft(Cookie(first.substring(0, eq), first.substring(eq + 1))) { (c, attr) =>
               val kv = attr.split("=", 2)
               val v = if kv.length > 1 then Some(kv(1).trim) else None
-              kv(0).trim.toLowerCase match {
-                case "path"     => c.copy(path = v)
-                case "domain"   => c.copy(domain = v)
-                case "max-age"  => c.copy(maxAge = v.flatMap(_.toLongOption))
-                case "secure"   => c.copy(secure = true)
-                case "httponly" => c.copy(httpOnly = true)
-                case "samesite" => c.copy(sameSite = v)
-                case _          => c
-              }
+              // An attribute that is not valid is ignored, as an unknown one is.
+              scala.util
+                .Try(kv(0).trim.toLowerCase match {
+                  case "path"     => c.copy(path = v)
+                  case "domain"   => c.copy(domain = v.map(_.stripPrefix(".")))
+                  case "max-age"  => c.copy(maxAge = v.flatMap(_.toLongOption))
+                  case "secure"   => c.copy(secure = true)
+                  case "httponly" => c.copy(httpOnly = true)
+                  case "samesite" => c.copy(sameSite = v)
+                  case _          => c
+                })
+                .getOrElse(c)
             }
           }.toOption
       case Nil => None

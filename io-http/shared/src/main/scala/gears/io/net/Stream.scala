@@ -13,10 +13,11 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.duration.FiniteDuration
 
 /** A connected byte stream: a TCP or Unix socket, or TLS over one. Reads and writes suspend the calling future, and
-  * each takes a time limit, after which it throws `java.util.concurrent.TimeoutException` having moved no bytes, so
-  * that a timed-out read is a wait that gave up, not a connection lost. Failures are `IOException`s; a cancelled
-  * caller's op stops and throws `CancellationException`. One read and one write may be under way at once, from
-  * different futures; not two of either.
+  * each takes a time limit, after which it throws `java.util.concurrent.TimeoutException`: a read having moved no
+  * bytes, so that a timed-out read is a wait that gave up, not a connection lost; a write having written what its
+  * buffer's position says, so that it may be taken up again where it stopped. Failures are `IOException`s; a cancelled
+  * caller's op stops and throws `CancellationException`, as a timed-out one does. One read and one write may be under
+  * way at once, from different futures; not two of either.
   */
 trait Stream {
 
@@ -154,7 +155,8 @@ final class Listener private[io] (val io: Io[StreamSockets], listener: AnyRef) {
   def closed: Boolean = isClosed.get()
 
   /** Waits for the next connection and returns it. Throws a closed channel's `IOException` once the listener is closed,
-    * from any future.
+    * from any future. One future accepts at a time: the op is the listener's, made once, and a second `accept` while
+    * one waits fails, as performing an op twice at once does.
     */
   def accept()(using Async): SocketStream = {
     io.perform(acceptOp)

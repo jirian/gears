@@ -25,6 +25,9 @@ private[tls] object openssl {
   final val SSL_ERROR_ZERO_RETURN = 6
 
   final val SSL_CTRL_SET_TLSEXT_HOSTNAME = 55
+  final val SSL_CTRL_MODE = 33
+  final val SSL_MODE_ENABLE_PARTIAL_WRITE = 1
+  final val SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER = 2
   final val TLSEXT_NAMETYPE_host_name = 0
 
   final val BIO_CTRL_PENDING = 10

@@ -28,7 +28,7 @@ class AbandonedRequestSuite extends FunSuite {
   private val quiet = ServerConfig(host = "127.0.0.1", port = 0, log = _ => ())
 
   private def withServer[A](routes: Routes, config: ServerConfig = quiet)(
-      body: Server => (Io[DefaultCapabilities], Async.Spawn, AsyncOperations) ?=> A
+      body: Server => (Io[DefaultCapabilities], Async.Spawn) ?=> A
   ): A = Http.testServer(routes, config)(body)
 
   /** Sends `raw` on a new connection and closes it `after` later, without reading. */

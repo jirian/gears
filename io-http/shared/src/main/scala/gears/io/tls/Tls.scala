@@ -16,7 +16,9 @@ final case class TlsClientConfig(verify: Boolean = true, trusted: Option[String]
 final case class TlsServerConfig(certificateChain: String, privateKey: String)
 
 /** A stream through TLS 1.2 or 1.3. Its end is authenticated: `closeNotified` says whether the peer ended with TLS's
-  * close notification, without which an end may be an attacker's truncation (see `Wire.Source`).
+  * close notification, without which an end may be an attacker's truncation (see `Wire.Source`). A write that times out
+  * or is cancelled has given TLS what its buffer's position says, and what of its records had not gone out goes first
+  * with the next write, or the close: a record is never cut, and nothing is sent twice.
   */
 abstract class TlsStream extends Stream {
   override def secure: Boolean = true

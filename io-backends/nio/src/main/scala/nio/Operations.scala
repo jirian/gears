@@ -24,8 +24,6 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
-import java.util.concurrent.CancellationException
-import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 
 private[nio] object Operations {
@@ -175,11 +173,11 @@ private[nio] object Timers {
       val timesOut = ctx.deadline != Long.MaxValue && ctx.deadline - at < 0
       val next = if timesOut then ctx.deadline else at
       if System.nanoTime() - next >= 0 then {
-        if timesOut then throw new TimeoutException(s"$op timed out")
+        if timesOut then throw TimedOut(op)
         return
       }
       ctx.parkUntil(next)
-      if ctx.waiter.cancelled then throw new CancellationException()
+      if ctx.waiter.cancelled then throw gears.async.cancellation()
     }
   }
 }
@@ -513,7 +511,7 @@ private[nio] final class OnThread[A](op: AnyRef, work: () => A, commit: A => Uni
   }
 
   private def stopped(ctx: Ctx): Throwable =
-    if ctx.waiter.cancelled then new CancellationException() else new TimeoutException(s"$op timed out")
+    if ctx.waiter.cancelled then gears.async.cancellation() else TimedOut(op)
 }
 
 final class BlockingOp[A <: AnyRef](work: () => A, into: Slot[A] | Null) extends NioOp {

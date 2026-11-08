@@ -40,7 +40,13 @@ private[uring] object BlockingPool {
   * for the regular file, so that io_uring reads uncached data from the disk rather than reporting would-block.
   */
 private[uring] final class OpenFile(path: String, write: Boolean, into: Slot[FileHandle])
-    extends BlockingTask[FileHandle](() => Files.open(path, write), into.set, List(into), interruptible = false) {
+    extends BlockingTask[FileHandle](
+      () => Files.open(path, write),
+      into.set,
+      List(into),
+      interruptible = false,
+      discard = file => unistd.close(file.fd): Unit
+    ) {
   override def toString: String = s"open of $path"
 }
 

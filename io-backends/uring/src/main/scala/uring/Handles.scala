@@ -28,11 +28,26 @@ sealed abstract class UringHandle(val fd: Int, kind: String) {
   private val descriptorClosed = new AtomicBoolean()
   @volatile private var onClosed: (() => Unit) | Null = null
 
-  /** The rings that have had entries on the descriptor, which a close cancels them on. */
-  private[uring] val rings: java.util.Set[Ring] = ConcurrentHashMap.newKeySet[Ring]()
+  /** How many commands have entries on the descriptor on each ring that has had one: a close cancels and wakes only the
+    * rings with some, not every worker's that a future moving between workers ever used.
+    */
+  private val rings = new ConcurrentHashMap[Ring, AtomicInteger]()
 
-  /** Adds `ring` to `rings`, with only a read once it is there, as it is for every op after a handle's first. */
-  private[uring] def onRing(ring: Ring): Unit = if !rings.contains(ring) then rings.add(ring): Unit
+  /** A command is about to have an entry on `ring`. Before its submission, which checks `isClosing`. */
+  private[uring] def onRing(ring: Ring): Unit = {
+    var n = rings.get(ring)
+    if n == null then {
+      rings.putIfAbsent(ring, new AtomicInteger()): Unit
+      n = rings.get(ring)
+    }
+    n.nn.incrementAndGet(): Unit
+  }
+
+  /** A command's entries on `ring` are done with. */
+  private[uring] def offRing(ring: Ring): Unit = {
+    val n = rings.get(ring)
+    if n != null then n.decrementAndGet(): Unit
+  }
 
   /** One read at a time on a stream, and one write. */
   private[uring] val reading = new AtomicBoolean()
@@ -69,9 +84,12 @@ sealed abstract class UringHandle(val fd: Int, kind: String) {
       closing = true
     }
     beginClosing()
-    rings.forEach { ring =>
-      ring.cancelFd(fd)
-      ring.wake() // so that it cancels an entry it submitted as the close began (`UringWorker`)
+    // A command counted after this read sees `closing` as it submits, and its entry becomes a no-op.
+    rings.forEach { (ring, n) =>
+      if n.get() > 0 then {
+        ring.cancelFd(fd)
+        ring.wake() // so that it cancels an entry it submitted as the close began (`UringWorker`)
+      }
     }
     if uses.get() == 0 then closeDescriptor()
     descriptorClosed.get()

@@ -190,19 +190,27 @@ private[uring] object Sockets {
   def listen(fd: Int): Unit =
     if socket.listen(fd, Backlog) != 0 then throw new IOException(s"Failed to listen: ${cError()}")
 
-  /** Starts connecting `fd` to `address`: true if it connected at once, false if it is connecting. */
+  /** Starts connecting `fd` to `address`: true if it connected at once, false if it is connecting. `EAGAIN` is a
+    * failure: for a Unix socket it means the listener's backlog is full, and nothing was started.
+    */
   def startConnect(fd: Int, address: IpSocketAddress | UnixAddress): Boolean = {
     val s = new Storage
     write(address, s)
     if socket.connect(fd, s.at, s.length.toUInt) == 0 then true
-    else if errno.errno == errno.EINPROGRESS || errno.errno == errno.EAGAIN || errno.errno == errno.EINTR then false
+    else if errno.errno == errno.EINPROGRESS || errno.errno == errno.EINTR then false
     else throw new IOException(s"Failed to connect to $address: ${cError()}")
   }
 
-  /** Fails if a connection under way on `fd` failed (`SO_ERROR`). */
+  /** Fails unless a connection under way on `fd` was made: its error (`SO_ERROR`) is none, and it has a peer, since a
+    * socket that never connected also polls writable with no error.
+    */
   def checkConnected(fd: Int, address: AnyRef): Unit = {
     val error = getInt(fd, socket.SOL_SOCKET, socket.SO_ERROR, "SO_ERROR")
     if error != 0 then throw new IOException(s"Failed to connect to $address: ${fromCString(string.strerror(error))}")
+    val s = new Storage
+    s.length = StorageSize
+    if socket.getpeername(fd, s.at, s.lengthAt) != 0 then
+      throw new IOException(s"Failed to connect to $address: ${cError()}")
   }
 
   def shutdownOutput(fd: Int): Unit =

@@ -126,10 +126,26 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
     case _               => true
   }
 
-  private[uring] final def release(): Unit = direction match {
-    case Command.Reading => handle.reading.set(false)
-    case Command.Writing => handle.writing.set(false)
-    case _               => ()
+  /** The ring its entries are on, counted by its handle (`onRing`) until it is done with it (`release`). */
+  private var ringOf: Ring | Null = null
+
+  private[uring] final def onRing(ring: Ring): Unit = {
+    handle.onRing(ring)
+    ringOf = ring
+  }
+
+  /** Lets go of its stream's read or write, and of its count on its ring: it is done with its handle for now. */
+  private[uring] final def release(): Unit = {
+    val ring = ringOf
+    if ring != null then {
+      ringOf = null
+      handle.offRing(ring)
+    }
+    direction match {
+      case Command.Reading => handle.reading.set(false)
+      case Command.Writing => handle.writing.set(false)
+      case _               => ()
+    }
   }
 
   private[uring] final def prepareSubmission(sqe: Ptr[io_uring_sqe]): Unit =
@@ -139,12 +155,22 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   private[uring] final def finishSubmission(res: Int): Boolean =
     if awaitingReadiness then {
       awaitingReadiness = false // the descriptor is ready: submitting again runs the command itself
-      if res < 0 && !Results.transient(res) then throw Results.failure(s"Failed to wait for descriptor $fd", res)
+      if res < 0 && !Results.transient(res) then {
+        discard() // what the submission before it staged
+        throw Results.failure(s"Failed to wait for descriptor $fd", res)
+      }
       false
     } else if res == -errno.EAGAIN && readinessEvents != 0 then {
       awaitingReadiness = true
       false
     } else finish(res)
+
+  /** Lets go of what the completion `res`, not applied, made: only the command's own entry's, not a readiness poll's.
+    */
+  private[uring] final def dropCompletion(res: Int): Unit = if !awaitingReadiness then dropResult(res)
+
+  /** What `dropCompletion` lets go of: nothing, but an accepted connection's descriptor. */
+  protected def dropResult(res: Int): Unit = ()
 
   /** Lets go of a submission withdrawn, or failed by a close, before its result was applied. */
   private[uring] final def discardSubmission(): Unit = {
@@ -474,8 +500,13 @@ private[uring] final class PooledRead(val handle: UringHandle, pool: NativePool,
     slot.nn
   }
 
+  // A regular file is always readable, and a read of it blocks on the disk: it is read only by a kernel worker, into
+  // a buffer taken now, never polled and then read on this thread.
+  private val file = handle.isInstanceOf[FileHandle]
+
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
-    if held == null && !pollNext && pool.available * 2 > pool.buffers then held = pool.take()
+    if held == null && (file || !pollNext && pool.available * 2 > pool.buffers) then
+      held = if file then take() else pool.take()
     val slot = held
     if slot == null then io_uring_prep_poll_add(sqe, fd, Linux.POLLIN.toUInt)
     else io_uring_prep_read(sqe, fd, slot.address, slot.buffer.capacity().toUInt, Results.currentPosition)
@@ -491,7 +522,7 @@ private[uring] final class PooledRead(val handle: UringHandle, pool: NativePool,
     } else if Results.transient(res) then {
       held = null
       slot.release()
-      pollNext = true
+      pollNext = !file
       false
     } else {
       held = null
@@ -634,6 +665,8 @@ private[uring] final class Accept(val handle: ListenerHandle, into: Slot[Connect
     if client >= 0 then into.set(Accepts.accepted(handle, client))
     client >= 0
   }
+
+  override protected def dropResult(res: Int): Unit = if res >= 0 then scala.scalanative.posix.unistd.close(res): Unit
 }
 
 /** Accepts the connections waiting on a listener, at most `max`, writing them into `into`: it waits in the kernel for
@@ -687,12 +720,7 @@ private[uring] object Accepts {
 
   /** The connection `client`, accepted on `listener`, with the options the listener gives each it accepts. */
   def accepted(listener: ListenerHandle, client: Int): ConnectionHandle = {
-    try Sockets.apply(client, SocketOption.accepted(listener.options, listener.kind))
-    catch {
-      case e: Throwable =>
-        scala.scalanative.posix.unistd.close(client): Unit // never reaches the caller, so closed here
-        throw e
-    }
+    Sockets.apply(client, SocketOption.accepted(listener.options, listener.kind)) // which closes it if it fails
     new ConnectionHandle(client, listener.unix)
   }
 }
@@ -792,10 +820,21 @@ private[uring] final class ReceiveFrom(val handle: DatagramHandle, buf: ByteBuff
   private val staging = new Staging(Array(buf), copyIn = false, copyOut = true)
   private val header = new MessageHeader(1, named = true)
 
-  protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
+  private def setUp(): Unit = {
     buf.clear()
     header.set(header.fill(staging.begin(), room = true), header.capacity)
+  }
+
+  protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
+    setUp()
     io_uring_prep_recvmsg(sqe, fd, header.msg, 0)
+  }
+
+  /** A packet waiting already is taken with one `recvmsg`, without a turn of the worker's loop. */
+  override def tryAtOnce(): Boolean = {
+    setUp()
+    val n = Unblocked.recvmsg(fd, header.msg.asInstanceOf[Ptr[socket.msghdr]], Linux.MSG_DONTWAIT).toInt
+    Datagrams.atOnce(n, finish, staging)
   }
 
   protected def finish(res: Int): Boolean =
@@ -838,11 +877,23 @@ private[uring] final class SendTo(val handle: DatagramHandle, bufs: Array[ByteBu
   private val header = new MessageHeader(math.min(bufs.length, NonBlocking.MaxBuffers), named = to != null)
   private var size = 0L
 
-  protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
+  private def setUp(): Unit = {
     size = bufs.foldLeft(0L)(_ + _.remaining())
     val nameLength = if to == null then 0 else Sockets.write(Sockets.target(handle.ipv6, to.nn), header.name)
     header.set(header.fill(staging.begin(), room = false), nameLength)
+  }
+
+  protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
+    setUp()
     io_uring_prep_sendmsg(sqe, fd, header.msg, 0)
+  }
+
+  /** Sent with one `sendmsg` if the socket has room, without a turn of the worker's loop. */
+  override def tryAtOnce(): Boolean = {
+    setUp()
+    val n =
+      Unblocked.sendmsg(fd, header.msg.asInstanceOf[Ptr[socket.msghdr]], Linux.MSG_DONTWAIT | Linux.MSG_NOSIGNAL).toInt
+    Datagrams.atOnce(n, finish, staging)
   }
 
   protected def finish(res: Int): Boolean =
@@ -858,15 +909,37 @@ private[uring] final class SendTo(val handle: DatagramHandle, bufs: Array[ByteBu
   override protected def discard(): Unit = staging.end()
 }
 
+private object Datagrams {
+
+  /** A datagram's system call tried at once, `n` what it returned: done, through `finish`, unless it would block, which
+    * leaves the buffers as they were for the ring to try.
+    */
+  def atOnce(n: Int, finish: Int => Boolean, staging: Staging): Boolean = {
+    val res = if n >= 0 then n else -errno.errno
+    if res == -errno.EAGAIN || res == -errno.EWOULDBLOCK || res == -errno.EINTR then {
+      staging.end()
+      false
+    } else finish(res)
+  }
+}
+
 // ---- Run on the blocking pool (see Blocking.scala)
 
 /** An op run on the blocking pool (see `BlockingOps.blocking`): `body` runs on a pool thread, its value written by
   * `deliver`, and the op fired from that thread once it has returned. A cancel or a time limit before it starts skips
   * it; one while it runs interrupts it, if `interruptible`, and the op settles once it has returned, so that `perform`
-  * returns only then; one after its value was written is too late, the op completing with it (`committed`). One-shot.
+  * returns only then; one after its value was written is too late, the op completing with it (`committed`). A body that
+  * nothing interrupts, a name lookup or an open, which touches nothing of the caller's but its slot, is abandoned
+  * instead, so that the cancel or the limit holds at once: its value, once it returns, is not written, and `discard`
+  * lets go of it. One-shot.
   */
-private[uring] class BlockingTask[A](body: () => A, deliver: A => Unit, slots: List[Slot[?]], interruptible: Boolean)
-    extends SingleUseAbstractTimerHeapOp
+private[uring] class BlockingTask[A](
+    body: () => A,
+    deliver: A => Unit,
+    slots: List[Slot[?]],
+    interruptible: Boolean,
+    discard: A => Unit = (_: A) => ()
+) extends SingleUseAbstractTimerHeapOp
     with UringOp {
   import BlockingTask.*
 
@@ -896,25 +969,36 @@ private[uring] class BlockingTask[A](body: () => A, deliver: A => Unit, slots: L
         // Whatever it throws is its outcome, an `Error` too, so that it always fires and its performer never hangs.
         try Success(body())
         catch case e: Throwable => Failure(e)
-      val committed = synchronized {
+      val next = synchronized {
         runner = null
-        val write = result.isSuccess && !stopped
-        state = if write then Committed else Finished
-        write
+        if state == Abandoned then Abandoned
+        else {
+          state = if result.isSuccess && !stopped then Delivering else Finishing
+          state
+        }
       }
       Thread.interrupted(): Unit // the flag a late interrupt left goes with the op
-      outcome =
-        if committed then {
-          try {
-            deliver(result.get)
-            WorkpoolScheduler.SuccessUnit
-          } catch case NonFatal(e) => Failure(e)
-        } else
-          result match {
-            case Failure(e) if !isStopped => Failure(e)
-            case _                        => Failure(gears.async.cancellation())
-          }
-      fire()
+      if next == Abandoned then
+        result.foreach(v =>
+          try discard(v)
+          catch case NonFatal(_) => ()
+        )
+      else {
+        // The outcome is written before the state says it is there, which a time limit reads (`committed`).
+        outcome =
+          if next == Delivering then {
+            try {
+              deliver(result.get)
+              WorkpoolScheduler.SuccessUnit
+            } catch case NonFatal(e) => Failure(e)
+          } else
+            result match {
+              case Failure(e) if !isStopped => Failure(e)
+              case _                        => Failure(gears.async.cancellation())
+            }
+        synchronized { state = if next == Delivering then Committed else Finished }
+        fire()
+      }
       result match {
         case Failure(e: VirtualMachineError) => throw e // the pool's thread is not to carry on as if all were well
         case _                               =>
@@ -929,12 +1013,14 @@ private[uring] class BlockingTask[A](body: () => A, deliver: A => Unit, slots: L
     */
   private def fire(): Unit = {
     val o = owner.nn
-    val run: Runnable = () => if !hasDeadline || offHeap || o.removeTimer(this) then timerWakeup(System.nanoTime())
+    // Not once settled: a time limit may have failed it already, with nothing in use.
+    val run: Runnable = () =>
+      if !isSettled && (!hasDeadline || offHeap || o.removeTimer(this)) then timerWakeup(System.nanoTime())
     if !o.submit(run) then run.run() // the worker has stopped: nothing waits on its inbox
   }
 
-  /** Stops it, from any thread: true if it never started, and so never fires; false if it runs, interrupted, and fires
-    * once it has returned, or has returned already.
+  /** Stops it, from any thread: true if it never fires, having never started or been abandoned; false if it runs,
+    * interrupted, and fires once it has returned, or has returned already.
     */
   private[uring] def stop(): Boolean = synchronized {
     stopped = true
@@ -942,19 +1028,26 @@ private[uring] class BlockingTask[A](body: () => A, deliver: A => Unit, slots: L
       case Queued =>
         state = Skipped
         true
+      case Running if !interruptible =>
+        state = Abandoned
+        true
       case Running =>
-        if interruptible then runner.nn.interrupt()
+        runner.nn.interrupt()
         false
-      case _ => false
+      case Skipped | Abandoned => true
+      case _                   => false
     }
   }
 
   override protected def committed: Boolean = synchronized(state == Committed)
 
-  override protected def limitReached(): Boolean = synchronized(state == Finished || state == Skipped) || {
-    val skipped = stop()
-    if !skipped then offHeap = true // it fires as it returns
-    skipped
+  /** True, so that it fails as out of time now, if nothing of it is in use: it never started, was abandoned, or has its
+    * failure; else it fires itself as it returns.
+    */
+  override protected def limitReached(): Boolean = synchronized(state == Finished) || {
+    val now = stop()
+    if !now then offHeap = true
+    now
   }
 
   def wakeup(resumedAt: Long): Try[Unit] = outcome
@@ -963,9 +1056,12 @@ private[uring] class BlockingTask[A](body: () => A, deliver: A => Unit, slots: L
 private[uring] object BlockingTask {
   inline val Queued = 0
   inline val Running = 1
-  inline val Finished = 2 // returned, its value not written
-  inline val Committed = 3 // its value written
-  inline val Skipped = 4
+  inline val Finished = 2 // returned, its outcome a failure, set
+  inline val Committed = 3 // its value written, its outcome set
+  inline val Skipped = 4 // never started
+  inline val Delivering = 5 // returned, its value being written
+  inline val Finishing = 6 // returned, its failure being set
+  inline val Abandoned = 7 // stopped while running, its value to be let go of
 }
 
 // ---- Regular files

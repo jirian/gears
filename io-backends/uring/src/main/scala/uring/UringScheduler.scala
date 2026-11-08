@@ -30,9 +30,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
   // A class parameter is set before the superclass's constructor runs, which makes the workers.
   override def makeWorker(id: Int): UringWorker = new UringWorker(id, rings(id))
 
-  private def isWorkerOf(worker: UringWorker): Boolean =
-    try workerOfCurrentThread() eq worker
-    catch case _: IllegalStateException => false
+  private def isWorkerOf(worker: UringWorker): Boolean = worker.isCurrent
 
   final class UringWorker(id: Int, givenRing: Ring)
       extends WorkpoolScheduler.Worker[UringOp, UringBackend.type](id, UringBackend) {
@@ -137,10 +135,11 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         passTurn(command)
         true
       } else {
-        handle.onRing(own.ring)
+        command.onRing(own.ring)
         try submit(command)
         catch {
           case failure: Throwable =>
+            command.discardSubmission() // what it staged, and a connecting socket
             command.release()
             handle.leave()
             passTurn(command)
@@ -153,6 +152,8 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
 
     /** Prepares an entry for `command`, which the next wait submits. */
     private def submit(command: Command): Unit = {
+      val b = broken
+      if b != null then throw new java.io.IOException("The io_uring worker's ring failed", b)
       val o = own
       val sqe = o.ring.nextSqe()
       try command.prepareSubmission(sqe)
@@ -171,40 +172,91 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       o.prepared += command
     }
 
-    override protected def wake(): Unit = own.ring.wake()
+    /** Set once the ring has failed for good: the worker then runs its timers and inbox without it, parking between
+      * them, and fails every op that would use it.
+      */
+    @volatile private var broken: Throwable | Null = null
+
+    override protected def wake(): Unit =
+      if broken == null then own.ring.wake() else java.util.concurrent.locks.LockSupport.unpark(workerThread)
+
+    @volatile private var workerThread: Thread | Null = null
 
     override def waitForDeadline(deadlineTask: Long): Unit =
-      own.ring.await(deadlineTask, !isEmpty())(dispatch)
+      if broken != null then {
+        if isEmpty() then
+          if deadlineTask < 0 then java.util.concurrent.locks.LockSupport.park()
+          else java.util.concurrent.locks.LockSupport.parkNanos(math.max(deadlineTask - System.nanoTime(), 0L))
+      } else
+        try own.ring.await(deadlineTask, !isEmpty())(dispatch)
+        catch case failure: Throwable => fail(failure)
+
+    /** The ring failed: it is torn down, so that the kernel lets go of every entry, and the ops it had are failed. */
+    private def fail(cause: Throwable): Unit = {
+      workerThread = Thread.currentThread()
+      broken = cause
+      System.err.println(s"[gears-io-uring] a worker's ring failed; its ops fail from now on: $cause")
+      val o = own
+      o.ring.close()
+      val held = o.inFlight.values.toList
+      o.inFlight.clear()
+      o.prepared.clear()
+      o.submitted.clear()
+      for command <- held do {
+        command.state = Command.Idle
+        command.discardSubmission()
+        try settle(command, Failure(new java.io.IOException("The io_uring worker's ring failed", cause)))
+        catch case e: Throwable => e.printStackTrace()
+      }
+    }
 
     /** Applies the completion of the entry with user data `id`, unless the entry was withdrawn, and fires its op, or
       * submits it again.
       */
     private val dispatch: (Long, Int) => Unit = (id, res) => {
-      val command = own.inFlight.remove(id).orNull
+      val command = own.inFlight.getOrNull(id)
       if command != null then {
+        own.inFlight -= id
         command.state = Command.Idle
         val handle = command.handle
-        // A file's op fails once a close has come, even having finished, as `FileOps` has it, so that every backend
-        // leaves its buffer and offset as they were: the close waited for it.
-        if (res == -errno.ECANCELED || handle.isInstanceOf[FileHandle]) && handle.isClosing then {
-          command.discardSubmission()
-          settle(command, Failure(handle.closedFailure))
-        } else if res == -errno.ECANCELED && command.wantOut then {
-          command.discardSubmission()
-          settle(command, Failure(gears.async.cancellation()))
-        } else
-          try
-            if command.finishSubmission(res) then {
-              command.done = true
-              settle(command, WorkpoolScheduler.SuccessUnit)
-            } else if handle.isClosing then {
-              command.discardSubmission()
-              settle(command, Failure(handle.closedFailure))
-            } else if command.wantOut then {
-              command.discardSubmission()
-              settle(command, Failure(gears.async.cancellation()))
-            } else submit(command)
-          catch case failure: Throwable => settle(command, Failure(failure))
+        // The outcome, or null if it was submitted again; settled outside the `try`, so that a settle that throws is
+        // not settled a second time. None succeeds once a close has begun, as `Ops.close` has it, even having
+        // finished: its buffer and a file's offset are left as they were, and what it made, an accepted connection,
+        // is let go of.
+        val outcome: scala.util.Try[Unit] | Null =
+          if handle.isClosing then {
+            command.dropCompletion(res)
+            command.discardSubmission()
+            Failure(handle.closedFailure)
+          } else if res == -errno.ECANCELED && command.wantOut then {
+            command.discardSubmission()
+            Failure(gears.async.cancellation())
+          } else
+            try
+              if command.finishSubmission(res) then {
+                command.done = true
+                WorkpoolScheduler.SuccessUnit
+              } else if handle.isClosing then {
+                command.discardSubmission()
+                Failure(handle.closedFailure)
+              } else if command.wantOut then {
+                command.discardSubmission()
+                Failure(gears.async.cancellation())
+              } else
+                try {
+                  submit(command)
+                  null
+                } catch {
+                  case failure: Throwable =>
+                    command.discardSubmission()
+                    Failure(failure)
+                }
+            catch
+              case failure: Throwable => Failure(failure) // the command let go of what it held as it failed
+        // What a settle throws, a turn that cannot be passed on, is the next command's, not the ring's.
+        if outcome != null then
+          try settle(command, outcome)
+          catch case e: Throwable => e.printStackTrace()
       }
     }
 
@@ -242,7 +294,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
               command.done = true
               settle(command, WorkpoolScheduler.SuccessUnit)
             } else {
-              handle.onRing(own.ring)
+              command.onRing(own.ring)
               submit(command)
             }
           } catch case failure: Throwable => settle(command, Failure(failure))

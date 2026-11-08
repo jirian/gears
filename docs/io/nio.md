@@ -23,6 +23,9 @@ takes no lock, and `Ctx.checkStop` sees a cancel after every try instead. A grou
 it is linked (`CompletionGroup.add`), so no cancel is missed. The contracts pass with `Retries` at 8 and at 0 (177,
 1 skipped); io-http's JVM tests pass (44).
 
+Its cancels, timeouts and closed-handle failures have no stack trace (`gears.async.cancellation()`, `TimedOut`,
+`HandleClosedException`).
+
 `AcceptAllOp` no longer drops the connections it has accepted when a later accept fails (the descriptor limit, say):
 it delivers them, and the next accept meets the failure. The same in the io_uring backend's `AcceptAll`.
 

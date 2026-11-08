@@ -135,12 +135,15 @@ object Unix {
   */
 private[io] object IpLiteral {
 
+  /** An ASCII digit: `Char.isDigit` takes other scripts' too. */
+  private def isDigit(c: Char): Boolean = c >= '0' && c <= '9'
+
   def parse(text: String): Option[IpAddress] =
     if text.contains(':') then ipv6(text) else ipv4(text).map(b => IpAddress.fromBytes(Protocol.IPv4, b))
 
   private def ipv4(text: String): Option[Array[Byte]] = {
     val parts = text.split('.')
-    if parts.length == 4 && parts.forall(p => p.nonEmpty && p.length <= 3 && p.forall(_.isDigit) && p.toInt <= 255)
+    if parts.length == 4 && parts.forall(p => p.nonEmpty && p.length <= 3 && p.forall(isDigit) && p.toInt <= 255)
     then Some(parts.map(_.toInt.toByte))
     else None
   }
@@ -156,7 +159,7 @@ private[io] object IpLiteral {
   }
 
   private def scopeId(text: String): Option[Int] =
-    if text.nonEmpty && text.length <= 9 && text.forall(_.isDigit) then Some(text.toInt) else None
+    if text.nonEmpty && text.length <= 9 && text.forall(isDigit) then Some(text.toInt) else None
 
   /** The 16 bytes of `text`, without its scope: hex groups, at most one `::` for a run of zero groups, and a dotted
     * IPv4 tail only at the very end.
@@ -185,7 +188,7 @@ private[io] object IpLiteral {
     }
 
   private def group(s: String): Option[Array[Byte]] =
-    if s.nonEmpty && s.length <= 4 && s.forall(c => Character.digit(c, 16) >= 0) then {
+    if s.nonEmpty && s.length <= 4 && s.forall(c => isDigit(c) || (c | 0x20) >= 'a' && (c | 0x20) <= 'f') then {
       val v = Integer.parseInt(s, 16)
       Some(Array((v >>> 8).toByte, v.toByte))
     } else None

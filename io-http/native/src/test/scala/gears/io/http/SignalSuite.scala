@@ -15,6 +15,14 @@ class SignalSuite extends FunSuite {
   override val munitTimeout = scala.concurrent.duration.Duration(60, "s")
 
   test("SIGTERM shuts Http.serve down gracefully: the request under way finishes, and serve returns") {
+    serveUntilSigterm()
+  }
+
+  test("a second Http.serve in the process is stopped by its own SIGTERM, which the first's reader does not take") {
+    serveUntilSigterm() // before, the second signal reached the first serve's reader, which ended the process
+  }
+
+  private def serveUntilSigterm(): Unit = {
     val port = 20_000 + scala.util.Random.nextInt(20_000)
     val returned = new CountDownLatch(1)
     val serving = new Thread(() => {

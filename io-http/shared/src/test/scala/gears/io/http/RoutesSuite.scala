@@ -224,6 +224,22 @@ class UrlSuite extends FunSuite {
     assertEquals(base.resolve("?page=2").rawQuery, Some("page=2"))
   }
 
+  test("digits of other scripts are not digits: not in an address, nor in a percent-escape") {
+    assertEquals(gears.io.net.Tcp.numeric("127.0.0.1", 80).map(_.toString), Some("127.0.0.1:80"))
+    assertEquals(gears.io.net.Tcp.numeric("\u0661\u0662\u0667.0.0.1", 80), None)
+    assertEquals(gears.io.net.Tcp.numeric("::\u0661", 80), None)
+    intercept[IllegalArgumentException](Url.decode("%\u0664\u0661", plusIsSpace = false))
+    assertEquals(Url.decode("%4a%4A", plusIsSpace = false), "JJ")
+  }
+
+  test("a cookie's attributes cannot carry attributes of their own; a bad one parsed is ignored") {
+    intercept[IllegalArgumentException](Cookie("a", "b", path = Some("/; Domain=evil.example")))
+    intercept[IllegalArgumentException](Cookie("a", "b", domain = Some("evil.example; Secure")))
+    intercept[IllegalArgumentException](Cookie("a", "b", sameSite = Some("Lax; Domain=x")))
+    assertEquals(Cookie("a", "b", path = Some("/x"), sameSite = Some("Lax")).rendered, "a=b; Path=/x; SameSite=Lax")
+    assertEquals(Cookie.parse("a=b; SameSite=Sideways; Path=/p"), Some(Cookie("a", "b", path = Some("/p"))))
+  }
+
   test("the url interpolator escapes what it interpolates") {
     val name = "a/b c?d"
     assertEquals(url"https://h/users/$name?q=$name".toString, "https://h/users/a%2Fb%20c%3Fd?q=a%2Fb%20c%3Fd")

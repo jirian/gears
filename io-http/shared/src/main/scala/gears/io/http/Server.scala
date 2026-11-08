@@ -3,6 +3,9 @@ package gears.io.http
 import gears.async.Async
 import gears.async.Future
 import gears.async.io.Io
+import gears.async.io.IpAddress
+import gears.async.io.IpSocketAddress
+import gears.async.io.Protocol
 import gears.io.net.BufferedInput
 import gears.io.net.Listener
 import gears.io.net.Stream
@@ -19,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
+import scala.util.Success
 
 /** How long a server waits for each part of a request, each finite by default, so that a client that stalls cannot hold
   * a connection: `header`, from a request's first byte to the end of its head, all of it, so that a client sending a
@@ -79,8 +83,21 @@ final class Server private[http] (config: ServerConfig, listener: Listener, done
   /** How many connections are open. */
   def connections: Int = state.connections.get()
 
-  /** Its URL on this host, `http://127.0.0.1:<port>`, or `https`. */
-  def url: Url = Url.parse(s"${if config.tls.isDefined then "https" else "http"}://127.0.0.1:$port")
+  /** Its URL on this host, `http` or `https`, at the address it listens on, or the loopback address if it listens on
+    * every interface: `http://127.0.0.1:<port>`, or `http://[::1]:<port>` for `::`. An IPv6 address's scope is left
+    * out, since a URL's host has none.
+    */
+  val url: Url = {
+    val host = listener.localAddress match {
+      case IpSocketAddress(a, _) if a == IpAddress.IPv4Any      => "127.0.0.1"
+      case IpSocketAddress(a, _) if a == IpAddress.IPv6Any      => "[::1]"
+      case IpSocketAddress(a, _) if a.protocol == Protocol.IPv6 =>
+        s"[${IpAddress(Protocol.IPv6, a.bytes)}]"
+      case IpSocketAddress(a, _) => a.toString
+      case other                 => throw new IllegalStateException(s"A server on $other has no URL")
+    }
+    Url.parse(s"${if config.tls.isDefined then "https" else "http"}://$host:$port")
+  }
 
   /** Stops accepting connections and closes the idle ones, lets the requests under way finish for up to `grace`, and
     * then stops the rest; returns once every connection is closed.
@@ -88,12 +105,9 @@ final class Server private[http] (config: ServerConfig, listener: Listener, done
   def shutdown(grace: FiniteDuration = 10.seconds)(using Async): Unit = {
     state.stopping.set(true)
     listener.close()
+    state.acceptEnded()
     state.closeIdle()
-    val deadline = System.nanoTime() + grace.toNanos
-    while state.connections.get() > 0 && System.nanoTime() < deadline do
-      gears.async.AsyncOperations.sleep(10)(using
-        state.async
-      )
+    gears.async.withTimeoutOption(grace)(state.drained.await)(using state.async, summon[Async]): Unit
     done.cancel()
     done.awaitResult: Unit
   }
@@ -111,6 +125,28 @@ private[http] object Server {
     val stopping = new AtomicBoolean(false)
     val connections = new AtomicInteger(0)
     val open = java.util.concurrent.ConcurrentHashMap.newKeySet[Connection]()
+
+    private val accepting = new AtomicBoolean(true)
+    private val noneLeft = Future.Promise[Unit]()
+
+    /** Completes once no connection will be accepted (`acceptEnded`) and none is open. */
+    def drained: Future[Unit] = noneLeft.asFuture
+
+    /** A connection taken, counted: false, uncounted, if there are as many as `limit` already, or the server stops. */
+    def admit(limit: Int): Boolean =
+      if connections.incrementAndGet() > limit || stopping.get() then {
+        ended()
+        false
+      } else true
+
+    /** A connection admitted has closed. */
+    def ended(): Unit = if connections.decrementAndGet() == 0 && !accepting.get() then noneLeft.complete(Success(()))
+
+    /** No more connections will be admitted: from the accept loop, as it stops, or from `shutdown`. */
+    def acceptEnded(): Unit = {
+      accepting.set(false)
+      if connections.get() == 0 then noneLeft.complete(Success(()))
+    }
 
     /** Closes the connections waiting for a request: a client that sends one just then sees the connection close, and
       * may send it again, as one does when a kept-alive connection closes under it.
@@ -143,18 +179,17 @@ private[http] object Server {
                   null
               }
             if stream == null then accepting = !state.stopping.get() && !listener.closed
-            else if state.connections.incrementAndGet() > config.limits.connections || state.stopping.get() then {
-              state.connections.decrementAndGet()
-              stream.close()
-            } else {
+            else if !state.admit(config.limits.connections) then stream.close()
+            else {
               Future {
                 try new Connection(stream, routes, config, tlsContext, state, io, connectionsGroup).run()
-                finally state.connections.decrementAndGet()
+                finally state.ended()
               }: Unit
             }
           }
           // Leaving the group would cancel the connections: they finish first, or `shutdown`'s grace ends them.
-          while state.connections.get() > 0 do gears.async.AsyncOperations.sleep(10)
+          state.acceptEnded()
+          state.drained.await
         }
       finally listener.close()
     }

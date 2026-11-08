@@ -29,7 +29,11 @@ sealed trait Body {
   /** All of it, decoded by `A`'s decoder. */
   def as[A](using decoder: BodyDecoder[A], async: Async): A = decoder.decode(bytes(), contentType)
 
-  /** Reads into `buf` once some bytes are there: how many, or -1 at the end. */
+  /** Reads into `buf` once some bytes are there: how many, or -1 at the end. It takes the body's next bytes, once,
+    * whoever reads them: a body in memory, a response's copies and a constant served many times among its holders, is
+    * read this way by one of them, from one future; `bytes`, `text` and `as` read all of it, as often as asked, and are
+    * how a body shared is read.
+    */
   def read(buf: ByteBuffer)(using Async): Int
 
   /** Whether it may be sent again, as a client resending a request after a redirect or a failure needs: bytes in memory
@@ -152,7 +156,7 @@ object Body {
 
     def bytes()(using Async): Array[Byte] = {
       if all == null then {
-        val out = new ByteArrayOutputStream(length.fold(8192)(n => math.min(n, 1L << 20).toInt))
+        val out = new ByteArrayOutputStream(length.fold(8192)(n => math.min(n, 1L << 16).toInt))
         val chunk = ByteBuffer.allocate(16384)
         var n = source.read(chunk)
         while n >= 0 do {

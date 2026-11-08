@@ -157,7 +157,7 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
   private val session = engine.getSession
   private var netIn = ByteBuffer.allocate(session.getPacketBufferSize) // records read, not yet unwrapped; write mode
   private var appIn = ByteBuffer.allocate(session.getApplicationBufferSize).flip() // unwrapped, not yet read
-  private var netOut = ByteBuffer.allocate(session.getPacketBufferSize)
+  private var netOut = ByteBuffer.allocate(session.getPacketBufferSize).flip() // wrapped, not yet written
   private val writing = Semaphore(1)
   @volatile private var closed = false
   @volatile private var notified = false
@@ -232,9 +232,13 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     result
   }
 
-  /** Wraps all of `src`, or a handshake message for an empty one, and writes the records, holding the write side. */
+  /** Wraps all of `src`, or a handshake message for an empty one, and writes the records, holding the write side. What
+    * a write that timed out or was cancelled had not written stays in `netOut`, to go first next time, so that no
+    * record is cut or lost; `src` is advanced as the engine takes its bytes.
+    */
   private def sendWrapped(src: ByteBuffer, timeout: Duration)(using Async): Unit =
     Stream.holding(writing) {
+      if netOut.hasRemaining then underlying.write(netOut, timeout)
       var more = true
       while more do {
         netOut.clear()
@@ -248,7 +252,9 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
             if r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_TASK then runTasks()
             more = src.hasRemaining && r.getStatus == SSLEngineResult.Status.OK ||
               r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP
-          case SSLEngineResult.Status.BUFFER_UNDERFLOW => more = false
+          case SSLEngineResult.Status.BUFFER_UNDERFLOW =>
+            netOut.flip()
+            more = false
         }
       }
     }

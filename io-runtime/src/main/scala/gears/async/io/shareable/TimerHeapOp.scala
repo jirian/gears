@@ -160,6 +160,9 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
     case outcome => outcome.isSuccess
   }
 
+  /** Whether the op has settled this performance: a firing that comes after has nothing to do. */
+  final def isSettled: Boolean = state.get() != null
+
   /** Takes no op lock: the heap reads `deadlineNow` under its own lock, so that order is heap, then op. */
   final def requestTimersUpdate(): Unit = {
     val w = worker

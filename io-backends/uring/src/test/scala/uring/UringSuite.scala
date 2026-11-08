@@ -118,6 +118,33 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
+  test("a lookup or an open, which nothing interrupts, is given up at once on a time limit or a cancel") {
+    onPool(2) { io ?=>
+      val letGo = new java.util.concurrent.CountDownLatch(2)
+      def slow(into: Slot[String]) = new BlockingTask[String](
+        () => { Thread.sleep(1000); "late" },
+        into.set,
+        List(into),
+        interruptible = false,
+        discard = _ => letGo.countDown()
+      )
+      val timed = Slot[String]()
+      var began = System.nanoTime()
+      intercept[java.util.concurrent.TimeoutException](io.perform(slow(timed), 100.millis))
+      assert((System.nanoTime() - began) / 1_000_000 < 700, "the time limit held")
+      val cancelled = Slot[String]()
+      val (f, performed) = performing(slow(cancelled))
+      AsyncOperations.sleep(100)
+      began = System.nanoTime()
+      f.cancel()
+      f.awaitResult: Unit
+      assert((System.nanoTime() - began) / 1_000_000 < 500, "the cancel held")
+      assert(performed.get().nn.failed.toOption.exists(_.isInstanceOf[CancellationException]), performed.get())
+      assert(letGo.await(5, java.util.concurrent.TimeUnit.SECONDS), "both values, once they came, were let go of")
+      assert(timed.isEmpty && cancelled.isEmpty, "and neither was written")
+    }
+  }
+
   test("a blocking op that throws an Error fails with it, and does not hang") {
     returnsWithin(20.seconds) {
       onPool(2) { io ?=>

@@ -8,6 +8,8 @@ import scala.scalanative.unsafe.*
 private[uring] object Linux {
   inline val SOCK_NONBLOCK = 0x800
   inline val SOCK_CLOEXEC = 0x80000
+  inline val MSG_DONTWAIT = 0x40
+  inline val MSG_NOSIGNAL = 0x4000
   inline val O_CLOEXEC = 0x80000
   inline val POLLIN = 0x001
   inline val POLLOUT = 0x004

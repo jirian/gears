@@ -304,7 +304,7 @@ object Cookie {
 
   /** A `Set-Cookie` value's cookie, if it has a `name=value`; unknown attributes are ignored. */
   def parse(setCookie: String): Option[Cookie] = {
-    val parts = setCookie.split(';').map(_.trim).toList
+    val parts = Text.split(setCookie, ';').map(_.trim).toList // not String.split, a regular expression on Native
     parts match {
       case first :: attrs =>
         val eq = first.indexOf('=')
@@ -312,7 +312,8 @@ object Cookie {
         else
           scala.util.Try {
             attrs.foldLeft(Cookie(first.substring(0, eq), first.substring(eq + 1))) { (c, attr) =>
-              val kv = attr.split("=", 2)
+              val eq = attr.indexOf('=')
+              val kv = if eq < 0 then Array(attr) else Array(attr.substring(0, eq), attr.substring(eq + 1))
               val v = if kv.length > 1 then Some(kv(1).trim) else None
               // An attribute that is not valid is ignored, as an unknown one is.
               scala.util

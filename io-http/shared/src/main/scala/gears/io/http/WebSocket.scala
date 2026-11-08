@@ -232,7 +232,7 @@ final class WebSocket private (
     }
     if opcode < 8 && length > room then protocolError(s"A message larger than $maxMessage bytes", 1009)
     val mask = if !client then input.readExactly(4) else Array.emptyByteArray
-    val payload = input.readExactly(length.toInt)
+    val payload = readPayload(length.toInt)
     if !client then {
       var i = 0
       while i < payload.length do {
@@ -242,6 +242,20 @@ final class WebSocket private (
     }
     Frame(fin, opcode, payload)
   }
+
+  /** `n` bytes, held as they arrive rather than all at once, so that a length announced but not sent costs nothing. */
+  private def readPayload(n: Int)(using Async): Array[Byte] =
+    if n <= PayloadChunk then input.readExactly(n)
+    else {
+      val out = new java.io.ByteArrayOutputStream(PayloadChunk)
+      var left = n
+      while left > 0 do {
+        val chunk = input.readExactly(math.min(left, PayloadChunk))
+        out.write(chunk)
+        left -= chunk.length
+      }
+      out.toByteArray
+    }
 
   private def parseClose(payload: Array[Byte]): Close =
     if payload.isEmpty then Close(None, "")
@@ -264,14 +278,15 @@ final class WebSocket private (
         val reader = Future(readLoop())
         val pinger = pingEvery.map { every =>
           Future {
-            while true do {
+            var alive = true
+            while alive do {
               timers.sleep(every.toMillis)
               if !handing && System.nanoTime() - lastHeard > 2 * every.toNanos then {
                 stream.close() // the peer went away without closing: the reader ends
-                throw new CancellationException()
-              }
-              try ping()
-              catch case _: IOException => ()
+                alive = false
+              } else
+                try ping()
+                catch case _: IOException => ()
             }
           }
         }
@@ -302,6 +317,8 @@ object WebSocket {
   final class ProtocolException(message: String, val closeCode: Int) extends IOException(message)
 
   private final case class Ended(failure: Throwable | Null)
+
+  private inline val PayloadChunk = 64 * 1024
 
   private def protocolError(message: String, code: Int = 1002): Nothing = throw new ProtocolException(message, code)
 
@@ -368,13 +385,15 @@ object WebSocket {
     require(target.scheme == "ws" || target.scheme == "wss", s"Not a ws or wss URL: $target")
     require(protocols.forall(Headers.isToken), "A subprotocol is a token")
     val t = config.timeouts
+    val began = System.nanoTime()
     val raw = Tcp.connect(target.host, target.port, t.connect)
-    val stream = try if target.secure then Tls.client(raw, target.host, config.tls, t.connect) else raw
-    catch {
-      case e: Throwable =>
-        raw.close()
-        throw e
-    }
+    val stream =
+      try if target.secure then Tls.client(raw, target.host, config.tls, HttpClient.leftOf(t.connect, began)) else raw
+      catch {
+        case e: Throwable =>
+          raw.close()
+          throw e
+      }
     try {
       val key = java.util.Base64.getEncoder.encodeToString(gears.io.net.Platform.randomBytes(16))
       var request = headers

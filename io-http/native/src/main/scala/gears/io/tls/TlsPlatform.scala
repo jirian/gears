@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.ClosedChannelException
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
+import scala.concurrent.duration.FiniteDuration
 import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
@@ -21,9 +22,15 @@ private[tls] object TlsPlatform {
   /** An `SSL_CTX`, freed by nobody: contexts live as long as the process, one per configuration (`Tls`). */
   private final class Context(val ctx: Ptr[SSL_CTX], val verify: Boolean)
 
+  /** TLS 1.2 at least, as `TlsStream` promises, whatever the system's OpenSSL configuration allows. */
+  private def atLeastTls12(ctx: Ptr[SSL_CTX]): Unit =
+    if SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, TLS1_2_VERSION.toSize, null) != 1 then
+      fail(ctx, "Failed to require TLS 1.2 or later")
+
   def clientContext(config: TlsClientConfig): AnyRef = {
     val ctx = SSL_CTX_new(TLS_client_method())
     if ctx == null then throw new IOException(s"SSL_CTX_new failed: ${lastError()}")
+    atLeastTls12(ctx)
     if config.verify then {
       SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, null)
       if SSL_CTX_set_default_verify_paths(ctx) != 1 then fail(ctx, "Failed to load the system's certificates")
@@ -39,6 +46,7 @@ private[tls] object TlsPlatform {
   def serverContext(config: TlsServerConfig): AnyRef = {
     val ctx = SSL_CTX_new(TLS_server_method())
     if ctx == null then throw new IOException(s"SSL_CTX_new failed: ${lastError()}")
+    atLeastTls12(ctx)
     Zone.acquire { implicit z =>
       if SSL_CTX_use_certificate_chain_file(ctx, toCString(config.certificateChain)) != 1 then
         fail(ctx, s"Failed to load the certificate chain ${config.certificateChain}")
@@ -129,20 +137,34 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
   /** Writes what OpenSSL has for the network. What a write that timed out or was cancelled had not written stays in
     * `outPending`, to go first next time, so that no record is cut or lost.
     */
-  private def flushNetworkOut(timeout: Duration)(using Async): Unit =
-    Stream.holding(outbound) {
-      var done = false
-      while !done do {
-        if outPending.hasRemaining then underlying.write(outPending, timeout)
-        else {
-          val pending = native(BIO_ctrl(networkBio, BIO_CTRL_PENDING, 0.toSize, null).toInt)
-          val n =
-            if pending <= 0 then 0
-            else native(BIO_read(networkBio, netOut.asInstanceOf[ByteArray].at(0), math.min(pending, netOut.length)))
-          if n > 0 then outPending.position(0).limit(n): Unit else done = true
-        }
+  private def flushNetworkOut(timeout: Duration)(using Async): Unit = Stream.holding(outbound)(flushHeld(timeout))
+
+  /** As `flushNetworkOut`, from a read: only if there is something to write, and only if no write holds the write side,
+    * so that a read never waits behind a write stuck on a peer that does not read. That write flushes what is left.
+    */
+  private def flushIfFree(timeout: Duration)(using Async): Unit =
+    if outPending.hasRemaining || native(BIO_ctrl(networkBio, BIO_CTRL_PENDING, 0.toSize, null).toInt) > 0 then
+      outbound.poll() match {
+        case Some(guard) =>
+          try flushHeld(timeout)
+          finally guard.release()
+        case None => ()
+      }
+
+  /** `flushNetworkOut`'s work, the write side held. */
+  private def flushHeld(timeout: Duration)(using Async): Unit = {
+    var done = false
+    while !done do {
+      if outPending.hasRemaining then underlying.write(outPending, timeout)
+      else {
+        val pending = native(BIO_ctrl(networkBio, BIO_CTRL_PENDING, 0.toSize, null).toInt)
+        val n =
+          if pending <= 0 then 0
+          else native(BIO_read(networkBio, netOut.asInstanceOf[ByteArray].at(0), math.min(pending, netOut.length)))
+        if n > 0 then outPending.position(0).limit(n): Unit else done = true
       }
     }
+  }
 
   /** Reads from the network into OpenSSL: false at the end of the stream. */
   private def fillNetworkIn(timeout: Duration)(using Async): Boolean =
@@ -156,25 +178,43 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
       n > 0
     }
 
-  /** Runs `op` until it is done or fails, moving records as OpenSSL asks. */
-  private def pump(op: () => Int, timeout: Duration)(using Async): (Int, Int) = {
+  /** Runs `op` until it is done or fails, moving records as OpenSSL asks: each read and write of `underlying` within
+    * `timeout`, or, if `deadline` is not negative, all of them by then, on `System.nanoTime`'s clock. A read's
+    * (`reading`) flushes only what it can without waiting for the write side.
+    */
+  private def pump(op: () => Int, timeout: Duration, reading: Boolean, deadline: Long = -1)(using
+      Async
+  ): (Int, Int) = {
+    def limit: Duration =
+      if deadline < 0 then timeout
+      else {
+        val left = deadline - System.nanoTime()
+        if left <= 0 then throw new java.util.concurrent.TimeoutException("The TLS handshake took too long")
+        Duration.fromNanos(left)
+      }
+    def flush(): Unit = if reading then flushIfFree(limit) else flushNetworkOut(limit)
     var (result, error) = call(op)
-    flushNetworkOut(timeout)
+    flush()
     while result <= 0 && (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) do {
-      if error == SSL_ERROR_WANT_READ && !fillNetworkIn(timeout) then {
+      if error == SSL_ERROR_WANT_READ && !fillNetworkIn(limit) then {
         error = OpenSslStream.PeerClosed
         return (result, error)
       }
       val (r, e) = call(op)
       result = r
       error = e
-      flushNetworkOut(timeout)
+      flush()
     }
     (result, error)
   }
 
+  /** The handshake, all of it within `timeout`: a peer that sends a byte at a time cannot make it last longer. */
   def handshake(timeout: Duration)(using Async): Unit = {
-    val (r, err) = pump(() => SSL_do_handshake(ssl), timeout)
+    val deadline = Stream.limit(timeout) match {
+      case null              => -1L
+      case d: FiniteDuration => System.nanoTime() + d.toNanos
+    }
+    val (r, err) = pump(() => SSL_do_handshake(ssl), timeout, reading = false, deadline)
     if r != 1 then
       if err == OpenSslStream.PeerClosed then
         throw new IOException("The peer closed the connection during the TLS handshake")
@@ -199,7 +239,8 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
             }
             r
           },
-          timeout
+          timeout,
+          reading = true
         )
       catch {
         // The bytes are read; what OpenSSL had to send with them, such as a key update's answer, goes next time.
@@ -237,7 +278,8 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
             }
             r
           },
-          timeout
+          timeout,
+          reading = false
         )
         if r <= 0 then
           if err == OpenSslStream.PeerClosed then throw new IOException("The peer closed the connection")
@@ -263,8 +305,17 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
     val first = nativeLock.synchronized(!freed)
     if first then
       Stream.uncancelled {
-        try notifyClose(1.second) // best effort, so that the peer can tell the end from a truncation
-        catch case _: Exception => ()
+        // Best effort, so that the peer can tell the end from a truncation; not behind a write under way, which may be
+        // stuck on a peer that does not read: closing the stream fails it.
+        outbound.poll() match {
+          case Some(guard) =>
+            try {
+              val (result, error) = call(() => SSL_shutdown(ssl))
+              if result >= 0 || error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE then flushHeld(1.second)
+            } catch case _: Exception => ()
+            finally guard.release()
+          case None => ()
+        }
         val free = nativeLock.synchronized {
           if freed then false
           else {

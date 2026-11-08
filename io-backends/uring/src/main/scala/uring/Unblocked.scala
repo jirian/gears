@@ -22,9 +22,9 @@ import scala.scalanative.unsafe.*
   */
 @extern
 private[uring] object Unblocked {
-  def read(fildes: CInt, buf: CVoidPtr, nbyte: CSize): CInt = extern
+  def read(fildes: CInt, buf: CVoidPtr, nbyte: CSize): CSSize = extern
 
-  def write(fildes: CInt, buf: CVoidPtr, nbyte: CSize): CInt = extern
+  def write(fildes: CInt, buf: CVoidPtr, nbyte: CSize): CSSize = extern
 
   def readv(fildes: CInt, iov: Ptr[scala.scalanative.posix.sys.uio.iovec], iovcnt: CInt): CSSize = extern
 

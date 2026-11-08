@@ -21,9 +21,18 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-/** The failure of an op on a closed handle, naming it: a closed channel's, as `Ops.close` has it. */
+/** The failure of an op on a closed handle, naming it: a closed channel's, as `Ops.close` has it. Without a stack
+  * trace, as every op a close fails makes one.
+  */
 final class HandleClosedException(handle: AnyRef) extends ClosedChannelException {
   override def getMessage: String = s"$handle is closed"
+  override def fillInStackTrace(): Throwable = this
+}
+
+/** An op's time running out, without a stack trace: a read given a deadline is how a protocol waits, so it is common.
+  */
+private[nio] final class TimedOut(op: AnyRef) extends java.util.concurrent.TimeoutException(s"$op timed out") {
+  override def fillInStackTrace(): Throwable = this
 }
 
 /** A handle of `NioOnCaller`: an I/O object of the JDK's, the ops in progress on it, which a close fails and waits for

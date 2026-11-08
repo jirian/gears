@@ -187,6 +187,9 @@ object WorkpoolScheduler {
       t
     }
 
+    /** Whether this is the worker's own thread. */
+    final def isCurrent: Boolean = Thread.currentThread() eq thread
+
     /**
      * Attempt to perform the given operation, putting it on the heap only if it `hasDeadline`.
      * @return true if the operation is already completed, otherwise false which requires a subsequent await
@@ -248,7 +251,7 @@ object WorkpoolScheduler {
         runReady()
         drainInbox()
         // `stop`'s wake-up may have been spent while the inbox was still draining.
-        if !stopped then waitForDeadline(peekNextDeadline())
+        if !stopped then guarded(waitForDeadline(peekNextDeadline()))
       exited = true
       // A task added before `exited` showed is either run here or taken back by `submit`, never lost.
       while !isEmpty() do

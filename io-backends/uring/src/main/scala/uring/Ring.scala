@@ -92,9 +92,11 @@ private[uring] final class Ring(entries: Int) {
     sleeping.set(false)
     signalled.set(false)
     afterSubmit()
-    // Out of time, interrupted, or completions overflowing, which the reap takes in.
-    if res < 0 && res != -Linux.ETIME && res != -errno.EINTR && res != -errno.EBUSY then
-      throw Ring.failure("Failed to submit to io_uring", res)
+    // Out of time, interrupted, completions overflowing, which the reap takes in, or the kernel short of memory for
+    // now, which the next wait tries again.
+    if res < 0 && res != -Linux.ETIME && res != -errno.EINTR && res != -errno.EBUSY && res != -errno.EAGAIN &&
+      res != -errno.ENOMEM
+    then throw Ring.failure("Failed to submit to io_uring", res)
     reap(dispatch)
   }
 

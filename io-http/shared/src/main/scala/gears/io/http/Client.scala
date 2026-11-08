@@ -146,9 +146,16 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
 
   private def connect(url: Url)(using Async): HttpClient.Connection = {
     val t = config.timeouts
+    val began = System.nanoTime()
     val raw = Tcp.connect(url.host, url.port, t.connect)
     val stream =
-      if url.secure then Tls.client(raw, url.host, config.tls, t.connect)
+      if url.secure then
+        try Tls.client(raw, url.host, config.tls, HttpClient.leftOf(t.connect, began))
+        catch {
+          case e: Throwable =>
+            raw.close()
+            throw e
+        }
       else raw
     new HttpClient.Connection(stream, new BufferedInput(stream, 8192, 64 * 1024), url.origin)
   }
@@ -249,6 +256,16 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
 }
 
 object HttpClient {
+
+  /** What is left of `limit`, begun at `began` on `System.nanoTime`'s clock: a connection and its handshake share it.
+    */
+  private[http] def leftOf(limit: Duration, began: Long): Duration = limit match {
+    case d: FiniteDuration =>
+      val left = d.toNanos - (System.nanoTime() - began)
+      if left <= 0 then throw new TimeoutException(s"Connecting took longer than $limit")
+      Duration.fromNanos(left)
+    case other => other
+  }
 
   /** A connection to `origin`, with its reader. */
   private[http] final class Connection(

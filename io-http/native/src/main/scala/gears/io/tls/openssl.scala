@@ -26,6 +26,8 @@ private[tls] object openssl {
 
   final val SSL_CTRL_SET_TLSEXT_HOSTNAME = 55
   final val SSL_CTRL_MODE = 33
+  final val SSL_CTRL_SET_MIN_PROTO_VERSION = 123
+  final val TLS1_2_VERSION = 0x0303
   final val SSL_MODE_ENABLE_PARTIAL_WRITE = 1
   final val SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER = 2
   final val TLSEXT_NAMETYPE_host_name = 0
@@ -37,6 +39,7 @@ private[tls] object openssl {
 
   def SSL_CTX_new(method: Ptr[SSL_METHOD]): Ptr[SSL_CTX] = extern
   def SSL_CTX_free(ctx: Ptr[SSL_CTX]): Unit = extern
+  def SSL_CTX_ctrl(ctx: Ptr[SSL_CTX], cmd: CInt, larg: CLong, parg: Ptr[Byte]): CLong = extern
   def SSL_CTX_use_certificate_chain_file(ctx: Ptr[SSL_CTX], file: CString): CInt = extern
   def SSL_CTX_use_PrivateKey_file(ctx: Ptr[SSL_CTX], file: CString, tpe: CInt): CInt = extern
   def SSL_CTX_check_private_key(ctx: Ptr[SSL_CTX]): CInt = extern

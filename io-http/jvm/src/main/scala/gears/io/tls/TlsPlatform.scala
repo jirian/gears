@@ -25,6 +25,7 @@ import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
+import scala.concurrent.duration.FiniteDuration
 
 /** TLS on the JVM: the JDK's `SSLEngine`, its records moved over the stream by the code here. */
 private[tls] object TlsPlatform {
@@ -165,7 +166,19 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
 
   def closeNotified: Boolean = notified
 
+  /** The handshake, all of it within `timeout`: a peer that sends a byte at a time cannot make it last longer. */
   def handshake(timeout: Duration)(using Async): Unit = {
+    val deadline = Stream.limit(timeout) match {
+      case null              => -1L
+      case d: FiniteDuration => System.nanoTime() + d.toNanos
+    }
+    def left: Duration =
+      if deadline < 0 then timeout
+      else {
+        val n = deadline - System.nanoTime()
+        if n <= 0 then throw new java.util.concurrent.TimeoutException("The TLS handshake took too long")
+        Duration.fromNanos(n)
+      }
     engine.beginHandshake()
     var status = engine.getHandshakeStatus
     while status != SSLEngineResult.HandshakeStatus.FINISHED &&
@@ -173,9 +186,9 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     do {
       status match {
         case SSLEngineResult.HandshakeStatus.NEED_WRAP =>
-          sendWrapped(ByteBuffer.allocate(0), timeout)
+          sendWrapped(ByteBuffer.allocate(0), left)
         case SSLEngineResult.HandshakeStatus.NEED_UNWRAP | SSLEngineResult.HandshakeStatus.NEED_UNWRAP_AGAIN =>
-          val result = unwrapSome(timeout)
+          val result = unwrapSome(left)
           if result == null then throw new IOException("The peer closed the connection during the TLS handshake")
         case SSLEngineResult.HandshakeStatus.NEED_TASK => runTasks()
         case _                                         => ()
@@ -192,8 +205,10 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     }
   }
 
-  /** Unwraps one record into `appIn`, reading more of `underlying` as needed: null at the end of the stream. */
-  private def unwrapSome(timeout: Duration)(using Async): SSLEngineResult | Null = {
+  /** Unwraps one record into `appIn`, reading more of `underlying` as needed, each read within `timeout`, taken anew
+    * for each, as a handshake's shrinks: null at the end of the stream.
+    */
+  private def unwrapSome(timeout: => Duration)(using Async): SSLEngineResult | Null = {
     var result: SSLEngineResult | Null = null
     while result == null do {
       netIn.flip()
@@ -237,27 +252,30 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     * record is cut or lost; `src` is advanced as the engine takes its bytes.
     */
   private def sendWrapped(src: ByteBuffer, timeout: Duration)(using Async): Unit =
-    Stream.holding(writing) {
-      if netOut.hasRemaining then underlying.write(netOut, timeout)
-      var more = true
-      while more do {
-        netOut.clear()
-        val r = engine.wrap(src, netOut)
-        r.getStatus match {
-          case SSLEngineResult.Status.BUFFER_OVERFLOW =>
-            netOut = ByteBuffer.allocate(netOut.capacity() + session.getPacketBufferSize)
-          case SSLEngineResult.Status.CLOSED | SSLEngineResult.Status.OK =>
-            netOut.flip()
-            if netOut.hasRemaining then underlying.write(netOut, timeout)
-            if r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_TASK then runTasks()
-            more = src.hasRemaining && r.getStatus == SSLEngineResult.Status.OK ||
-              r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP
-          case SSLEngineResult.Status.BUFFER_UNDERFLOW =>
-            netOut.flip()
-            more = false
-        }
+    Stream.holding(writing)(wrapHeld(src, timeout))
+
+  /** `sendWrapped`'s work, the write side held. */
+  private def wrapHeld(src: ByteBuffer, timeout: Duration)(using Async): Unit = {
+    if netOut.hasRemaining then underlying.write(netOut, timeout)
+    var more = true
+    while more do {
+      netOut.clear()
+      val r = engine.wrap(src, netOut)
+      r.getStatus match {
+        case SSLEngineResult.Status.BUFFER_OVERFLOW =>
+          netOut = ByteBuffer.allocate(netOut.capacity() + session.getPacketBufferSize)
+        case SSLEngineResult.Status.CLOSED | SSLEngineResult.Status.OK =>
+          netOut.flip()
+          if netOut.hasRemaining then underlying.write(netOut, timeout)
+          if r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_TASK then runTasks()
+          more = src.hasRemaining && r.getStatus == SSLEngineResult.Status.OK ||
+            r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP
+        case SSLEngineResult.Status.BUFFER_UNDERFLOW =>
+          netOut.flip()
+          more = false
       }
     }
+  }
 
   def read(buf: ByteBuffer, timeout: Duration)(using Async): Int = {
     require(buf.hasRemaining, "A read needs a buffer with room")
@@ -275,7 +293,13 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
         val r = unwrapSome(timeout)
         if r == null then n = -1
         else if r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP then
-          sendWrapped(ByteBuffer.allocate(0), timeout) // a post-handshake message's answer
+          // A post-handshake message's answer, unless a write holds the write side: it sends it with its own records.
+          writing.poll() match {
+            case Some(guard) =>
+              try wrapHeld(ByteBuffer.allocate(0), timeout)
+              finally guard.release()
+            case None => ()
+          }
       }
     n
   }
@@ -295,11 +319,18 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     if !closed then {
       closed = true
       Stream.uncancelled {
+        // Best effort, the close notification; not behind a write under way, which may be stuck on a peer that does
+        // not read: closing the stream fails it.
         try
-          if !engine.isOutboundDone then {
-            engine.closeOutbound()
-            sendWrapped(ByteBuffer.allocate(0), 1.second) // best effort: the close notification
-          }
+          if !engine.isOutboundDone then
+            writing.poll() match {
+              case Some(guard) =>
+                try {
+                  engine.closeOutbound()
+                  wrapHeld(ByteBuffer.allocate(0), 1.second)
+                } finally guard.release()
+              case None => ()
+            }
         catch case _: Exception => ()
         finally underlying.close()
       }

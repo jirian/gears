@@ -37,14 +37,19 @@ private[http] object Wire {
   /** Reads a request's head, within `timeout` from its first byte; null if the stream ended, or `idle` passed, before
     * any byte came.
     */
-  def readRequestHead(input: BufferedInput, limits: Limits, idle: Duration, timeout: Duration)(using
-      Async
-  ): RequestHead | Null = {
+  def readRequestHead(
+      input: BufferedInput,
+      limits: Limits,
+      idle: Duration,
+      timeout: Duration,
+      begun: () => Unit = () => ()
+  )(using Async): RequestHead | Null = {
     if input.buffered == 0 then {
       val more =
         try input.fill(idle, grow = true)
         catch case _: java.util.concurrent.TimeoutException => false
       if !more then return null
+      begun() // the head's first bytes are in: the connection is no longer idle
     }
     val bytes =
       try input.readUntil(HeadEnd, limits.head, timeout)
@@ -139,11 +144,15 @@ private[http] object Wire {
   }
 
   /** How a message with `headers` is framed, given that it may have a body at all: chunked, a length, or `orElse`.
-    * Refuses a `Transfer-Encoding` other than `chunked`, one beside a `Content-Length`, and lengths that disagree.
+    * Refuses a `Transfer-Encoding` other than `chunked`, an empty one, one beside a `Content-Length`, and lengths that
+    * disagree.
     */
   def framing(headers: Headers, orElse: Framing): Framing = {
     val te = headers.tokens("Transfer-Encoding")
     val lengths = headers.getAll("Content-Length").flatMap(Text.split(_, ',').map(_.trim)).distinct
+    // An empty one is refused too: a front end that takes any Transfer-Encoding for chunked would frame it otherwise.
+    if te.isEmpty && headers.contains("Transfer-Encoding") then
+      throw new Malformed(Status.BadRequest, "An empty Transfer-Encoding")
     if te.nonEmpty then {
       if lengths.nonEmpty then throw new Malformed(Status.BadRequest, "Both Transfer-Encoding and Content-Length")
       if !te.last.equalsIgnoreCase("chunked") || te.count(_.equalsIgnoreCase("chunked")) != 1 then

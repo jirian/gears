@@ -364,4 +364,29 @@ class HttpSuite extends FunSuite {
       } finally stream.close()
     }
   }
+
+  test("an empty Transfer-Encoding is refused, not taken for none") {
+    withServer(Routes(POST("/") { r => r.text() })) { server =>
+      for te <- Seq("", ",") do {
+        val answer = rawExchange(
+          server,
+          s"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: $te\r\nContent-Length: 2\r\n\r\nhi"
+        )
+        assert(answer.startsWith("HTTP/1.1 400"), answer)
+      }
+    }
+  }
+
+  test("a handler's own Content-Length on a streamed body is held to: a shorter body closes the connection") {
+    val routes = Routes(GET("/short") { _ =>
+      Response(Status.Ok, Headers("Content-Length" -> "10"), Body.stream("text/plain")(_.write("abc".getBytes)))
+    })
+    withServer(routes) { server =>
+      val began = System.nanoTime()
+      val answer = rawExchange(server, "GET /short HTTP/1.1\r\nHost: x\r\n\r\n", wait = 10.seconds)
+      val took = (System.nanoTime() - began) / 1_000_000
+      assert(answer.contains("Content-Length: 10") && answer.endsWith("abc"), answer)
+      assert(took < 5000, s"the connection was kept open ($took ms): its next response would be out of step")
+    }
+  }
 }

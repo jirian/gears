@@ -36,13 +36,22 @@ object Tcp {
     val candidates = addresses(host, port, deadline)
     var failure: Throwable | Null = null
     var result: SocketStream | Null = null
+    var left = candidates.length
     val it = candidates.iterator
     while result == null && it.hasNext do {
       val address = it.next()
-      try result = connectTo(address, deadline)
+      // Each address has its share of the time left, so that one that never answers leaves time for the next.
+      val own =
+        if deadline == Long.MaxValue || left == 1 then deadline
+        else System.nanoTime() + math.max(deadline - System.nanoTime(), 0L) / left
+      left -= 1
+      try result = connectTo(address, own)
       catch {
         case e: IOException      => failure = e
-        case _: TimeoutException => throw new TimeoutException(s"Connecting to $host:$port timed out after $timeout")
+        case e: TimeoutException =>
+          if left == 0 || System.nanoTime() >= deadline then
+            throw new TimeoutException(s"Connecting to $host:$port timed out after $timeout")
+          failure = e
       }
     }
     if result == null then throw new IOException(s"Failed to connect to $host:$port", failure)

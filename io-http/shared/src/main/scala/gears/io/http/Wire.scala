@@ -35,8 +35,8 @@ private[http] object Wire {
     override def fillInStackTrace(): Throwable = this
   }
 
-  final case class RequestHead(method: Method, target: String, version: String, headers: Headers)
-  final case class ResponseHead(version: String, status: Status, headers: Headers)
+  final case class RequestHead(method: Method, target: String, version: HttpVersion, headers: Headers)
+  final case class ResponseHead(version: HttpVersion, status: Status, headers: Headers)
 
   /** Reads a request's head, within `timeout` from its first byte; null if the stream ended, or `idle` passed, before
     * any byte came.
@@ -73,12 +73,12 @@ private[http] object Wire {
     val target = requestLine.substring(first + 1, second)
     val version = requestLine.substring(second + 1)
     if !Headers.isToken(methodToken) then throw new Malformed(Status.BadRequest, "A malformed method")
-    checkVersion(version)
+    val spoken = checkVersion(version)
     if target.isEmpty || target.exists(c => c <= ' ' || c >= 127) then
       throw new Malformed(Status.BadRequest, "A malformed request target")
     if target.length > limits.head then throw new Malformed(Status.UriTooLong, "The target is too long")
     val headers = parseFields(lines.tail, limits.headers)
-    RequestHead(Method.parse(methodToken), target, version, headers)
+    RequestHead(Method.parse(methodToken), target, spoken, headers)
   }
 
   /** Reads a response's head, skipping interim (1xx) ones but `101 Switching Protocols`, each read within `timeout`
@@ -98,8 +98,7 @@ private[http] object Wire {
       val statusLine = lines.head
       val first = statusLine.indexOf(' ')
       if first < 0 then throw new IOException(s"A malformed status line: $statusLine")
-      val version = statusLine.substring(0, first)
-      checkVersion(version)
+      val version = checkVersion(statusLine.substring(0, first))
       val rest = statusLine.substring(first + 1)
       val codeText = if rest.length >= 3 then rest.substring(0, 3) else rest
       if codeText.length != 3 || !codeText.forall(_.isDigit) || (rest.length > 3 && rest.charAt(3) != ' ') then
@@ -112,12 +111,14 @@ private[http] object Wire {
     head.nn
   }
 
-  private def checkVersion(version: String): Unit =
+  /** The version a head's line names; a `Malformed` if it is not one, or one not spoken here. */
+  private def checkVersion(version: String): HttpVersion =
     if !(version.length == 8 && version.startsWith("HTTP/") && version.charAt(5).isDigit && version.charAt(6) == '.' &&
         version.charAt(7).isDigit)
     then throw new Malformed(Status.BadRequest, "A malformed HTTP version")
-    else if version != "HTTP/1.1" && version != "HTTP/1.0" then
-      throw new Malformed(Status.HttpVersionNotSupported, s"$version is not supported")
+    else if version == "HTTP/1.1" then HttpVersion.Http11
+    else if version == "HTTP/1.0" then HttpVersion.Http10
+    else throw new Malformed(Status.HttpVersionNotSupported, s"$version is not supported")
 
   /** A head's lines, without the final empty ones; a bare LF is refused, as is a bare CR. */
   private def splitLines(bytes: Array[Byte]): List[String] = {

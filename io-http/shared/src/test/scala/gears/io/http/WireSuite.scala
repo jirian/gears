@@ -53,7 +53,7 @@ class WireSuite extends FunSuite {
       val h = head("POST /a?b=c HTTP/1.0\r\nHost: x\r\nX-Two: 1\r\nX-Two: 2\r\n\r\n").nn
       assertEquals(h.method, Method.Post)
       assertEquals(h.target, "/a?b=c")
-      assertEquals(h.version, "HTTP/1.0")
+      assertEquals(h.version, HttpVersion.Http10)
       assertEquals(h.headers.getAll("X-Two"), Seq("1", "2"))
       assertEquals(head(""), null, "a stream that ends before a byte is no request")
     }
@@ -119,5 +119,11 @@ class WireSuite extends FunSuite {
         assertEquals(all(body.reader()), "hello")
       }
     }
+  }
+
+  test("a known method is only its own case, never Other") {
+    assertEquals(Method.parse("GET"), Method.Get)
+    assertEquals(Method.parse("PURGE"), Method.Other("PURGE"))
+    intercept[IllegalArgumentException](Method.Other("GET"))
   }
 }

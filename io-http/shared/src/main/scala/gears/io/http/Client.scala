@@ -195,7 +195,7 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
       val body = Body.incoming(head.headers, framed, source)
       val reusable =
         written == null && framed != Wire.Framing.UntilClose && !head.headers.hasToken("Connection", "close") &&
-          !request.headers.hasToken("Connection", "close") && head.version == "HTTP/1.1"
+          !request.headers.hasToken("Connection", "close") && head.version == HttpVersion.Http11
       new HttpClient.Exchange(connection, Response(head.status, head.headers, body), source, reusable, pool)
     } catch {
       case e: CancellationException            => connection.close(); throw e

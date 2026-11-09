@@ -311,7 +311,12 @@ object HttpClient {
     def discard()(using Async): Unit = {
       val drained =
         try reusable && source.drain(64 * 1024)
-        catch case _: Exception => false
+        catch {
+          case Stream.Failed() => false
+          case e: Throwable    =>
+            connection.close()
+            throw e
+        }
       if drained then pool.give(connection) else connection.close()
     }
   }

@@ -115,7 +115,7 @@ sent to it hung.
 
 Datagram receives on one socket, and its sends, are served in the order they began (`Turns`): the kernel does not
 keep that order among entries waiting together. Accepts take no turns: `Ops` says a listener's accepts are served
-first come, first served, which NIO keeps and this backend does not, among accepts waiting on one listener together. Only the head is in the kernel; when it ends, the next is started on
+first come, first served, which the reference backend keeps and this backend does not, among accepts waiting on one listener together. Only the head is in the kernel; when it ends, the next is started on
 its own worker. A withdrawal of one still waiting just takes it out; a close fails those waiting. The head is tried at
 once with one non-blocking `recvmsg` or `sendmsg` before it goes to the ring.
 
@@ -222,5 +222,5 @@ against 4.6–5.0 ms), with no errors; Go is still ahead.
   waiting, the completion then settling the op, would not.
 - The try heuristic, if the measurements show the extra `read(2)` on a busy connection.
 - A completion-queue overflow test and a kernel < 6.0 refusal test, which this machine cannot run.
-- A `perform` in a cancelled group: the reference and NIO backends refuse it, so a `close` in a cancelled future's
+- A `perform` in a cancelled group: the reference backend refuses it, so a `close` in a cancelled future's
   `finally` leaks; this runtime lets an op that completes at once through. The contract does not say which.

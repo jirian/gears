@@ -159,24 +159,9 @@ lazy val ioUring =
     )
     .dependsOn(ioRuntime, ioTestkit.native % Test)
 
-// NIO on the calling thread (`NioOnCaller`): the reference backend's ops with a faster way of waiting, retries and a
-// selector per handle, which needs no JDK flags. The JVM's default backend.
-lazy val ioNio =
-  (project in file("io-backends/nio"))
-    .settings(
-      name := "gears-io-nio",
-      publish / skip := false,
-      versionScheme := Some("early-semver"),
-      scalacOptions += "-release:21",
-      libraryDependencies += munit % Test,
-      testFrameworks += MUnitFramework,
-      Test / fork := true
-    )
-    .dependsOn(root.jvm, ioTestkit.jvm % Test)
-
 // The higher level for programs: byte streams over connections, TLS, and an HTTP/1.1 server and client with WebSockets
 // (`gears.io.net`, `gears.io.tls`, `gears.io.http`), written against `gears.async.io` and run on each platform's
-// default backend: NIO (`NioOnCaller`) on the JVM, io_uring on Scala Native, which also needs OpenSSL for TLS.
+// default backend: the reference backend on the JVM, io_uring on Scala Native, which also needs OpenSSL for TLS.
 lazy val ioHttp =
   crossProject(JVMPlatform, NativePlatform)
     .crossType(CrossType.Full)
@@ -193,7 +178,7 @@ lazy val ioHttp =
       Test / fork := true
     )
     .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
-    .jvmConfigure(_.dependsOn(ioNio))
+    .jvmConfigure(_.dependsOn(ioReference))
     .nativeConfigure(_.dependsOn(ioUring))
 
 // io_uring's demo application: the testkit's gears demos over io_uring, as `ioUringDemos/run <command>`, and the gears
@@ -208,19 +193,6 @@ lazy val ioUringDemos =
       nativeConfig ~= { _.withMultithreading(true) }
     )
     .dependsOn(ioUring, ioTestkit.native)
-
-// NIO's demo application: the testkit's gears demos over `NioOnCaller`, as `ioNioDemos/run <command>`, and the gears
-// bench over it, as `ioNioDemos/run bench`.
-lazy val ioNioDemos =
-  (project in file("io-backends/nio/demos"))
-    .settings(
-      publish / skip := true,
-      scalacOptions += "-release:21",
-      Compile / mainClass := Some("niodemos.NioDemos"),
-      Compile / unmanagedSourceDirectories += (ThisBuild / baseDirectory).value / "bench/io-bench/shared/src/main/scala",
-      run / fork := true
-    )
-    .dependsOn(ioNio, ioTestkit.jvm)
 
 // The HTTP bench's server: gears-io-http serving the routes its Go counterpart serves, for a load generator to measure
 // against both (`ioHttpBenchNative/nativeLink`, `ioHttpBenchJVM/run <port>`).

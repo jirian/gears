@@ -122,6 +122,7 @@ class HttpSuite extends FunSuite {
           "GET / HTTP/1.1\r\nHost : x\r\n\r\n",
           "GET / HTTP/1.1\r\nHost: x\r\n folded\r\n\r\n",
           "GET / HTTP/1.1\r\nHost: x\r\nContent-Length: +5\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n",
           "GET / HTTP/1.1\r\n\r\n"
         )
       do {

@@ -106,9 +106,14 @@ abstract class TimerHeap[A <: TimerOp] extends Poller with TimerSource[A] {
     index >= 0 && index < size && (heap(index) eq timerOp)
   }
 
+  /** Its deadline, or 0 for one before 0, which has passed too, as `System.nanoTime` on Linux counts from boot: a key
+    * is never negative, which `peekNextDeadline` means as no timer at all, and a worker would wait for ever.
+    */
+  private def keyOf(timerOp: TimerOp): Long = math.max(timerOp.deadlineNow, 0L)
+
   private def rekey(timerOp: TimerOp): Unit = {
     val previous = timerOp.heapKey
-    timerOp.heapKey = timerOp.deadlineNow
+    timerOp.heapKey = keyOf(timerOp)
     if timerOp.heapKey < previous then siftUp(timerOp, timerOp.heapIndex)
     else siftDown(timerOp, timerOp.heapIndex)
   }
@@ -142,7 +147,7 @@ abstract class TimerHeap[A <: TimerOp] extends Poller with TimerSource[A] {
     if !timerOp.hasDeadline then throw new IllegalArgumentException("Only an op with a deadline goes on the heap")
     val isNext = timerLock.synchronized {
       if size == heap.length then heap = java.util.Arrays.copyOf(heap, 2 * size)
-      timerOp.heapKey = timerOp.deadlineNow
+      timerOp.heapKey = keyOf(timerOp)
       size += 1
       siftUp(timerOp, size - 1)
       heap(0) eq timerOp

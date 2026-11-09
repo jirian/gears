@@ -148,6 +148,11 @@ final class ListenerHandle private[uring] (fd: Int, val unix: Boolean, val optio
   private val file = if path == null then null else Sockets.fileId(path)
   def kind: SocketOption.Kind = if unix then SocketOption.Kind.UnixListener else SocketOption.Kind.Listener
 
+  /** Its accepts take turns, in the order they began. */
+  private[uring] val accepts = new Turns
+
+  override protected def beginClosing(): Unit = accepts.failWaiting()
+
   override protected def closed(): Unit =
     if path != null && file != null && Sockets.fileId(path) == file then Sockets.unlink(path)
 }

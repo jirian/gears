@@ -130,8 +130,8 @@ private[uring] object uring {
   type io_uring_sqe =
     CStruct10[__u8, __u8, __u16, __s32, __u64, __u64, __u32, __u32, __u64, CArray[__u64, Nat._3]]
 
-  def io_uring_queue_init(entries: CUnsignedInt, ring: Ptr[io_uring], flags: CUnsignedInt): CInt =
-    extern
+  @name("gears_io_uring_init")
+  def io_uring_init(entries: CUnsignedInt, ring: Ptr[io_uring], completions: CUnsignedInt): CInt = extern
 
   def io_uring_queue_exit(ring: Ptr[io_uring]): Unit = extern
 

@@ -252,6 +252,35 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
+  test("accepts waiting on one listener are served first come, first served, across workers") {
+    onPool(4) { io ?=>
+      val into = Slot[ListenerHandle]()
+      io.perform(ops.listen(IpSocketAddress(IpAddress.IPv4Loopback, 0), into))
+      val l = into.clear()
+      val address = ops.localAddress(l).asInstanceOf[IpSocketAddress]
+      val slots = List.fill(4)(Slot[ConnectionHandle]())
+      val accepts = slots.map { slot =>
+        val f = Future(io.perform(ops.accept(l, slot)))
+        AsyncOperations.sleep(20) // each is waiting before the next begins
+        f
+      }
+      // All at once, so that every accept waiting could take any of them.
+      val clients = List.fill(4) {
+        val client = Slot[ConnectionHandle]()
+        io.perform(ops.connect(address, client))
+        client.clear()
+      }
+      for ((f, slot), (c, i)) <- accepts.zip(slots).zip(clients.zipWithIndex) do {
+        gears.async.withTimeout(2.seconds)(f.await)
+        val accepted = slot.clear()
+        assertEquals(ops.peerAddress(accepted), ops.localAddress(c), s"accept ${i + 1} took connection ${i + 1}")
+        close(accepted)
+      }
+      clients.foreach(close)
+      close(l)
+    }
+  }
+
   test("a close ends the peer's stream as it returns, while another worker has a read on it") {
     onPool(4) { io ?=>
       for _ <- 1 to 20 do {
@@ -283,7 +312,9 @@ class UringSuite extends munit.FunSuite {
       val pipes = List.fill(12)(pipe())
       val slots = pipes.map(_ => Slot[Received]())
       val reads = pipes.zip(slots).map { case ((r, _), into) => performing(ops.read(r, pool, into)) }
-      AsyncOperations.sleep(20)
+      // Once every read waits: one still trying at once holds a buffer for a moment, on a loaded machine for a while.
+      val until = System.nanoTime() + 1_000_000_000L
+      while pool.available < 4 && System.nanoTime() < until do AsyncOperations.sleep(5)
       assert(pool.available >= 4, s"${pool.available} of 8 free")
       // One at a time, each buffer given back before the next stream has bytes, so that none finds the pool empty.
       for (((_, w), into), (f, performed)) <- pipes.zip(slots).zip(reads) do {

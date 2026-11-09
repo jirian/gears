@@ -16,6 +16,17 @@ void gears_io_uring_cq_advance(struct io_uring *ring, unsigned nr) {
   io_uring_cq_advance(ring, nr);
 }
 
+/* Sets up a ring with `entries` submission entries and `completions` completion entries. The kernel runs completions'
+ * work when the worker next enters it, rather than interrupting it for each (COOP_TASKRUN), and flags the ring when
+ * there is some, which liburing's reaping checks (TASKRUN_FLAG). */
+int gears_io_uring_init(unsigned entries, struct io_uring *ring, unsigned completions) {
+  struct io_uring_params params;
+  memset(&params, 0, sizeof(params));
+  params.flags = IORING_SETUP_CQSIZE | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG;
+  params.cq_entries = completions;
+  return io_uring_queue_init_params(entries, ring, &params);
+}
+
 /* The size of struct io_uring, which the reactor allocates: its fields are liburing's own, so the Scala side only
  * ever holds a pointer to it. */
 size_t gears_io_uring_size(void) {

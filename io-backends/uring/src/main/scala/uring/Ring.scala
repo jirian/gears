@@ -20,12 +20,12 @@ import uringStructOps.*
   * before it reads `sleeping`, so either the worker sees the signal and does not sleep, or the waker sees it asleep and
   * writes.
   */
-private[uring] final class Ring(entries: Int) {
+private[uring] final class Ring(entries: Int, completions: Int) {
   private val storage = new Array[Byte](io_uring_size().toInt)
   private def ring: Ptr[io_uring] = storage.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[io_uring]]
 
   locally {
-    val res = io_uring_queue_init(entries.toUInt, ring, 0.toUInt)
+    val res = io_uring_init(entries.toUInt, ring, completions.toUInt)
     if res < 0 then throw Ring.failure("Failed to set up io_uring", res)
     val refusal = Ring.unsupported(ring)
     if refusal != null then {
@@ -79,13 +79,14 @@ private[uring] final class Ring(entries: Int) {
     */
   def await(deadline: Long, hasWork: => Boolean)(dispatch: (Long, Int) => Unit): Unit = {
     armWake()
+    // First, as it may settle ops, whose continuations are work: the worker's own thread does not wake it.
+    onSubmit()
     sleeping.set(true)
     val wait =
       if signalled.get() || hasWork then 0L
       else if deadline < 0 then -1L
       else math.max(deadline - System.nanoTime(), 0L)
     if wait == 0 then sleeping.set(false)
-    onSubmit()
     val res =
       if wait == 0 then (if io_uring_sq_ready(ring).toInt > 0 then io_uring_submit(ring) else 0)
       else io_uring_submit_and_wait(ring, wait)
@@ -215,5 +216,5 @@ private[uring] object Ring {
   }
 
   /** Throws if this kernel's io_uring will not do, by setting up a ring and tearing it down. */
-  def check(): Unit = new Ring(2).close()
+  def check(): Unit = new Ring(2, 4).close()
 }

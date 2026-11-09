@@ -55,7 +55,6 @@ object UringBackend
   /** Runs `program` over this backend as `Io.run` does, on a pool of `workers` workers, each with its own ring. */
   def runOn[T](workers: Int)(program: Io[this.type] ?=> Async.Spawn ?=> T): T = {
     require(workers > 0, s"A pool has at least one worker, not $workers")
-    Ring.check()
     val pool = UringScheduler(workers)
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
     given poolScheduler: pool.Scheduler = pool

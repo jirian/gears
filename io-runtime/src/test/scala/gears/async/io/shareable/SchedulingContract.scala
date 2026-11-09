@@ -1,5 +1,5 @@
 package gears.async.io
-package uring
+package shareable
 
 import gears.async.Async
 import gears.async.AsyncOperations
@@ -13,10 +13,17 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration.*
 import scala.util.Success
 
-/** What a resume may rely on: it happens promptly, but only once the listener resuming it has returned, as sources
-  * complete their listeners while holding locks and partway through changing their state.
+/** For a backend on the shared runtime (`WorkpoolScheduler`): what a resume may rely on: it happens promptly, but only
+  * once the listener resuming it has returned, as sources complete their listeners while holding locks and partway
+  * through changing their state.
   */
-class UringSchedulingSuite extends munit.FunSuite {
+abstract class SchedulingContract extends munit.FunSuite {
+
+  /** The backend, and a pool of `workers` workers performing its ops. */
+  type B <: Backend
+  val backend: B
+  def newPool(workers: Int): WorkpoolScheduler[?, ?] & Io[B]
+
   override def munitTimeout: Duration = 60.seconds
 
   private def spin(nanos: Long): Unit = {
@@ -25,8 +32,8 @@ class UringSchedulingSuite extends munit.FunSuite {
   }
 
   /** `Io.run` on a pool of the given size. */
-  private def onPool[T](workers: Int)(program: Io[UringBackend.type] ?=> Async.Spawn ?=> T): T = {
-    val pool = UringScheduler(workers)
+  private def onPool[T](workers: Int)(program: Io[B] ?=> Async.Spawn ?=> T): T = {
+    val pool = newPool(workers)
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
     given poolScheduler: pool.Scheduler = pool
     try Async.blocking(Future(program(using pool)).await)
@@ -168,12 +175,12 @@ class UringSchedulingSuite extends munit.FunSuite {
   }
 
   test("a negative timer is refused") {
-    intercept[IllegalArgumentException](UringBackend.ops.timer((-1).milli))
+    intercept[IllegalArgumentException](backend.ops.timer((-1).milli))
   }
 
   test("every task a pool accepts as it shuts down is run") {
     for _ <- 1 to 300 do {
-      val pool = UringScheduler(2)
+      val pool = newPool(2)
       val ran = AtomicInteger(0)
       val accepted = AtomicInteger(0)
       val submitter = new Thread(() =>

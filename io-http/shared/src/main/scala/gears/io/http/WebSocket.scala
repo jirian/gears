@@ -197,7 +197,7 @@ final class WebSocket private (
       case e: ProtocolException     =>
         failure = e
         try if !closeSent then writeFrame(8, ByteBuffer.allocate(2).putShort(e.closeCode.toShort).array())
-        catch case _: Exception => ()
+        catch case Stream.Failed() => ()
       case _: EOFException if closeSent => () // the peer closed the connection rather than answering our close
       case e: Exception                 => failure = e
     } finally

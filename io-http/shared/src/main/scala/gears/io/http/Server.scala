@@ -370,7 +370,7 @@ private[http] object Server {
             keepAlive && !state.stopping.get() && (bodyDone || (body match {
               case in: Body.Incoming =>
                 try in.drain(64 * 1024)
-                catch case _: Exception => false
+                catch case Stream.Failed() => false
               case _ => true
             }))
           val carriesOn = writeResponse(stream, response, h, reusable)

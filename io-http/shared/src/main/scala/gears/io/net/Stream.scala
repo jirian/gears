@@ -70,6 +70,14 @@ object Stream {
   private[io] inline def uncancelled[A](inline body: Async ?=> A)(using ac: Async): A =
     body(using ac.withGroup(CompletionGroup.Unlinked))
 
+  /** A failure to recover from: not fatal, and not the caller's cancellation, which gears' `CancellationException`, a
+    * `RuntimeException`, would otherwise be taken for.
+    */
+  private[io] object Failed {
+    def unapply(e: Throwable): Boolean =
+      !e.isInstanceOf[java.util.concurrent.CancellationException] && scala.util.control.NonFatal(e)
+  }
+
   /** `body`, holding one of `semaphore`'s permits. */
   private[io] inline def holding[A](semaphore: gears.async.Semaphore)(inline body: A)(using Async): A = {
     val guard = semaphore.acquire()

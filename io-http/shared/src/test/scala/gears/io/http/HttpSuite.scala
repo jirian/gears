@@ -218,6 +218,36 @@ class HttpSuite extends FunSuite {
     }
   }
 
+  test("a cancel while ensureSuccess reads the body is the cancel, not the status") {
+    val routes = Routes(GET("/slow") { _ =>
+      Response.stream("text/plain", Status.InternalServerError) { out =>
+        out.write("a")
+        out.flush()
+        AsyncOperations.sleep(10_000)
+      }
+    })
+    withServer(routes) { server =>
+      val caught = new java.util.concurrent.atomic.AtomicReference[Throwable]()
+      val headed = new java.util.concurrent.CountDownLatch(1)
+      val call = Future {
+        Http.stream(Request.get(server.url.resolve("/slow"))) { res =>
+          headed.countDown()
+          try res.ensureSuccess()
+          catch {
+            case e: Throwable =>
+              caught.set(e)
+              throw e
+          }
+        }
+      }
+      while headed.getCount > 0 do AsyncOperations.sleep(5)
+      AsyncOperations.sleep(100)
+      call.cancel()
+      call.awaitResult: Unit
+      assert(caught.get().isInstanceOf[java.util.concurrent.CancellationException], s"${caught.get()}")
+    }
+  }
+
   test("HTTPS: verified against a trusted certificate, refused without it") {
     val tls = TlsServerConfig(TestCertificate.certificate, TestCertificate.key)
     withServer(Routes(GET("/") { r => s"secure ${r.url.scheme}" }), quiet.copy(tls = Some(tls))) { server =>

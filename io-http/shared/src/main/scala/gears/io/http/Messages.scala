@@ -1,6 +1,7 @@
 package gears.io.http
 
 import gears.async.Async
+import gears.io.net.Stream
 
 import scala.concurrent.duration.FiniteDuration
 
@@ -142,7 +143,7 @@ final case class Response(status: Status, headers: Headers = Headers.empty, body
     else {
       val preview =
         try new String(body.bytes().take(512), Body.charset(body.contentType))
-        catch case _: Exception => ""
+        catch case Stream.Failed() => ""
       throw new HttpStatusException(status, headers, preview)
     }
 

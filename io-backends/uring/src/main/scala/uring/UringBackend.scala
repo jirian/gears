@@ -83,9 +83,6 @@ object UringOps
   type ConnectedDatagram = ConnectedDatagramHandle
   type File = FileHandle
 
-  private[uring] def notYet(what: String): Nothing =
-    throw new UnsupportedOperationException(s"The io_uring backend has no $what yet")
-
   def read(handle: UringReadable, buf: ByteBuffer): UringOp & Repeatable = ReadIntoBuffer(handle, buf)
   def write(handle: UringWritable, buf: ByteBuffer): UringOp & Repeatable = WriteFromBuffer(handle, buf)
   def read(handle: UringReadable, bufs: Array[ByteBuffer]): UringOp & Repeatable = ReadIntoBuffers(handle, bufs)

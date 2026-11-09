@@ -105,9 +105,6 @@ sealed abstract class UringHandle(val fd: Int, kind: String) {
       if tell != null then tell()
     }
 
-  /** Whether the descriptor has been closed. */
-  private[uring] def isClosed: Boolean = descriptorClosed.get()
-
   /** What else closing does as it begins, before the entries on the descriptor are cancelled. */
   protected def beginClosing(): Unit = ()
 

@@ -1,11 +1,7 @@
 package gears.async.io
 package uring
 
-import gears.async.io.shareable.WorkpoolScheduler
-
 import java.io.IOException
-import java.nio.charset.StandardCharsets
-import java.util.concurrent.CancellationException
 import scala.scalanative.libc.string
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.fcntl
@@ -18,10 +14,6 @@ import scala.scalanative.posix.unistd
 import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
-import scala.util.Failure
-import scala.util.Success
-import scala.util.Try
-import scala.util.control.NonFatal
 
 /** The threads blocking work runs on, off the workers: started as needed, kept a minute once idle, daemons. */
 private[uring] object BlockingPool {

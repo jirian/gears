@@ -230,12 +230,6 @@ private[uring] object uringStructOps {
     sqe.accept_flags = flags.toUInt
   }
 
-  def io_uring_prep_cancel64(sqe: Ptr[io_uring_sqe], user_data: __u64, flags: CInt): Unit = {
-    io_uring_prep_rw(IORING_OP_ASYNC_CANCEL, sqe, -1, null, 0.toUInt, 0.toULong);
-    sqe.addr = user_data;
-    sqe.cancel_flags = flags.toUInt
-  }
-
   def io_uring_prep_fsync(sqe: Ptr[io_uring_sqe], fd: CInt): Unit =
     io_uring_prep_rw(IORING_OP_FSYNC, sqe, fd, null, 0.toUInt, 0.toULong)
 
@@ -275,27 +269,6 @@ private[uring] object uringStructOps {
       nr_vecs: CUnsignedInt,
       offset: __u64
   ): Unit = io_uring_prep_rw(IORING_OP_WRITEV, sqe, fd, iovecs, nr_vecs, offset)
-
-  def io_uring_prep_openat(
-      sqe: Ptr[io_uring_sqe],
-      dfd: CInt,
-      path: CString,
-      flags: CInt,
-      mode: CUnsignedInt
-  ): Unit = {
-    io_uring_prep_rw(IORING_OP_OPENAT, sqe, dfd, path.asInstanceOf[Ptr[Byte]], mode, 0.toULong)
-    sqe.open_flags = flags.toUInt
-  }
-
-  def io_uring_prep_send(sqe: Ptr[io_uring_sqe], fd: CInt, buf: Ptr[Byte], len: CUnsignedInt, flags: CInt): Unit = {
-    io_uring_prep_rw(IORING_OP_SEND, sqe, fd, buf, len, 0.toULong)
-    sqe.msg_flags = flags.toUInt
-  }
-
-  def io_uring_prep_recv(sqe: Ptr[io_uring_sqe], fd: CInt, buf: Ptr[Byte], len: CUnsignedInt, flags: CInt): Unit = {
-    io_uring_prep_rw(IORING_OP_RECV, sqe, fd, buf, len, 0.toULong)
-    sqe.msg_flags = flags.toUInt
-  }
 
   def io_uring_prep_sendmsg(
       sqe: Ptr[io_uring_sqe],

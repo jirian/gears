@@ -12,7 +12,6 @@ import gears.io.tls.TlsServerConfig
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.TimeoutException
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
 import scala.util.Try

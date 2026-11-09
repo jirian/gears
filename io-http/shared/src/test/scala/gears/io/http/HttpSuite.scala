@@ -131,6 +131,41 @@ class HttpSuite extends FunSuite {
     }
   }
 
+  test("a request's URL is taken from its target and Host header, and a malformed one of either is a 400") {
+    withServer(Routes(GET("/a") { r => s"${r.url.host} ${r.url.port} ${r.url.target}" })) { server =>
+      def ask(target: String, host: String) =
+        rawExchange(server, s"GET $target HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n")
+      for (target, host, url) <- Seq(
+          ("/a", "Example.COM", "example.com 80 /a"),
+          ("/a?x=1&y=%20:@/?", "x:8080", "x 8080 /a?x=1&y=%20:@/?"),
+          ("/a?", "x:", "x 80 /a?"),
+          ("/a", "[::1]:9", "::1 9 /a"),
+          ("/a", "10.0.0.1", "10.0.0.1 80 /a")
+        )
+      do {
+        val answer = ask(target, host)
+        assert(answer.startsWith("HTTP/1.1 200 ") && answer.endsWith(url), s"$target on $host -> $answer")
+      }
+      for (target, host) <- Seq(
+          ("/a<b", "x"),
+          ("/a%zz", "x"),
+          ("/a%2", "x"),
+          ("/a#f", "x"),
+          ("/a", "ex_ample"),
+          ("/a", "x:0"),
+          ("/a", "x:65536"),
+          ("/a", "x:8a"),
+          ("/a", "[::1"),
+          ("/a", "[nope]"),
+          ("/a", "[::1]x")
+        )
+      do {
+        val answer = ask(target, host)
+        assert(answer.startsWith("HTTP/1.1 400 "), s"$target on $host -> $answer")
+      }
+    }
+  }
+
   test("a client that trickles its head is cut off by the header timeout (slowloris)") {
     val config = quiet.copy(timeouts = ServerTimeouts(header = 300.millis))
     withServer(Routes(GET("/") { _ => "ok" }), config) { server =>

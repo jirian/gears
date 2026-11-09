@@ -286,8 +286,8 @@ private[http] object Server {
       val url =
         try requestUrl(h, stream.secure)
         catch {
-          case e: IllegalArgumentException =>
-            respondAndClose(stream, Response.text(s"${e.getMessage}\n", Status.BadRequest))
+          case e: Wire.Malformed =>
+            respondAndClose(stream, Response.text(s"${e.getMessage}\n", e.status))
             return false
         }
       val framing =
@@ -444,23 +444,24 @@ private[http] object Server {
     private def tooLarge(limit: Long): Response =
       Response.text(s"The body is larger than $limit bytes\n", Status.ContentTooLarge)
 
-    /** The URL a request names: its target's path and query, on the host its `Host` header names. */
+    /** The URL a request names: its target's path and query, on the host its `Host` header names; a `Wire.Malformed` if
+      * either is malformed.
+      */
     private def requestUrl(h: Wire.RequestHead, secure: Boolean): Url = {
+      def malformed(what: String) = new Wire.Malformed(Status.BadRequest, what)
       val hosts = h.headers.getAll("Host")
-      if hosts.length > 1 then throw new IllegalArgumentException("More than one Host header")
-      if hosts.isEmpty && h.version == "HTTP/1.1" then throw new IllegalArgumentException("No Host header")
+      if hosts.length > 1 then throw malformed("More than one Host header")
+      if hosts.isEmpty && h.version == "HTTP/1.1" then throw malformed("No Host header")
       val host = hosts.headOption.filter(_.nonEmpty).getOrElse("localhost")
       if host.exists(c => c == '/' || c == '?' || c == '#' || c == '@' || c <= ' ') then
-        throw new IllegalArgumentException(s"A malformed Host header: $host")
+        throw malformed(s"A malformed Host header: $host")
       val scheme = if secure then "https" else "http"
-      val target =
-        if h.target.startsWith("/") then h.target
-        else if h.target == "*" && h.method == Method.Options then "/"
-        else if h.target.startsWith("http://") || h.target.startsWith("https://") then {
-          val absolute = Url.parse(h.target)
-          return absolute
-        } else throw new IllegalArgumentException(s"A malformed request target: ${h.target}")
-      Url.parse(s"$scheme://$host$target")
+      if h.target.startsWith("/") then Url.ofRequest(scheme, host, h.target)
+      else if h.target == "*" && h.method == Method.Options then Url.ofRequest(scheme, host, "/")
+      else if h.target.startsWith("http://") || h.target.startsWith("https://") then
+        try Url.parse(h.target)
+        catch case e: IllegalArgumentException => throw malformed(e.getMessage)
+      else throw malformed(s"A malformed request target: ${h.target}")
     }
 
     /** Answers with `response` and ends the connection, lingering (`linger`). */

@@ -123,9 +123,10 @@ waiting. A datagram's head is tried at once with one non-blocking `recvmsg` or `
 ## Buffers
 
 A buffer with native memory (a pool's, or `PointerBuffer.wrap`) is handed to the kernel as it is. One over a heap array
-is handed over at its array's address, at no cost, both to an entry and to a call tried at once (`NativeBuffer.staged`):
-sound because Scala Native's collectors never move an object, and the command, or the call's caller, keeps the array
-alive. Only a read-only buffer is copied through a stand-in (`Staging`). Until 2026-11-08 a call tried at once copied
+is handed over at its array's address (`NativeBuffer.atPosition`), with no stand-in buffer, both to an entry and to a
+call tried at once (`NativeBuffer.staged`): sound because Scala Native's collectors never move an object, and the
+command, or the call's caller, keeps the array alive. Only a read-only buffer, which hides its array, is copied through a
+stand-in (`Staging`). Until 2026-11-09 a heap buffer was wrapped in a `PointerBuffer` over its array for every call. Until 2026-11-08 a call tried at once copied
 every heap buffer through zone memory, a `malloc`, a copy and a `free` for each read and write of io-http's.
 
 A read into a pool's buffer takes a buffer as it is submitted, and the kernel receives straight into it, only while more

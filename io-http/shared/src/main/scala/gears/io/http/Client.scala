@@ -192,17 +192,7 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
         () => (),
         limit => new IOException(s"A response body larger than $limit bytes")
       )
-      val body =
-        if framed == Wire.Framing.NoBody then Body.empty
-        else
-          new Body.Incoming(
-            head.headers.get("Content-Type"),
-            framed match {
-              case Wire.Framing.Length(n) => Some(n)
-              case _                      => scala.None
-            },
-            source
-          )
+      val body = Body.incoming(head.headers, framed, source)
       val reusable =
         written == null && framed != Wire.Framing.UntilClose && !head.headers.hasToken("Connection", "close") &&
           !request.headers.hasToken("Connection", "close") && head.version == "HTTP/1.1"

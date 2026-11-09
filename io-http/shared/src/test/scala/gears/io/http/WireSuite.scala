@@ -99,4 +99,25 @@ class WireSuite extends FunSuite {
     assertEquals(framing("Transfer-Encoding" -> "gzip, chunked"), 501)
     assertEquals(framing("Transfer-Encoding" -> "chunked, chunked"), 501)
   }
+
+  test("a body in memory, or one a function writes, is read from its start by each of its readers") {
+    Http.run {
+      def all(reader: Body.Reader): String = {
+        val buf = ByteBuffer.allocate(2) // a few bytes at a time
+        val out = new StringBuilder
+        while reader.read(buf) >= 0 do {
+          out ++= new String(buf.array(), 0, buf.position(), StandardCharsets.UTF_8)
+          buf.clear()
+        }
+        out.result()
+      }
+      for body <- Seq(Body.text("hello"), Body.stream("text/plain")(_.write("hello"))) do {
+        val first = body.reader()
+        val second = body.reader()
+        assertEquals(all(first), "hello")
+        assertEquals(all(second), "hello", "the second reader has a position of its own")
+        assertEquals(all(body.reader()), "hello")
+      }
+    }
+  }
 }

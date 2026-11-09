@@ -59,15 +59,15 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       ring.onSubmit = () => {
         var closed: scala.collection.mutable.ArrayBuffer[Command] | Null = null // rarely any
         prepared.foreach { c =>
-          if c.state == Command.Prepared then {
+          if c.state == Command.Stage.Prepared then {
             if c.handle.isClosing then {
               ring.nop(c.sqe)
               inFlight.remove(c.id)
-              c.state = Command.Idle
+              c.outOfRing()
               if closed == null then closed = scala.collection.mutable.ArrayBuffer.empty[Command]
               closed.nn += c
             } else {
-              c.state = Command.Submitted
+              c.submitted()
               submitted += c
             }
           }
@@ -81,7 +81,9 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       }
 
       ring.afterSubmit = () => {
-        submitted.foreach(c => if c.state == Command.Submitted && c.handle.isClosing then ring.cancelNow(c.id): Unit)
+        submitted.foreach(c =>
+          if c.state == Command.Stage.Submitted && c.handle.isClosing then ring.cancelNow(c.id): Unit
+        )
         submitted.clear()
       }
     }
@@ -121,18 +123,14 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         return false
       }
       val finished =
-        try command.nothingToDo || (handle.triesAtOnce && command.tryAtOnce())
+        try command.doneAtOnce()
         catch {
           case failure: Throwable =>
-            command.release()
-            handle.leave()
-            passTurn(command)
+            endUse(command)
             throw failure
         }
       if finished then {
-        command.release()
-        handle.leave()
-        passTurn(command)
+        endUse(command)
         true
       } else {
         command.onRing(own.ring)
@@ -140,9 +138,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         catch {
           case failure: Throwable =>
             command.discardSubmission() // what it staged, and a connecting socket
-            command.release()
-            handle.leave()
-            passTurn(command)
+            endUse(command)
             throw failure
         }
         if command.hasDeadline then addTimer(command)
@@ -165,9 +161,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       val id = o.nextId
       o.nextId += 1
       sqe.user_data = id.toULong
-      command.id = id
-      command.sqe = sqe
-      command.state = Command.Prepared
+      command.prepared(id, sqe)
       o.inFlight(id) = command
       o.prepared += command
     }
@@ -207,7 +201,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       o.prepared.clear()
       o.submitted.clear()
       for command <- held do {
-        command.state = Command.Idle
+        command.outOfRing()
         command.discardSubmission()
         try settle(command, Failure(new java.io.IOException("The io_uring worker's ring failed", cause)))
         catch case e: Throwable => e.printStackTrace()
@@ -221,7 +215,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       val command = own.inFlight.getOrNull(id)
       if command != null then {
         own.inFlight -= id
-        command.state = Command.Idle
+        command.outOfRing()
         val handle = command.handle
         // The outcome, or null if it was submitted again; settled outside the `try`, so that a settle that throws is
         // not settled a second time. None succeeds once a close has begun, as `Ops.close` has it, even having
@@ -267,11 +261,16 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
     /** Ends `command`'s use of its handle, and fires it with `outcome`, unless its time limit fired it already. */
     private def settle(command: Command, outcome: scala.util.Try[Unit]): Unit = {
       command.outcome = outcome
+      endUse(command)
+      command.applied = true
+      fire(command)
+    }
+
+    /** Ends `command`'s use of its handle, and its turn on it, if it takes turns. */
+    private def endUse(command: Command): Unit = {
       command.release()
       command.handle.leave()
       passTurn(command)
-      command.applied = true
-      fire(command)
     }
 
     /** Ends `command`'s turn on its handle, if it takes turns, starting the next command's on that one's worker. */
@@ -293,7 +292,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
           settle(command, Failure(if handle.isClosing then handle.closedFailure else gears.async.cancellation()))
         else
           try {
-            val finished = command.nothingToDo || (handle.triesAtOnce && command.tryAtOnce())
+            val finished = command.doneAtOnce()
             if finished then {
               command.done = true
               settle(command, WorkpoolScheduler.SuccessUnit)
@@ -317,11 +316,11 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         command.release()
         command.handle.leave()
         true
-      case Command.Prepared =>
+      case Command.Stage.Prepared =>
         own.ring.nop(command.sqe)
         withdrawn(command)
         true
-      case Command.Submitted =>
+      case Command.Stage.Submitted =>
         val res = own.ring.cancelNow(command.id)
         if res == 0 then {
           withdrawn(command)
@@ -332,11 +331,9 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
 
     private def withdrawn(command: Command): Unit = {
       own.inFlight.remove(command.id)
-      command.state = Command.Idle
+      command.outOfRing()
       command.discardSubmission()
-      command.release()
-      command.handle.leave()
-      passTurn(command)
+      endUse(command)
     }
 
     /** As `Worker.withdraw`, and takes a command back from the ring: here, if this is its worker's thread, else by its
@@ -344,10 +341,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       */
     override def withdraw(op: UringOp): Boolean = op match {
       case command: Command =>
-        if command.hasDeadline then {
-          if !removeTimer(command) then return false // it left the heap to fire
-          command.offHeap = true
-        }
+        if !takeOffHeap(command) then return false // it left the heap to fire
         command.wantOut = true
         if isWorkerOf(this) then withdrawHere(command)
         else {
@@ -362,13 +356,20 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         }
       case _: CloseHandle        => false // it ends once begun
       case task: BlockingTask[?] =>
-        if task.hasDeadline then {
-          if !removeTimer(task) then return false // it left the heap to fire
-          task.offHeap = true
-        }
+        if !takeOffHeap(task) then return false // it left the heap to fire
         task.stop()
       case _ => super.withdraw(op)
     }
+
+    /** Takes `op` off the heap for good, if it has a deadline: false if it has left the heap to fire. */
+    private def takeOffHeap(op: Command | BlockingTask[?]): Boolean =
+      !op.hasDeadline || removeTimer(op) && {
+        op match {
+          case c: Command         => c.offHeap = true
+          case t: BlockingTask[?] => t.offHeap = true
+        }
+        true
+      }
 
     /** For a command whose time limit has passed, on this worker's thread (`AbstractTimerHeapOp.limitReached`). */
     private[uring] def limitReached(command: Command): Boolean = {

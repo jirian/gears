@@ -57,8 +57,8 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   /** Done as it is performed, after `check` and before `handle` is used: an opener opens here. */
   def begin(): Unit = ()
 
-  /** Whether it is its stream's one read (`Command.Reading`), its one write (`Command.Writing`), or neither. */
-  protected def direction: Int = Command.Neither
+  /** Whether it is its stream's one read, its one write, or neither. */
+  protected def direction: Command.Direction = Command.Direction.Neither
 
   /** Checks made as it is performed, before anything is done, throwing an `IllegalArgumentException`. */
   def check(): Unit = ()
@@ -91,9 +91,9 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   // A performance's state, kept by its worker on the worker's thread; `outcome`, `done`, `applied`, `offHeap` and
   // `wantOut` are read by the firing and by a withdrawal from other threads. `applied`: its outcome is set and nothing
   // of it is in use, so a time limit reached as it fires has nothing to take back.
-  private[uring] var state = Command.Idle
-  private[uring] var id = 0L
-  private[uring] var sqe: Ptr[io_uring_sqe] = null
+  private var stage = Command.Stage.Idle
+  private var entryId = 0L
+  private var entry: Ptr[io_uring_sqe] = null
   private[uring] var owner: UringScheduler#UringWorker | Null = null
   private var awaitingReadiness = false
   @volatile private[uring] var outcome: Try[Unit] = WorkpoolScheduler.SuccessUnit
@@ -104,7 +104,7 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
 
   override def onEntry(): Unit = {
     super.onEntry()
-    state = Command.Idle
+    stage = Command.Stage.Idle
     awaitingReadiness = false
     outcome = WorkpoolScheduler.SuccessUnit
     done = false
@@ -119,11 +119,34 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
 
   def wakeup(resumedAt: Long): Try[Unit] = outcome
 
+  /** Where its entry is: not in the ring, prepared and not yet submitted, or submitted. */
+  private[uring] final def state: Command.Stage = stage
+
+  /** Its entry's user data and slot, while it is prepared or submitted. */
+  private[uring] final def id: Long = entryId
+  private[uring] final def sqe: Ptr[io_uring_sqe] = entry
+
+  /** Its entry has been prepared, in `sqe` with user data `id`. */
+  private[uring] final def prepared(id: Long, sqe: Ptr[io_uring_sqe]): Unit = {
+    entryId = id
+    entry = sqe
+    stage = Command.Stage.Prepared
+  }
+
+  /** Its entry has gone to the kernel. */
+  private[uring] final def submitted(): Unit = stage = Command.Stage.Submitted
+
+  /** Its entry is out of the ring: completed, withdrawn, or turned into a no-op. */
+  private[uring] final def outOfRing(): Unit = stage = Command.Stage.Idle
+
+  /** Done with no entry: nothing to do, or done at once by a non-blocking call, if its handle allows that. */
+  private[uring] final def doneAtOnce(): Boolean = nothingToDo || (handle.triesAtOnce && tryAtOnce())
+
   /** Takes its stream's one read or one write, if it is one: false if another holds it. */
   private[uring] final def claim(): Boolean = direction match {
-    case Command.Reading => handle.reading.compareAndSet(false, true)
-    case Command.Writing => handle.writing.compareAndSet(false, true)
-    case _               => true
+    case Command.Direction.Reading => handle.reading.compareAndSet(false, true)
+    case Command.Direction.Writing => handle.writing.compareAndSet(false, true)
+    case Command.Direction.Neither => true
   }
 
   /** The ring its entries are on, counted by its handle (`onRing`) until it is done with it (`release`). */
@@ -142,9 +165,9 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
       handle.offRing(ring)
     }
     direction match {
-      case Command.Reading => handle.reading.set(false)
-      case Command.Writing => handle.writing.set(false)
-      case _               => ()
+      case Command.Direction.Reading => handle.reading.set(false)
+      case Command.Direction.Writing => handle.writing.set(false)
+      case Command.Direction.Neither => ()
     }
   }
 
@@ -182,14 +205,10 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
 }
 
 private[uring] object Command {
-  inline val Neither = 0
-  inline val Reading = 1
-  inline val Writing = 2
+  enum Direction { case Neither, Reading, Writing }
 
-  // A performance's states on its worker: not in the ring; an entry prepared and not yet submitted; submitted.
-  inline val Idle = 0
-  inline val Prepared = 1
-  inline val Submitted = 2
+  /** A performance's stage on its worker: not in the ring; an entry prepared and not yet submitted; submitted. */
+  enum Stage { case Idle, Prepared, Submitted }
 
   def alreadyPending(op: AnyRef): IllegalArgumentException =
     new IllegalArgumentException(s"An op reading, or writing, as $op does, is already pending on its handle")
@@ -349,7 +368,7 @@ private[uring] final class MessageHeader(buffers: Int, named: Boolean) {
   */
 private[uring] final class ReadIntoBuffer(val handle: UringHandle, buf: ByteBuffer) extends Command {
   Checks.checkFillable(buf)
-  override protected def direction = Command.Reading
+  override protected def direction = Command.Direction.Reading
   override def check(): Unit = if !buf.hasRemaining() then throw Checks.bufferFull(buf)
   override protected def readinessEvents: Int = Linux.POLLIN
   private val staging = new Staging(Array(buf), copyIn = false, copyOut = true)
@@ -376,7 +395,7 @@ private[uring] final class ReadIntoBuffer(val handle: UringHandle, buf: ByteBuff
 /** Fills `bufs` in order with one `readv`, as `ReadIntoBuffer` fills one (see `Ops.read`). */
 private[uring] final class ReadIntoBuffers(val handle: UringHandle, bufs: Array[ByteBuffer]) extends Command {
   Checks.checkFillable(bufs)
-  override protected def direction = Command.Reading
+  override protected def direction = Command.Direction.Reading
   override def check(): Unit = if !Checks.anyRemaining(bufs) then throw Checks.buffersFull(bufs)
   override protected def readinessEvents: Int = Linux.POLLIN
   private val staging = new Staging(bufs, copyIn = false, copyOut = true)
@@ -405,7 +424,7 @@ private[uring] final class ReadIntoBuffers(val handle: UringHandle, bufs: Array[
   * at once, with no system call.
   */
 private[uring] final class WriteFromBuffer(val handle: UringHandle, buf: ByteBuffer) extends Command {
-  override protected def direction = Command.Writing
+  override protected def direction = Command.Direction.Writing
   override protected def readinessEvents: Int = Linux.POLLOUT
   override def nothingToDo: Boolean = !buf.hasRemaining()
   private val staging = new Staging(Array(buf), copyIn = true, copyOut = false)
@@ -432,7 +451,7 @@ private[uring] final class WriteFromBuffer(val handle: UringHandle, buf: ByteBuf
 /** Drains `bufs` in order with one `writev`, as `WriteFromBuffer` drains one (see `Ops.write`). */
 private[uring] final class WriteFromBuffers(val handle: UringHandle, bufs: Array[ByteBuffer]) extends Command {
   Checks.checkBuffers(bufs)
-  override protected def direction = Command.Writing
+  override protected def direction = Command.Direction.Writing
   override protected def readinessEvents: Int = Linux.POLLOUT
   override def nothingToDo: Boolean = !Checks.anyRemaining(bufs)
   private val staging = new Staging(bufs, copyIn = true, copyOut = false)
@@ -498,7 +517,7 @@ private[uring] final class CloseHandle(handle: UringHandle) extends SingleUseAbs
   * back if the read fails, finds nothing after all, or is withdrawn.
   */
 private[uring] final class PooledRead(val handle: UringHandle, pool: NativePool, into: Slot[Received]) extends Command {
-  override protected def direction = Command.Reading
+  override protected def direction = Command.Direction.Reading
   override def check(): Unit = Checks.notEmpty(into)
   private var held: pool.NativeSlot | Null = null
   private var pollNext = false // a read straight into a buffer found nothing: wait for readiness first

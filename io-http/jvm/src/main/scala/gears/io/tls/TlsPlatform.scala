@@ -29,22 +29,23 @@ import scala.concurrent.duration.FiniteDuration
 
 /** TLS on the JVM: the JDK's `SSLEngine`, its records moved over the stream by the code here. */
 private[tls] object TlsPlatform {
-  private final case class ClientContext(context: SSLContext, verify: Boolean)
+  final case class ClientContext(context: SSLContext, verify: Boolean)
+  type ServerContext = SSLContext
 
-  def clientContext(config: TlsClientConfig): AnyRef = {
+  def clientContext(config: TlsClientConfig): ClientContext = {
     val managers: Array[TrustManager] =
       if !config.verify then Array(TrustAll)
       else
         config.trusted match {
           case None       => null
-          case Some(file) => Array(new Either(systemTrust(), pemTrust(file)))
+          case Some(file) => Array(new EitherTrust(systemTrust(), pemTrust(file)))
         }
     val context = SSLContext.getInstance("TLS")
     context.init(null, managers, null)
     ClientContext(context, config.verify)
   }
 
-  def serverContext(config: TlsServerConfig): AnyRef =
+  def serverContext(config: TlsServerConfig): ServerContext =
     try {
       val chain = certificates(config.certificateChain)
       if chain.isEmpty then throw new IOException(s"No certificate in ${config.certificateChain}")
@@ -63,8 +64,8 @@ private[tls] object TlsPlatform {
         throw new IOException(s"Failed to load ${config.certificateChain} and ${config.privateKey}: ${e.getMessage}", e)
     }
 
-  def client(stream: Stream, host: String, context: AnyRef, timeout: Duration)(using Async): TlsStream = {
-    val ClientContext(ssl, verify) = context.asInstanceOf[ClientContext]
+  def client(stream: Stream, host: String, context: ClientContext, timeout: Duration)(using Async): TlsStream = {
+    val ClientContext(ssl, verify) = context
     val engine = ssl.createSSLEngine(host, 443)
     engine.setUseClientMode(true)
     val params = engine.getSSLParameters
@@ -74,8 +75,8 @@ private[tls] object TlsPlatform {
     open(stream, engine, timeout)
   }
 
-  def server(stream: Stream, context: AnyRef, timeout: Duration)(using Async): TlsStream = {
-    val engine = context.asInstanceOf[SSLContext].createSSLEngine()
+  def server(stream: Stream, context: ServerContext, timeout: Duration)(using Async): TlsStream = {
+    val engine = context.createSSLEngine()
     engine.setUseClientMode(false)
     open(stream, engine, timeout)
   }
@@ -134,7 +135,7 @@ private[tls] object TlsPlatform {
   }
 
   /** Trusts a server either trusts. */
-  private final class Either(first: X509TrustManager, second: X509TrustManager) extends X509TrustManager {
+  private final class EitherTrust(first: X509TrustManager, second: X509TrustManager) extends X509TrustManager {
     def checkClientTrusted(chain: Array[X509Certificate], authType: String): Unit =
       first.checkClientTrusted(chain, authType)
     def checkServerTrusted(chain: Array[X509Certificate], authType: String): Unit =

@@ -46,7 +46,7 @@ final class WebSocket private (
   import WebSocket.*
 
   private val writing = Semaphore(1)
-  private val inbox = BufferedChannel[AnyRef](1)
+  private val inbox = BufferedChannel[Message | Ended](1)
   @volatile private var closeSent = false
   @volatile private var ended = false
   @volatile private var lastHeard = System.nanoTime()
@@ -60,13 +60,13 @@ final class WebSocket private (
   def send(bytes: Array[Byte])(using Async): Unit = send(Message.Binary(bytes))
 
   def send(message: Message)(using Async): Unit = message match {
-    case Message.Text(text)    => writeFrame(1, encode(text))
-    case Message.Binary(bytes) => writeFrame(2, bytes)
+    case Message.Text(text)    => writeFrame(Opcode.Text, encode(text))
+    case Message.Binary(bytes) => writeFrame(Opcode.Binary, bytes)
   }
 
   def ping(data: Array[Byte] = Array.emptyByteArray)(using Async): Unit = {
     require(data.length <= 125, "A ping carries at most 125 bytes")
-    writeFrame(9, data)
+    writeFrame(Opcode.Ping, data)
   }
 
   /** The next message, or None once the peer has closed, or the socket was closed; the reading's failure if it ended
@@ -105,14 +105,14 @@ final class WebSocket private (
       require(validCloseCode(code), s"Not a close code a socket may send: $code")
       val text = encode(reason)
       require(text.length <= 123, "A close reason is at most 123 bytes of UTF-8")
-      writeFrame(8, ByteBuffer.allocate(text.length + 2).putShort(code.toShort).put(text).array())
+      writeFrame(Opcode.Close, ByteBuffer.allocate(text.length + 2).putShort(code.toShort).put(text).array())
     }
 
   private def writeFrame(opcode: Int, payload: Array[Byte])(using Async): Unit =
     Stream.holding(writing) {
       if closeSent then throw new IOException("The WebSocket is closing")
-      if opcode == 8 then closeSent = true
-      if opcode < 8 && payload.length > maxMessage then
+      if opcode == Opcode.Close then closeSent = true
+      if opcode < Opcode.Close && payload.length > maxMessage then
         throw new IllegalArgumentException(s"A message larger than $maxMessage bytes")
       val extended = if payload.length < 126 then 0 else if payload.length <= 65535 then 2 else 8
       val head = ByteBuffer.allocate(2 + extended + (if client then 4 else 0))
@@ -157,24 +157,25 @@ final class WebSocket private (
         val frame = readFrame(maxMessage - message.size())
         lastHeard = System.nanoTime()
         frame.opcode match {
-          case 8 =>
+          case Opcode.Close =>
             received = Some(parseClose(frame.payload))
             if !closeSent then
-              try writeFrame(8, frame.payload.take(2))
+              try writeFrame(Opcode.Close, frame.payload.take(2))
               catch case _: IOException => ()
             open = false
-          case 9      => if !closeSent then writeFrame(10, frame.payload)
-          case 10     => ()
-          case opcode =>
-            if opcode == 0 && kind == 0 then protocolError("A continuation with no message")
-            if opcode != 0 && kind != 0 then protocolError("A message before the last one ended")
-            if opcode != 0 then kind = opcode
+          case Opcode.Ping => if !closeSent then writeFrame(Opcode.Pong, frame.payload)
+          case Opcode.Pong => ()
+          case opcode      =>
+            val continuation = opcode == Opcode.Continuation
+            if continuation && kind == 0 then protocolError("A continuation with no message")
+            if !continuation && kind != 0 then protocolError("A message before the last one ended")
+            if !continuation then kind = opcode
             message.write(frame.payload)
             if frame.fin then {
               val bytes = message.toByteArray
               message.reset()
               val value =
-                if kind == 1 then
+                if kind == Opcode.Text then
                   Message.Text(
                     try utf8(bytes)
                     catch case _: IOException => protocolError("A text message that is not UTF-8", 1007)
@@ -196,7 +197,7 @@ final class WebSocket private (
       case e: CancellationException => throw e
       case e: ProtocolException     =>
         failure = e
-        try if !closeSent then writeFrame(8, ByteBuffer.allocate(2).putShort(e.closeCode.toShort).array())
+        try if !closeSent then writeFrame(Opcode.Close, ByteBuffer.allocate(2).putShort(e.closeCode.toShort).array())
         catch case Stream.Failed() => ()
       case _: EOFException if closeSent => () // the peer closed the connection rather than answering our close
       case e: Exception                 => failure = e
@@ -214,11 +215,12 @@ final class WebSocket private (
     val fin = (first & 0x80) != 0
     val opcode = first & 15
     if (first & 0x70) != 0 then protocolError("Reserved bits set, with no extension agreed")
-    if !(opcode <= 2 || (opcode >= 8 && opcode <= 10)) then protocolError(s"An unknown opcode: $opcode")
+    if !(opcode <= Opcode.Binary || (opcode >= Opcode.Close && opcode <= Opcode.Pong)) then
+      protocolError(s"An unknown opcode: $opcode")
     if ((second & 0x80) != 0) == client then
       protocolError(if client then "A masked frame from a server" else "An unmasked frame from a client")
     val short = second & 127
-    if opcode >= 8 && (!fin || short > 125) then protocolError("A fragmented or long control frame")
+    if opcode >= Opcode.Close && (!fin || short > 125) then protocolError("A fragmented or long control frame")
     val length = short match {
       case 126 =>
         val n = ByteBuffer.wrap(input.readExactly(2)).getShort() & 65535
@@ -230,7 +232,7 @@ final class WebSocket private (
         n
       case n => n.toLong
     }
-    if opcode < 8 && length > room then protocolError(s"A message larger than $maxMessage bytes", 1009)
+    if opcode < Opcode.Close && length > room then protocolError(s"A message larger than $maxMessage bytes", 1009)
     val mask = if !client then input.readExactly(4) else Array.emptyByteArray
     val payload = readPayload(length.toInt)
     if !client then {
@@ -317,6 +319,16 @@ object WebSocket {
   final class ProtocolException(message: String, val closeCode: Int) extends IOException(message)
 
   private final case class Ended(failure: Throwable | Null)
+
+  /** A frame's opcode (RFC 6455, 5.2): the data frames' below `Close`, the control frames' from it on. */
+  private object Opcode {
+    inline val Continuation = 0
+    inline val Text = 1
+    inline val Binary = 2
+    inline val Close = 8
+    inline val Ping = 9
+    inline val Pong = 10
+  }
 
   private inline val PayloadChunk = 64 * 1024
 

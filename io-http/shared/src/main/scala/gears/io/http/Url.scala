@@ -23,7 +23,7 @@ final case class Url private (scheme: String, host: String, port: Int, rawPath: 
   }
 
   /** The scheme, host and port: whether two URLs are the same origin, for credentials and pooled connections. */
-  def origin: (String, String, Int) = (scheme, host, port)
+  def origin: Url.Origin = Url.Origin(scheme, host, port)
 
   /** The path, percent-decoded. */
   def path: String = Url.decode(rawPath, plusIsSpace = false)
@@ -48,6 +48,9 @@ final case class Url private (scheme: String, host: String, port: Int, rawPath: 
 }
 
 object Url {
+
+  /** A URL's scheme, host and port (RFC 6454). */
+  final case class Origin(scheme: String, host: String, port: Int)
 
   /** `text` as a URL; an `IllegalArgumentException` if it is not an absolute `http`, `https`, `ws` or `wss` one with a
     * host, or if it has user information, which a URL must not carry (RFC 9110, 4.2.4): credentials go in a header.

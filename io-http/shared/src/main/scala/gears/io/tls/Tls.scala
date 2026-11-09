@@ -28,7 +28,7 @@ abstract class TlsStream extends Stream {
 }
 
 /** A server's loaded keys, made once (`Tls.serverContext`) and shared by its connections. */
-final class TlsServerContext private[tls] (private[tls] val native: AnyRef)
+final class TlsServerContext private[tls] (private[tls] val native: TlsPlatform.ServerContext)
 
 object Tls {
 
@@ -47,9 +47,9 @@ object Tls {
   /** Loads a server's keys; an `IOException` if they do not load, or do not match. */
   def serverContext(config: TlsServerConfig): TlsServerContext = new TlsServerContext(TlsPlatform.serverContext(config))
 
-  private val clients = new java.util.concurrent.ConcurrentHashMap[TlsClientConfig, AnyRef]()
+  private val clients = new java.util.concurrent.ConcurrentHashMap[TlsClientConfig, TlsPlatform.ClientContext]()
 
   /** The client context for `config`, made once: loading the system's certificates is slow. */
-  private def clientContext(config: TlsClientConfig): AnyRef =
+  private def clientContext(config: TlsClientConfig): TlsPlatform.ClientContext =
     clients.computeIfAbsent(config, c => TlsPlatform.clientContext(c))
 }

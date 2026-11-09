@@ -272,7 +272,7 @@ object HttpClient {
   private[http] final class Connection(
       val stream: Stream,
       val input: BufferedInput,
-      val origin: (String, String, Int)
+      val origin: Url.Origin
   ) {
     var keptSince = 0L
     def close()(using Async): Unit =
@@ -324,9 +324,9 @@ object HttpClient {
 
   /** Idle connections by origin, the most recently used first. */
   private final class Pool(config: PoolConfig) {
-    private val idle = scala.collection.mutable.HashMap.empty[(String, String, Int), List[Connection]]
+    private val idle = scala.collection.mutable.HashMap.empty[Url.Origin, List[Connection]]
 
-    def take(origin: (String, String, Int))(using Async): Connection | Null = {
+    def take(origin: Url.Origin)(using Async): Connection | Null = {
       val now = System.nanoTime()
       var found: Connection | Null = null
       val expired = scala.collection.mutable.ListBuffer.empty[Connection]

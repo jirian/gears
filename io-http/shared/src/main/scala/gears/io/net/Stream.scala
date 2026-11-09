@@ -90,8 +90,7 @@ object Stream {
   * buffer read into and written from are kept, so that reading and writing the same buffer again, as a buffered reader
   * does, allocates nothing.
   */
-final class SocketStream private[io] (val io: Io[StreamSockets], connection: AnyRef) extends Stream {
-  private val handle = connection.asInstanceOf[io.backend.Connection]
+final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.backend.Connection) extends Stream {
   private val ops = io.backend.ops
 
   private val closed = new java.util.concurrent.atomic.AtomicBoolean(false)
@@ -153,8 +152,7 @@ final class SocketStream private[io] (val io: Io[StreamSockets], connection: Any
 }
 
 /** A listening socket of `io`'s backend, accepting `SocketStream`s. */
-final class Listener private[io] (val io: Io[StreamSockets], listener: AnyRef) {
-  private val handle = listener.asInstanceOf[io.backend.Listener]
+final class Listener private[io] (val io: Io[StreamSockets])(handle: io.backend.Listener) {
   private val into = Slot[io.backend.Connection]()
   private val acceptOp = io.backend.ops.accept(handle, into)
   private val isClosed = new java.util.concurrent.atomic.AtomicBoolean(false)
@@ -168,7 +166,7 @@ final class Listener private[io] (val io: Io[StreamSockets], listener: AnyRef) {
     */
   def accept()(using Async): SocketStream = {
     io.perform(acceptOp)
-    new SocketStream(io, into.clear())
+    new SocketStream(io)(into.clear())
   }
 
   /** The address it listens on, with the port the system chose if it was asked for port 0. */

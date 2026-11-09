@@ -3,6 +3,7 @@ package gears.io.http
 import gears.async.Async
 import gears.async.AsyncOperations
 import gears.async.Future
+import gears.io.net.Stream
 import gears.io.net.Tcp
 import gears.io.tls.Tls
 import gears.io.tls.TlsClientConfig
@@ -18,7 +19,9 @@ import scala.util.Try
 
 import munit.FunSuite
 
-/** TLS streams against a peer that misbehaves: one that trickles its handshake, and one that stops reading. */
+/** TLS streams against a peer that misbehaves, one that trickles its handshake and one that stops reading, and how many
+  * writes a TLS stream makes.
+  */
 class TlsSuite extends FunSuite {
   override val munitTimeout = scala.concurrent.duration.Duration(30, "s")
 
@@ -86,6 +89,47 @@ class TlsSuite extends FunSuite {
         assert(took < 3000, s"close and the write's failure took $took ms")
         peer.cancel()
         listener.close()
+      }
+    }
+  }
+
+  test("small buffers written together go out as one record, in one write of the connection") {
+    Http.run {
+      Async.group {
+        val listener = Tcp.listen("127.0.0.1", 0)
+        val context = Tls.serverContext(serverTls)
+        val peer = Future {
+          val tls = Tls.server(listener.accept(), context, 5.seconds)
+          val got = ByteBuffer.allocate(64)
+          while got.position() < 11 && tls.read(got, 5.seconds) > 0 do ()
+          tls.close()
+          new String(got.array(), 0, got.position(), StandardCharsets.UTF_8)
+        }
+        val raw = Tcp.connect("127.0.0.1", Tcp.port(listener.localAddress))
+        val writes = new java.util.concurrent.atomic.AtomicInteger()
+        val counted = new Stream {
+          def read(buf: ByteBuffer, timeout: Duration)(using Async) = raw.read(buf, timeout)
+          def write(buf: ByteBuffer, timeout: Duration)(using Async) = {
+            writes.incrementAndGet()
+            raw.write(buf, timeout)
+          }
+          def shutdownOutput()(using Async) = raw.shutdownOutput()
+          def close()(using Async) = raw.close()
+          def localAddress = raw.localAddress
+          def peerAddress = raw.peerAddress
+        }
+        val tls = Tls.client(counted, "localhost", trusting, 5.seconds)
+        try {
+          val before = writes.get()
+          val parts = Array("hello", " ", "world").map(p => ByteBuffer.wrap(p.getBytes(StandardCharsets.UTF_8)))
+          tls.write(parts, 5.seconds)
+          assertEquals(writes.get() - before, 1, "one write for the three buffers")
+          assert(parts.forall(!_.hasRemaining), "each buffer is taken")
+          assertEquals(peer.await, "hello world")
+        } finally {
+          tls.close()
+          listener.close()
+        }
       }
     }
   }

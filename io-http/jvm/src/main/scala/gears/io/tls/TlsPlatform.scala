@@ -252,15 +252,15 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     * record is cut or lost; `src` is advanced as the engine takes its bytes.
     */
   private def sendWrapped(src: ByteBuffer, timeout: Duration)(using Async): Unit =
-    Stream.holding(writing)(wrapHeld(src, timeout))
+    Stream.holding(writing)(wrapHeld(Array(src), timeout))
 
-  /** `sendWrapped`'s work, the write side held. */
-  private def wrapHeld(src: ByteBuffer, timeout: Duration)(using Async): Unit = {
+  /** `sendWrapped`'s work, the write side held, for all of `srcs`, which the engine gathers into each record. */
+  private def wrapHeld(srcs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
     if netOut.hasRemaining then underlying.write(netOut, timeout)
     var more = true
     while more do {
       netOut.clear()
-      val r = engine.wrap(src, netOut)
+      val r = engine.wrap(srcs, netOut)
       r.getStatus match {
         case SSLEngineResult.Status.BUFFER_OVERFLOW =>
           netOut = ByteBuffer.allocate(netOut.capacity() + session.getPacketBufferSize)
@@ -268,7 +268,7 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
           netOut.flip()
           if netOut.hasRemaining then underlying.write(netOut, timeout)
           if r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_TASK then runTasks()
-          more = src.hasRemaining && r.getStatus == SSLEngineResult.Status.OK ||
+          more = EngineStream.remains(srcs) && r.getStatus == SSLEngineResult.Status.OK ||
             r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP
         case SSLEngineResult.Status.BUFFER_UNDERFLOW =>
           netOut.flip()
@@ -296,7 +296,7 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
           // A post-handshake message's answer, unless a write holds the write side: it sends it with its own records.
           writing.poll() match {
             case Some(guard) =>
-              try wrapHeld(ByteBuffer.allocate(0), timeout)
+              try wrapHeld(Array(ByteBuffer.allocate(0)), timeout)
               finally guard.release()
             case None => ()
           }
@@ -307,6 +307,13 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
   def write(buf: ByteBuffer, timeout: Duration)(using Async): Unit = {
     if closed then throw new java.nio.channels.ClosedChannelException()
     if buf.hasRemaining then sendWrapped(buf, timeout)
+  }
+
+  /** Small buffers, such as a response's head and body, go out together, as one record and one write of `underlying`.
+    */
+  override def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
+    if closed then throw new java.nio.channels.ClosedChannelException()
+    if EngineStream.remains(bufs) then Stream.holding(writing)(wrapHeld(bufs, timeout))
   }
 
   def shutdownOutput()(using Async): Unit = {
@@ -327,7 +334,7 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
               case Some(guard) =>
                 try {
                   engine.closeOutbound()
-                  wrapHeld(ByteBuffer.allocate(0), 1.second)
+                  wrapHeld(Array(ByteBuffer.allocate(0)), 1.second)
                 } finally guard.release()
               case None => ()
             }
@@ -338,4 +345,14 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
 
   def localAddress = underlying.localAddress
   def peerAddress = underlying.peerAddress
+}
+
+private object EngineStream {
+
+  /** Whether any of `bufs` has bytes left. */
+  def remains(bufs: Array[ByteBuffer]): Boolean = {
+    var i = 0
+    while i < bufs.length && !bufs(i).hasRemaining do i += 1
+    i < bufs.length
+  }
 }

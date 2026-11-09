@@ -114,6 +114,8 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
   private val netOut = new Array[Byte](OpenSslStream.NetBufSize)
   private val outPending = ByteBuffer.wrap(netOut).limit(0) // taken from the BIO, not yet written
   private val netIn = new Array[Byte](OpenSslStream.NetBufSize)
+  private val netInBuffer = ByteBuffer.wrap(netIn) // the same each time, so that the stream's read op is kept
+  private lazy val gathered = new Array[Byte](OpenSslStream.RecordSize) // small buffers, for one record
   private var failureDetail = ""
 
   def closeNotified: Boolean = notified
@@ -169,8 +171,7 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
   /** Reads from the network into OpenSSL: false at the end of the stream. */
   private def fillNetworkIn(timeout: Duration)(using Async): Boolean =
     Stream.holding(inbound) {
-      val in = ByteBuffer.wrap(netIn)
-      val n = underlying.read(in, timeout)
+      val n = underlying.read(netInBuffer.clear(), timeout)
       if n > 0 then {
         val written = native(BIO_write(networkBio, netIn.asInstanceOf[ByteArray].at(0), n))
         if written != n then throw new IOException(s"The TLS input overflowed its buffer ($written of $n bytes)")
@@ -265,26 +266,69 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
       val arr = if direct then buf.array() else new Array[Byte](n)
       val start = if direct then buf.arrayOffset() + buf.position() else 0
       if !direct then buf.duplicate().get(arr)
-      var written = 0
-      while written < n do {
-        // `buf` is advanced as OpenSSL takes its bytes, before they are flushed: a write that times out or is cancelled
-        // has taken what its position says, and the records go out first on the next write.
-        val (r, err) = pump(
-          () => {
-            val r = SSL_write(ssl, arr.asInstanceOf[ByteArray].at(start + written), n - written)
-            if r > 0 then {
-              written += r
-              buf.position(buf.position() + r)
-            }
-            r
-          },
-          timeout,
-          reading = false
-        )
-        if r <= 0 then
-          if err == OpenSslStream.PeerClosed then throw new IOException("The peer closed the connection")
-          else throw new IOException(s"TLS write failed (SSL_get_error=$err): $failureDetail")
+      // `buf` is advanced as OpenSSL takes its bytes, before they are flushed: a write that times out or is cancelled
+      // has taken what its position says, and the records go out first on the next write.
+      writeArray(arr, start, n, timeout)(r => buf.position(buf.position() + r): Unit)
+    }
+  }
+
+  /** Small buffers, such as a response's head and body, go out together, as one record and one write of `underlying`:
+    * up to a record's worth is copied into `gathered`, and each buffer is advanced as OpenSSL takes its bytes. A buffer
+    * of a record or more, met first, is written from where it is.
+    */
+  override def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
+    var i = 0
+    while i < bufs.length do {
+      if !bufs(i).hasRemaining then i += 1
+      else if bufs(i).remaining() >= OpenSslStream.RecordSize then {
+        write(bufs(i), timeout)
+        i += 1
+      } else {
+        var n = 0
+        var j = i
+        while j < bufs.length && n < gathered.length do {
+          val b = bufs(j)
+          val k = math.min(b.remaining(), gathered.length - n)
+          if b.hasArray then System.arraycopy(b.array(), b.arrayOffset() + b.position(), gathered, n, k)
+          else b.duplicate().get(gathered, n, k)
+          n += k
+          j += 1
+        }
+        writeArray(gathered, 0, n, timeout) { r =>
+          var left = r
+          while left > 0 do {
+            val b = bufs(i)
+            val k = math.min(left, b.remaining())
+            b.position(b.position() + k)
+            left -= k
+            if !b.hasRemaining then i += 1
+          }
+        }
       }
+    }
+  }
+
+  /** Writes `n` bytes of `arr` from `start` through OpenSSL, calling `taken` with each count it takes. */
+  private def writeArray(arr: Array[Byte], start: Int, n: Int, timeout: Duration)(taken: Int => Unit)(using
+      Async
+  ): Unit = {
+    var written = 0
+    while written < n do {
+      val (r, err) = pump(
+        () => {
+          val r = SSL_write(ssl, arr.asInstanceOf[ByteArray].at(start + written), n - written)
+          if r > 0 then {
+            written += r
+            taken(r)
+          }
+          r
+        },
+        timeout,
+        reading = false
+      )
+      if r <= 0 then
+        if err == OpenSslStream.PeerClosed then throw new IOException("The peer closed the connection")
+        else throw new IOException(s"TLS write failed (SSL_get_error=$err): $failureDetail")
     }
   }
 
@@ -336,6 +380,7 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
 private object OpenSslStream {
   inline val PeerClosed = -1
   inline val NetBufSize = 17 * 1024
+  inline val RecordSize = 16 * 1024 // the most plaintext a TLS record carries
 
   def open(underlying: Stream, ctx: Ptr[SSL_CTX], host: String | Null, verify: Boolean): OpenSslStream = {
     val ssl = SSL_new(ctx)

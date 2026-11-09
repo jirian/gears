@@ -1,5 +1,5 @@
 package gears.async.io
-package uring
+package shareable
 
 import gears.async.Async
 import gears.async.Future
@@ -7,14 +7,20 @@ import gears.async.Future
 import java.util.concurrent.CancellationException
 import scala.concurrent.duration.*
 
-/** Timers that complete as soon as they are scheduled, so that completion races the performer's wait for it, and
-  * submissions race each worker going to sleep.
+/** For a backend on the shared runtime (`WorkpoolScheduler`), with timers that complete as soon as they are scheduled,
+  * so that completion races the performer's wait for it, and submissions race each worker going to sleep.
   */
-class UringStressSuite extends munit.FunSuite {
+abstract class StressContract extends munit.FunSuite {
+
+  /** The backend, and a pool of `workers` workers performing its ops. */
+  type B <: Backend
+  val backend: B
+  def newPool(workers: Int): WorkpoolScheduler[?, ?] & Io[B]
+
   override def munitTimeout: Duration = 60.seconds
 
   test("a run stops its workers before it returns") {
-    given UringBackend.type = UringBackend
+    given B = backend
     val worker = Io.run { io ?=>
       io.perform(io.backend.ops.timer(1))
       Thread.currentThread()
@@ -23,7 +29,7 @@ class UringStressSuite extends munit.FunSuite {
   }
 
   test("a run stops its workers when the program fails") {
-    given UringBackend.type = UringBackend
+    given B = backend
     var worker: Thread | Null = null
     intercept[IllegalStateException](Io.run { io ?=>
       worker = Thread.currentThread()
@@ -33,7 +39,7 @@ class UringStressSuite extends munit.FunSuite {
   }
 
   test("a run ending with many timers pending cancels them, and shuts down without waiting for them") {
-    given UringBackend.type = UringBackend
+    given B = backend
     val workers = java.util.concurrent.ConcurrentHashMap.newKeySet[Thread]()
     val scheduledRan = java.util.concurrent.atomic.AtomicBoolean(false)
     val started = System.nanoTime()
@@ -55,7 +61,7 @@ class UringStressSuite extends munit.FunSuite {
   }
 
   test("a scheduler that has shut down refuses work") {
-    val pool = UringScheduler(1)
+    val pool = newPool(1)
     pool.shutdown()
     pool.shutdown() // nothing left to do
     intercept[IllegalStateException](pool.execute(() => ()))
@@ -63,7 +69,7 @@ class UringStressSuite extends munit.FunSuite {
   }
 
   test("many short timers all complete") {
-    given UringBackend.type = UringBackend
+    given B = backend
     Io.run { io ?=>
       for round <- 1 to 3000 do {
         val futures = for _ <- 1 to 16 yield Future(io.perform(io.backend.ops.timer(0)))
@@ -73,7 +79,7 @@ class UringStressSuite extends munit.FunSuite {
   }
 
   test("a timer cancelled as it fires leaves its next performance to run its full time") {
-    given UringBackend.type = UringBackend
+    given B = backend
     Io.run { io ?=>
       val delay = 300.micros
       val timer = io.backend.ops.timer(delay)
@@ -91,7 +97,7 @@ class UringStressSuite extends munit.FunSuite {
   }
 
   test("a timer cancelled by a waiter resumed from the same batch of timers still finishes") {
-    given UringBackend.type = UringBackend
+    given B = backend
     Io.run { io ?=>
       for round <- 1 to 200 do {
         val deadline = System.nanoTime() + 5_000_000L
@@ -108,7 +114,7 @@ class UringStressSuite extends munit.FunSuite {
   }
 
   test("timers shorter than a millisecond complete, the worker sleeping for less than one") {
-    given UringBackend.type = UringBackend
+    given B = backend
     Io.run { io ?=>
       for round <- 1 to 300 do {
         val futures = for _ <- 1 to 4 yield Future(io.perform(io.backend.ops.timer(300.micros)))
@@ -118,15 +124,14 @@ class UringStressSuite extends munit.FunSuite {
   }
 }
 
-class UringDeadlineSuite extends munit.FunSuite {
+abstract class DeadlineContract extends munit.FunSuite {
+  type B <: Backend
+  val backend: B
+
   test("a deadline already passed, even a negative one, is on the heap and fires") {
-    given UringBackend.type = UringBackend
+    given B = backend
     Io.run { io ?=>
       io.perform(io.backend.ops.deadlineTimer(-5L))
     }
   }
-}
-
-class UringThreadedTimerSuite extends gears.async.io.testkit.ThreadedTimerContract {
-  val backend: Backend = UringBackend
 }

@@ -157,7 +157,7 @@ lazy val ioUring =
       testFrameworks += MUnitFramework,
       nativeConfig ~= { _.withMultithreading(true) }
     )
-    .dependsOn(ioRuntime, ioTestkit.native % Test)
+    .dependsOn(ioRuntime % "compile->compile;test->test", ioTestkit.native % Test)
 
 // The higher level for programs: byte streams over connections, TLS, and an HTTP/1.1 server and client with WebSockets
 // (`gears.io.net`, `gears.io.tls`, `gears.io.http`), written against `gears.async.io` and run on each platform's

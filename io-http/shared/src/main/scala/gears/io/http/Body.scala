@@ -149,6 +149,14 @@ object Body {
   /** Bytes still arriving, a request's on a server or a response's on a client, through `source`, which delimits them
     * and holds them to its limit.
     */
+  /** A message's body arriving on `source`, framed by `framing`: none for `NoBody`. */
+  private[http] def incoming(headers: Headers, framing: Wire.Framing, source: Wire.Source): Body =
+    framing match {
+      case Wire.Framing.NoBody    => empty
+      case Wire.Framing.Length(n) => new Incoming(headers.get("Content-Type"), Some(n), source)
+      case _                      => new Incoming(headers.get("Content-Type"), None, source)
+    }
+
   private[http] final class Incoming(val contentType: Option[String], val length: Option[Long], source: Wire.Source)
       extends Body {
     private var all: Array[Byte] | Null = null

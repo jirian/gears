@@ -286,40 +286,15 @@ private[http] object Server {
       if head == null then return false
       val h = head.nn
       val http11 = h.version == "HTTP/1.1"
-      val url =
-        try requestUrl(h, stream.secure)
+      val (url, framing) =
+        try (requestUrl(h, stream.secure), checkedFraming(h))
         catch {
           case e: Wire.Malformed =>
             respondAndClose(stream, Response.text(s"${e.getMessage}\n", e.status))
             return false
         }
-      val framing =
-        try Wire.framing(h.headers, Wire.Framing.NoBody)
-        catch {
-          case e: Wire.Malformed =>
-            respondAndClose(stream, Response.text(s"${e.getMessage}\n", e.status))
-            return false
-        }
-      if !http11 && framing == Wire.Framing.Chunked then {
-        respondAndClose(stream, Response.text("Chunked encoding is HTTP/1.1's\n", Status.BadRequest))
-        return false
-      }
-      framing match {
-        case Wire.Framing.Length(n) if n > config.limits.body =>
-          respondAndClose(stream, tooLarge(config.limits.body))
-          return false
-        case _ => ()
-      }
-      val expectation = h.headers.get("Expect")
-      if expectation.exists(!_.equalsIgnoreCase("100-continue")) then {
-        respondAndClose(
-          stream,
-          Response.text(s"Unsupported expectation: ${expectation.get}\n", Status.ExpectationFailed)
-        )
-        return false
-      }
       // 100 Continue goes out only once the handler reads the body, so one that refuses it first saves the upload.
-      var continued = expectation.isEmpty || !http11
+      var continued = !h.headers.contains("Expect") || !http11
       val source = new Wire.Source(
         input,
         framing,
@@ -332,17 +307,7 @@ private[http] object Server {
           },
         limit => HttpError(Status.ContentTooLarge, s"The body is larger than $limit bytes")
       )
-      val body =
-        if framing == Wire.Framing.NoBody then Body.empty
-        else
-          new Body.Incoming(
-            h.headers.get("Content-Type"),
-            framing match {
-              case Wire.Framing.Length(n) => Some(n)
-              case _                      => None
-            },
-            source
-          )
+      val body = Body.incoming(h.headers, framing, source)
       val request = Request(h.method, url, h.headers, body, None, h.version)
       val keepAlive =
         if h.headers.hasToken("Connection", "close") then false
@@ -445,8 +410,23 @@ private[http] object Server {
           throw e
       }
 
-    private def tooLarge(limit: Long): Response =
-      Response.text(s"The body is larger than $limit bytes\n", Status.ContentTooLarge)
+    /** How a request's body is framed, or a `Wire.Malformed` with the status to refuse it with: framing that is
+      * ambiguous, chunked on HTTP/1.0, a length over the limit, or an expectation other than `100-continue`.
+      */
+    private def checkedFraming(h: Wire.RequestHead): Wire.Framing = {
+      val framing = Wire.framing(h.headers, Wire.Framing.NoBody)
+      if h.version != "HTTP/1.1" && framing == Wire.Framing.Chunked then
+        throw new Wire.Malformed(Status.BadRequest, "Chunked encoding is HTTP/1.1's")
+      framing match {
+        case Wire.Framing.Length(n) if n > config.limits.body =>
+          throw new Wire.Malformed(Status.ContentTooLarge, s"The body is larger than ${config.limits.body} bytes")
+        case _ => ()
+      }
+      val expectation = h.headers.get("Expect")
+      if expectation.exists(!_.equalsIgnoreCase("100-continue")) then
+        throw new Wire.Malformed(Status.ExpectationFailed, s"Unsupported expectation: ${expectation.get}")
+      framing
+    }
 
     /** The URL a request names: its target's path and query, on the host its `Host` header names; a `Wire.Malformed` if
       * either is malformed.

@@ -178,7 +178,7 @@ object Response {
   def ok(bytes: Array[Byte]): Response = Response(Status.Ok, Body(bytes))
 
   /** `text` in UTF-8, `text/plain` unless `contentType` says otherwise. */
-  def text(text: String, status: Status = Status.Ok, contentType: String = "text/plain; charset=utf-8"): Response =
+  def text(text: String, status: Status = Status.Ok, contentType: String = Body.PlainText): Response =
     Response(status, Body.text(text, contentType))
 
   def html(html: String, status: Status = Status.Ok): Response =

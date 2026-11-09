@@ -208,7 +208,7 @@ final class Routes private (routes: Seq[Route], middleware: List[Middleware]) {
         else {
           val h = endpoints.getOrElse(request.method, endpoints(Method.Get)) // a HEAD with no route of its own
           val answered =
-            try h(request.copy(pathParams = request.pathParams ++ params))
+            try h(if params.isEmpty then request else request.copy(pathParams = request.pathParams ++ params))
             catch case e: HttpError => e.response // so that middleware sees it as the response it is
           if request.method == Method.Head && !endpoints.contains(Method.Head) then answered.copy(body = Body.empty)
           else answered
@@ -357,10 +357,16 @@ object Routes {
     * empty one, a trailing slash; `segments` itself, the same list, if there were none.
     */
   private[http] def clean(segments: List[String]): List[String] = {
-    val last = segments.length - 1
-    val dirty = segments.zipWithIndex.exists((s, i) => s == "." || s == ".." || (s.isEmpty && i != last))
+    var dirty = false
+    var rest = segments
+    while !dirty && rest.nonEmpty do {
+      val s = rest.head
+      dirty = s == "." || s == ".." || (s.isEmpty && rest.tail.nonEmpty)
+      rest = rest.tail
+    }
     if !dirty then segments
     else {
+      val last = segments.length - 1
       val out = scala.collection.mutable.ListBuffer.empty[String]
       for (s, i) <- segments.zipWithIndex do
         s match {

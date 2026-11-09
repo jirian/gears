@@ -211,7 +211,4 @@ private[uring] object Ring {
       new IOException(s"The io_uring backend needs Linux 6.0 or later (synchronous cancel: $probe)")
     else null
   }
-
-  /** Throws if this kernel's io_uring will not do, by setting up a ring and tearing it down. */
-  def check(): Unit = new Ring(2, 4).close()
 }

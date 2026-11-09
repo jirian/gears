@@ -75,8 +75,9 @@ nothing. The runtime's protocol (`WorkpoolScheduler.performWithin`) is: await th
   (`UringSuite`, "an op whose time runs out while its failing completion waits in the ring").
 
 The kernel version: `IORING_REGISTER_SYNC_CANCEL` is what makes taking an op back synchronous; before 6.0 a cancel is
-itself an entry whose result comes later. `Ring.check` probes for it, and for `IORING_FEAT_NODROP` and
-`IORING_FEAT_EXT_ARG`, before a run starts, and refuses an older kernel with an `IOException` naming the requirement.
+itself an entry whose result comes later. Each ring probes for it as it is set up, and for `IORING_FEAT_NODROP`
+and `IORING_FEAT_EXT_ARG`, before a run starts (`UringScheduler.apply` makes the rings first), and refuses an older
+kernel with an `IOException` naming the requirement.
 
 A command a kernel worker is running (a read or write of a regular file, an `fsync`) cannot be stopped; the sync
 cancel waits for it to finish, so a slow disk holds up the worker for that long. The backend before the move to the

@@ -75,6 +75,71 @@ object Url {
 
   def defaultPort(scheme: String): Int = if scheme == "https" || scheme == "wss" then 443 else 80
 
+  /** A server's request URL, from its `Host` header's `authority` and its origin-form `target` (a path, and a query
+    * after a `?`), checked as strictly as `parse` checks them, without its two parses of a `URI`: a host name of
+    * letters, digits, `-` and `.`, or a bracketed IPv6 literal, and a port of 1 to 65535 if there is one; a target of
+    * RFC 3986's path and query characters and percent-escapes, with no fragment. A `Wire.Malformed` (400) if not.
+    */
+  private[http] def ofRequest(scheme: String, authority: String, target: String): Url = {
+    def malformed(what: String) = new Wire.Malformed(Status.BadRequest, what)
+    if !originForm(target) then throw malformed(s"A malformed request target: $target")
+    var host = authority
+    var port = ""
+    if authority.startsWith("[") then {
+      val close = authority.indexOf(']')
+      val after = close + 1
+      if close < 0 || after < authority.length && authority.charAt(after) != ':' then
+        throw malformed(s"A malformed Host header: $authority")
+      host = authority.substring(1, close)
+      if !host.contains(':') || gears.io.net.IpLiteral.parse(host).isEmpty then
+        throw malformed(s"A malformed Host header: $authority")
+      if after < authority.length then port = authority.substring(after + 1)
+    } else {
+      val colon = authority.lastIndexOf(':')
+      if colon >= 0 then {
+        host = authority.substring(0, colon)
+        port = authority.substring(colon + 1)
+      }
+      if host.isEmpty || !host.forall(c => c.isLetterOrDigit && c < 128 || c == '-' || c == '.') then
+        throw malformed(s"A malformed Host header: $authority")
+    }
+    val number =
+      if port.isEmpty then defaultPort(scheme)
+      else if port.length <= 5 && port.forall(c => c >= '0' && c <= '9') && port.toInt >= 1 && port.toInt <= 65535
+      then port.toInt
+      else throw malformed(s"A malformed Host header: $authority")
+    val question = target.indexOf('?')
+    val path = if question < 0 then target else target.substring(0, question)
+    val query = if question < 0 then None else Some(target.substring(question + 1))
+    new Url(scheme, host.toLowerCase, number, path, query)
+  }
+
+  /** Whether `target` is a path starting with `/`, then a query after a `?` if any, of RFC 3986's characters for them:
+    * unreserved ones, sub-delimiters, `:`, `@`, `/`, `?` in the query, and `%` with two hex digits.
+    */
+  private def originForm(target: String): Boolean = {
+    if target.isEmpty || target.charAt(0) != '/' then return false
+    var i = 0
+    while i < target.length do {
+      val c = target.charAt(i)
+      if c == '%' then {
+        if i + 2 >= target.length || !isHex(target.charAt(i + 1)) || !isHex(target.charAt(i + 2)) then return false
+        i += 2
+      } else if c >= 128 || !targetChars(c) then return false
+      i += 1
+    }
+    true
+  }
+
+  private def isHex(c: Char): Boolean = c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+
+  private val targetChars: Array[Boolean] = {
+    val ok = new Array[Boolean](128)
+    for c <- ('a' to 'z') ++ ('A' to 'Z') ++ ('0' to '9') ++ "-._~!$&'()*+,;=:@/" do ok(c) = true
+    ok('?') = true
+    ok
+  }
+
   /** The parameters of a raw query, `+` and percent-escapes decoded; an `IllegalArgumentException` if an escape is
     * malformed.
     */

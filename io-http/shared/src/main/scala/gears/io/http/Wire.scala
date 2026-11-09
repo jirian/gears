@@ -28,8 +28,12 @@ private[http] object Wire {
     case UntilClose
   }
 
-  /** A malformed message: what a server answers with `status`, and a client reports as an `IOException`. */
-  final class Malformed(val status: Status, message: String) extends IOException(message)
+  /** A malformed message: what a server answers with `status`, and a client reports as an `IOException`. Any peer can
+    * send one, so it has no stack trace, which costs as much as serving a request on Scala Native.
+    */
+  final class Malformed(val status: Status, message: String) extends IOException(message) {
+    override def fillInStackTrace(): Throwable = this
+  }
 
   final case class RequestHead(method: Method, target: String, version: String, headers: Headers)
   final case class ResponseHead(version: String, status: Status, headers: Headers)

@@ -83,7 +83,7 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
           if deadline == Long.MaxValue then Duration.Inf
           else {
             val nanos = deadline - System.nanoTime()
-            if nanos <= 0 then throw new java.util.concurrent.TimeoutException(s"No complete line in $timeout")
+            if nanos <= 0 then throw new BufferedInput.TimedOut(s"No complete line in $timeout")
             Duration.fromNanos(nanos)
           }
         if !fill(left, grow = true) then {
@@ -171,6 +171,13 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
 
 object BufferedInput {
 
-  /** A delimited read that found no delimiter within its limit. */
-  final class TooLong(val limit: Int) extends IOException(s"No delimiter within $limit bytes")
+  /** A delimited read that found no delimiter within its limit. A peer's doing, so with no stack trace. */
+  final class TooLong(val limit: Int) extends IOException(s"No delimiter within $limit bytes") {
+    override def fillInStackTrace(): Throwable = this
+  }
+
+  /** A delimited read out of time: an idle peer's doing, so with no stack trace. */
+  private[io] final class TimedOut(message: String) extends java.util.concurrent.TimeoutException(message) {
+    override def fillInStackTrace(): Throwable = this
+  }
 }

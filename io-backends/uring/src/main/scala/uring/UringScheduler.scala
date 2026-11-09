@@ -177,8 +177,12 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       */
     @volatile private var broken: Throwable | Null = null
 
+    /** From the worker's own thread, nothing: it looks for work and at its next deadline before it waits again, so a
+      * timer or a task it adds itself needs no wake-up, which would cost it a turn of its loop.
+      */
     override protected def wake(): Unit =
-      if broken == null then own.ring.wake() else java.util.concurrent.locks.LockSupport.unpark(workerThread)
+      if !isCurrent then
+        if broken == null then own.ring.wake() else java.util.concurrent.locks.LockSupport.unpark(workerThread)
 
     @volatile private var workerThread: Thread | Null = null
 
@@ -393,7 +397,7 @@ private[uring] object UringScheduler {
     var made = 0
     try
       while made < workers do {
-        rings(made) = new Ring(Entries)
+        rings(made) = new Ring(Entries, Completions)
         made += 1
       }
     catch {
@@ -406,4 +410,11 @@ private[uring] object UringScheduler {
 
   /** Submission queue entries of each worker's ring. */
   inline val Entries = 256
+
+  /** Completion queue entries of each worker's ring: room for a completion of every connection it may have waiting at
+    * once, such as kept-alive ones each with a read pending (io-http's 10,000 spread over the workers), so that a burst
+    * of them does not go to the kernel's overflow list. Rings are locked memory, 8 MiB in all by default, and the
+    * kernel frees a closed one later, so a much larger queue fails to set up once a few runtimes have come and gone.
+    */
+  inline val Completions = 2048
 }

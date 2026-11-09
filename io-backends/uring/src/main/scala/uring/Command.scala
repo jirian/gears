@@ -642,11 +642,11 @@ private[uring] final class Connect(
 }
 
 /** Accepts one connection, writing it, with the options its listener gives the connections it accepts, into `into`.
-  * Accepts on one listener run side by side, each taking its own connection; one aborted before it was accepted is
-  * skipped.
+  * Accepts on one listener take turns, first come first served; one aborted before it was accepted is skipped.
   */
 private[uring] final class Accept(val handle: ListenerHandle, into: Slot[ConnectionHandle]) extends Command {
   override def check(): Unit = Checks.notEmpty(into)
+  override def turns: Turns | Null = handle.accepts
   override protected def readinessEvents: Int = Linux.POLLIN
 
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit =
@@ -675,6 +675,7 @@ private[uring] final class Accept(val handle: ListenerHandle, into: Slot[Connect
 private[uring] final class AcceptAll(val handle: ListenerHandle, into: Slot[Array[ConnectionHandle]], max: Int)
     extends Command {
   override def check(): Unit = Checks.notEmpty(into)
+  override def turns: Turns | Null = handle.accepts
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = io_uring_prep_poll_add(sqe, fd, Linux.POLLIN.toUInt)
 
   protected def finish(res: Int): Boolean =

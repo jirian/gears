@@ -113,11 +113,11 @@ sent to it hung.
 
 ## Turns
 
-Datagram receives on one socket, and its sends, are served in the order they began (`Turns`): the kernel does not
-keep that order among entries waiting together. Accepts take no turns: `Ops` says a listener's accepts are served
-first come, first served, which the reference backend keeps and this backend does not, among accepts waiting on one listener together. Only the head is in the kernel; when it ends, the next is started on
-its own worker. A withdrawal of one still waiting just takes it out; a close fails those waiting. The head is tried at
-once with one non-blocking `recvmsg` or `sendmsg` before it goes to the ring.
+Datagram receives on one socket, its sends, and a listener's accepts are served in the order they began (`Turns`), as
+`Ops` says: the kernel does not keep that order among entries waiting together. Only the head is in the kernel; when it
+ends, the next is started on its own worker. A withdrawal of one still waiting just takes it out; a close fails those
+waiting. A datagram's head is tried at once with one non-blocking `recvmsg` or `sendmsg`, and an accept's with
+`accept4`, before it goes to the ring.
 
 ## Buffers
 

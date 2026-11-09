@@ -496,10 +496,10 @@ private[uring] final class CloseHandle(handle: UringHandle) extends SingleUseAbs
 private[uring] final class PooledRead(val handle: UringHandle, pool: NativePool, into: Slot[Received]) extends Command {
   override protected def direction = Command.Direction.Reading
   override def check(): Unit = Checks.notEmpty(into)
-  private var held: pool.NativeSlot | Null = null
+  private var held: pool.PoolBuffer | Null = null
   private var pollNext = false // a read straight into a buffer found nothing: wait for readiness first
 
-  private def take(): pool.NativeSlot = {
+  private def take(): pool.PoolBuffer = {
     val slot = pool.take()
     if slot == null then throw new IOException("The pool has no buffer free")
     slot.nn

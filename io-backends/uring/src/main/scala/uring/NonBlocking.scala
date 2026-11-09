@@ -5,9 +5,7 @@ package uring
 import java.io.IOException
 import java.nio.ByteBuffer
 import scala.scalanative.posix.errno
-import scala.scalanative.posix.sys.socket
 import scala.scalanative.posix.sys.uio
-import scala.scalanative.posix.unistd
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 

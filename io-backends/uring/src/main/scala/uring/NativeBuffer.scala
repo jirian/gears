@@ -14,19 +14,6 @@ import scala.scalanative.unsigned.*
   */
 private[uring] object NativeBuffer {
 
-  def allocate(capacity: Int)(using Zone): ByteBuffer = {
-    require(capacity > 0, "Buffer capacity must be positive")
-    PointerBuffer.wrap(alloc[Byte](capacity), capacity)
-  }
-
-  /** A buffer holding `bytes`, flipped and ready to drain. Empty input still gets one byte of storage. */
-  def of(bytes: Array[Byte])(using Zone): ByteBuffer = {
-    val buf = allocate(math.max(bytes.length, 1))
-    buf.put(bytes)
-    buf.flip()
-    buf
-  }
-
   /** Runs `body` with a buffer the kernel can address standing for `buf`, and returns what it returns: `buf` itself if
     * it has native memory behind it, as `allocate` and `PointerBuffer.wrap` make; one over its own array where it is on
     * the heap, as `ByteBuffer.allocate` and, on Scala Native, `allocateDirect` make, which the collector does not move
@@ -110,10 +97,6 @@ private[uring] object NativeBuffer {
       buf.put(got)
     } else buf.position(buf.position() + moved)
   }
-
-  /** The address of the buffer's first byte. */
-  def pointer(buf: ByteBuffer): Ptr[Byte] =
-    buf.pointer()
 
   /** The address of the buffer's current position. */
   def atPosition(buf: ByteBuffer): Ptr[Byte] = buf.pointer() + buf.position()

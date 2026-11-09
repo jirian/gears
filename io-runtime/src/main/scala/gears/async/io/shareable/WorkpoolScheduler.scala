@@ -30,10 +30,10 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, B <: Backend { ty
 
   override private[async] def resumeAsync[T, R](suspension: Suspension[T, R])(arg: T)(using s: Scheduler): Unit =
     // Not here and now: the caller holds the listener's lock, and may hold a source's, partway through changing it.
-    members.get(Thread.currentThread()) match
-      case Some(worker) => worker.resumeNext(() => suspension.resume(arg))
-      // A pool that has shut down refuses it: like a timer still pending, that waiter is never resumed.
-      case None         => nextWorker().submit(() => suspension.resume(arg)): Unit
+    val worker = currentWorker()
+    if worker != null then worker.resumeNext(() => suspension.resume(arg))
+    // A pool that has shut down refuses it: like a timer still pending, that waiter is never resumed.
+    else nextWorker().submit(() => suspension.resume(arg)): Unit
 
   /** Schedule a computation with the suspension boundary already created. */
   // override private[async] def scheduleBoundary(body: Label[Unit] ?=> Unit)(using s: Scheduler): Unit =
@@ -44,13 +44,24 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, B <: Backend { ty
 
   private val workerTicker = new java.util.concurrent.atomic.AtomicInteger(0)
   private val workerGroup: Array[Worker[Op1, B]] = Array.tabulate(workers)(makeWorker)
-  private val members = workerGroup.map(w => w.thread -> w).toMap
+  // Filled before any worker runs a task, and only read after: a lookup that allocates nothing, unlike a Scala Map's.
+  private val members = {
+    val m = new java.util.IdentityHashMap[Thread, Worker[Op1, B]](workers * 2)
+    workerGroup.foreach(w => m.put(w.thread, w))
+    m
+  }
+
+  /** This pool's worker whose thread this is, or null. */
+  private def currentWorker(): Worker[Op1, B] | Null = members.get(Thread.currentThread())
   private def nextWorker(): Worker[Op1, B] = {
     val index = Math.floorMod(workerTicker.getAndIncrement(), workerGroup.length)
     workerGroup(index)
   }
-  protected final def workerOfCurrentThread(): Worker[Op1, B] =
-    members.getOrElse(Thread.currentThread(), throw new IllegalStateException("Current thread is not a worker"))
+  protected final def workerOfCurrentThread(): Worker[Op1, B] = {
+    val worker = currentWorker()
+    if worker == null then throw new IllegalStateException("Current thread is not a worker")
+    worker
+  }
 
   /** The worker for an op. It must be the performer's own, or otherwise unable to fire the op before `await` has
     * registered its listener, as firing takes no listener to mean that the performer was cancelled.
@@ -95,7 +106,7 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, B <: Backend { ty
     * outside the pool: a worker can't wait for itself.
     */
   final def shutdown(): Unit = {
-    if members.contains(Thread.currentThread()) then
+    if currentWorker() != null then
       throw new IllegalStateException("Can't shut down a scheduler from one of its workers")
     isShutDown = true
     workerGroup.foreach(_.stop())

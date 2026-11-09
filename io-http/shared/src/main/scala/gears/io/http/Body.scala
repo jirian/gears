@@ -9,8 +9,9 @@ import java.nio.charset.StandardCharsets
 
 /** A message's body: bytes in memory, bytes a function writes as the message goes out (`Body.stream`), or bytes still
   * arriving with a request a server received or a response a client received. Any of them is read the same way: whole
-  * (`bytes`, `text`, `as`), or a buffer at a time (`read`). One arriving is read once, as it arrives; reading it whole
-  * keeps what it read, so that it may be read whole again.
+  * (`bytes`, `text`, `as`), or a buffer at a time (`reader`). One arriving is read once, as it arrives; reading it
+  * whole keeps what it read, so that it may be read whole again. A body in memory, or one a function writes, holds no
+  * read position of its own: each reader has its own, so that a constant served many times is read the same by each.
   */
 sealed trait Body {
 
@@ -29,12 +30,10 @@ sealed trait Body {
   /** All of it, decoded by `A`'s decoder. */
   def as[A](using decoder: BodyDecoder[A], async: Async): A = decoder.decode(bytes(), contentType)
 
-  /** Reads into `buf` once some bytes are there: how many, or -1 at the end. It takes the body's next bytes, once,
-    * whoever reads them: a body in memory, a response's copies and a constant served many times among its holders, is
-    * read this way by one of them, from one future; `bytes`, `text` and `as` read all of it, as often as asked, and are
-    * how a body shared is read.
+  /** A reader of it, a buffer at a time: for a body in memory, or one a function writes, a reader of its own, from its
+    * start, each time; for one arriving, its one reader, which takes its bytes as they come, once, whoever calls.
     */
-  def read(buf: ByteBuffer)(using Async): Int
+  def reader(): Body.Reader
 
   /** Whether it may be sent again, as a client resending a request after a redirect or a failure needs: bytes in memory
     * may; a stream, which is written once, may not.
@@ -96,19 +95,37 @@ object Body {
     else if name.equalsIgnoreCase("iso-8859-1") then StandardCharsets.ISO_8859_1
     else scala.util.Try(Charset.forName(name)).toOption.getOrElse(StandardCharsets.UTF_8)
 
-  /** Bytes in memory. */
-  private[http] final class Bytes(val content: Array[Byte], val contentType: Option[String]) extends Body {
+  /** A body read a buffer at a time, from one future. */
+  trait Reader {
+
+    /** Reads into `buf` once some bytes are there: how many, or -1 at the end. */
+    def read(buf: ByteBuffer)(using Async): Int
+  }
+
+  /** A reader of `content`, got as it is first read, from its start. */
+  private final class ArrayReader(content: Async ?=> Array[Byte]) extends Reader {
     private var cursor = 0
-    def length: Option[Long] = Some(content.length.toLong)
-    def bytes()(using Async): Array[Byte] = content
-    def read(buf: ByteBuffer)(using Async): Int =
-      if cursor >= content.length then -1
+    def read(buf: ByteBuffer)(using Async): Int = {
+      val all = content
+      if cursor >= all.length then -1
       else {
-        val n = math.min(buf.remaining(), content.length - cursor)
-        buf.put(content, cursor, n)
+        val n = math.min(buf.remaining(), all.length - cursor)
+        buf.put(all, cursor, n)
         cursor += n
         n
       }
+    }
+  }
+
+  private object Ended extends Reader {
+    def read(buf: ByteBuffer)(using Async): Int = -1
+  }
+
+  /** Bytes in memory. */
+  private[http] final class Bytes(val content: Array[Byte], val contentType: Option[String]) extends Body {
+    def length: Option[Long] = Some(content.length.toLong)
+    def bytes()(using Async): Array[Byte] = content
+    def reader(): Reader = new ArrayReader(content)
     def replayable: Boolean = true
     private[http] def writeTo(out: BodyWriter)(using Async): Unit = if content.nonEmpty then out.write(content)
     override def toString: String = s"Body(${content.length} bytes${contentType.fold("")(t => s", $t")})"
@@ -129,17 +146,7 @@ object Body {
       }
       written.nn
     }
-    private var cursor = 0
-    def read(buf: ByteBuffer)(using Async): Int = {
-      val all = bytes()
-      if cursor >= all.length then -1
-      else {
-        val n = math.min(buf.remaining(), all.length - cursor)
-        buf.put(all, cursor, n)
-        cursor += n
-        n
-      }
-    }
+    def reader(): Reader = new ArrayReader(bytes())
     def replayable: Boolean = false
     private[http] def writeTo(out: BodyWriter)(using Async): Unit =
       if written != null then out.write(written.nn) else write(out)
@@ -180,15 +187,20 @@ object Body {
       all.nn
     }
 
-    def read(buf: ByteBuffer)(using Async): Int =
-      if all == null then source.read(buf)
-      else if cursor >= all.nn.length then -1
-      else {
-        val n = math.min(buf.remaining(), all.nn.length - cursor)
-        buf.put(all.nn, cursor, n)
-        cursor += n
-        n
-      }
+    /** Its one reader: of the source as the bytes arrive, or, once it was read whole, of what that kept. */
+    private object arriving extends Reader {
+      def read(buf: ByteBuffer)(using Async): Int =
+        if all == null then source.read(buf)
+        else if cursor >= all.nn.length then -1
+        else {
+          val n = math.min(buf.remaining(), all.nn.length - cursor)
+          buf.put(all.nn, cursor, n)
+          cursor += n
+          n
+        }
+    }
+
+    def reader(): Reader = arriving
 
     def replayable: Boolean = false
 
@@ -217,7 +229,7 @@ object Body {
     def contentType: Option[String] = None
     def length: Option[Long] = Some(0L)
     def bytes()(using Async): Array[Byte] = Array.emptyByteArray
-    def read(buf: ByteBuffer)(using Async): Int = -1
+    def reader(): Body.Reader = Body.Ended
     def replayable: Boolean = false
     private[http] def writeTo(out: BodyWriter)(using Async): Unit = ()
   }

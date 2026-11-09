@@ -2,12 +2,11 @@
 
 `ioHttp` (`io-http/`, cross-built for the JVM and Scala Native) is the higher level programs use: byte streams over
 connections (`gears.io.net`), TLS (`gears.io.tls`), and an HTTP/1.1 server and client with WebSockets
-(`gears.io.http`). It is written against `gears.async.io` alone, and runs on each platform's default backend: NIO's
-`NioOnCaller` on the JVM (the reference backend's ops with a faster way of waiting; no JDK flags), and io_uring on Scala
-Native (Linux 6.0 or later, with liburing and OpenSSL). A program that wants another backend, such as the reference
-backend or kqueue, runs with its own `Io.run` and uses
+(`gears.io.http`). It is written against `gears.async.io` alone, and runs on each platform's default backend: the
+reference backend on the JVM (no JDK flags), and io_uring on Scala Native (Linux 6.0 or later, with liburing and
+OpenSSL). A program that wants another backend, such as kqueue, runs with its own `Io.run` and uses
 `Http.server` and `HttpClient`, which take an `Io` over any backend with the default backends' capabilities
-(`DefaultCapabilities`, which the reference backend, NIO and io_uring all have): a handler is given that `Io`, so the capabilities are
+(`DefaultCapabilities`, which the reference backend and io_uring both have): a handler is given that `Io`, so the capabilities are
 in its type. Making them a type parameter of `Routes` instead was weighed and left: Scala cannot infer it from what a
 handler's body uses, so every route would have to name it, for a gain no backend here needs.
 
@@ -116,7 +115,7 @@ a TLS stream sends its close notification when it closes.
 
 | | JVM | Scala Native |
 | --- | --- | --- |
-| Default backend | `NioOnCaller` (no flags) | `UringBackend` (Linux 6.0+) |
+| Default backend | `ReferenceBackend` (no flags) | `UringBackend` (Linux 6.0+) |
 | TLS | the JDK's `SSLEngine` | OpenSSL 1.1 or 3, through a BIO pair |
 | Private key format | PKCS #8 PEM (`BEGIN PRIVATE KEY`) | any OpenSSL reads |
 

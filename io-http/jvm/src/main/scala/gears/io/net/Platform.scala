@@ -1,8 +1,8 @@
 package gears.io.net
 
-/** The JVM's default backend: NIO's `NioOnCaller`, each op performed on its future's own virtual thread. */
+/** The JVM's default backend: the reference backend, each op performed on its future's own virtual thread. */
 object Platform {
-  val backend: gears.async.io.nio.NioOnCaller.type = gears.async.io.nio.NioOnCaller
+  val backend: gears.async.io.reference.ReferenceBackend.type = gears.async.io.reference.ReferenceBackend
 
   /** `n` random bytes, for a WebSocket client's masks. */
   def randomBytes(n: Int): Array[Byte] = {

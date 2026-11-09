@@ -209,9 +209,18 @@ private[uring] object Results {
   /** Whether a negative result only means "try again". */
   def transient(res: Int): Boolean = res == -errno.EINTR || res == -errno.EAGAIN
 
-  /** The failure of a submission whose result is `res`, a negated `errno`. */
-  def failure(what: String, res: Int): IOException =
-    new IOException(s"$what: ${fromCString(string.strerror(-res))}")
+  /** The failure of a system call or a submission whose result is `res`, a negated `errno`. */
+  def failure(what: String, res: Int): IOException = new SystemFailure(s"$what: ${fromCString(string.strerror(-res))}")
+
+  /** The failure of a system call that has just failed, by its `errno`. */
+  def failed(what: String): IOException = failure(what, -errno.errno)
+
+  /** A system call's failure. With no stack trace: most come from the peer or the system, such as a reset, a refused
+    * connection or a descriptor limit, and on Scala Native a trace costs about as much as serving a request.
+    */
+  final class SystemFailure(message: String) extends IOException(message) {
+    override def fillInStackTrace(): Throwable = this
+  }
 }
 
 private[uring] object Checks {
@@ -456,7 +465,7 @@ private[uring] final class OpenPipe(read: Slot[PipeSource], write: Slot[PipeSink
     Checks.notEmpty(read, write)
     val fds = stackalloc[CInt](2)
     if LinuxCalls.pipe2(fds, scala.scalanative.posix.fcntl.O_NONBLOCK | Linux.O_CLOEXEC) != 0 then
-      throw new IOException(s"Failed to open a pipe: ${fromCString(string.strerror(errno.errno))}")
+      throw Results.failed(s"Failed to open a pipe")
     SigPipe.ignored: Unit // a write once its reader has gone fails with EPIPE, not the signal
     read.set(new PipeSource(fds(0)))
     write.set(new PipeSink(fds(1)))
@@ -714,7 +723,7 @@ private[uring] object Accepts {
     if client < 0 then {
       val e = errno.errno
       if e != errno.EAGAIN && e != errno.EWOULDBLOCK && e != errno.EINTR then
-        throw new IOException(s"Failed to accept a connection: ${Sockets.cError()}")
+        throw Results.failed(s"Failed to accept a connection")
     }
     client
   }

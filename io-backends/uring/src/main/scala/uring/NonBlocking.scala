@@ -2,7 +2,6 @@
 package gears.async.io
 package uring
 
-import java.io.IOException
 import java.nio.ByteBuffer
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.sys.uio
@@ -14,8 +13,6 @@ import scala.scalanative.unsigned.*
   * once.
   */
 private[uring] object NonBlocking {
-
-  private def cError(): String = fromCString(scala.scalanative.libc.string.strerror(errno.errno))
 
   private def wouldBlock: Boolean =
     val err = errno.errno
@@ -32,7 +29,7 @@ private[uring] object NonBlocking {
   private def readAddressable(fd: Int, buf: ByteBuffer): Int = {
     val read = Unblocked.read(fd, NativeBuffer.atPosition(buf), buf.remaining().toCSize)
     if read < 0 then
-      if !wouldBlock then throw new IOException(s"Failed to read from descriptor $fd: ${cError()}")
+      if !wouldBlock then throw Results.failed(s"Failed to read from descriptor $fd")
       0
     else if read == 0 then EOF
     else
@@ -56,7 +53,7 @@ private[uring] object NonBlocking {
     val count = fill(vectors, bufs, room = true)
     val read = Unblocked.readv(fd, vectors, count)
     if read < 0 then
-      if !wouldBlock then throw new IOException(s"Failed to read from descriptor $fd: ${cError()}")
+      if !wouldBlock then throw Results.failed(s"Failed to read from descriptor $fd")
       0
     else if read == 0 then EOF
     else
@@ -75,7 +72,7 @@ private[uring] object NonBlocking {
     val count = fill(vectors, bufs, room = false)
     val written = Unblocked.writev(fd, vectors, count)
     if written < 0 then {
-      if !wouldBlock then throw new IOException(s"Failed to write to descriptor $fd: ${cError()}")
+      if !wouldBlock then throw Results.failed(s"Failed to write to descriptor $fd")
       -1
     } else {
       advance(bufs, written.toLong)
@@ -121,7 +118,7 @@ private[uring] object NonBlocking {
   private def writeAddressable(fd: Int, buf: ByteBuffer): Int = {
     val written = Unblocked.write(fd, NativeBuffer.atPosition(buf), buf.remaining().toCSize)
     if written < 0 then {
-      if !wouldBlock then throw new IOException(s"Failed to write to descriptor $fd: ${cError()}")
+      if !wouldBlock then throw Results.failed(s"Failed to write to descriptor $fd")
       -1
     } else {
       NativeBuffer.advance(buf, written.toInt)

@@ -3,7 +3,6 @@ package uring
 
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
-import scala.scalanative.libc.string
 import scala.scalanative.linux.eventfd
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.unistd
@@ -37,7 +36,7 @@ private[uring] final class Ring(entries: Int, completions: Int) {
   private val wakeFd: Int = eventfd.eventfd(0.toUInt, eventfd.EFD_CLOEXEC)
   if wakeFd < 0 then {
     io_uring_queue_exit(ring)
-    throw new IOException(s"Failed to create an eventfd: ${fromCString(string.strerror(errno.errno))}")
+    throw Results.failed(s"Failed to create an eventfd")
   }
   private val wakeBuffer = new Array[Byte](8)
   private val wakeWrite = {
@@ -67,8 +66,7 @@ private[uring] final class Ring(entries: Int, completions: Int) {
       synchronized {
         if !closed then {
           val n = unistd.write(wakeFd, wakeWrite.asInstanceOf[ByteArray].at(0), 8.toUSize)
-          if n < 0 && errno.errno != errno.EAGAIN then
-            throw new IOException(s"Failed to wake io_uring: ${fromCString(string.strerror(errno.errno))}")
+          if n < 0 && errno.errno != errno.EAGAIN then throw Results.failed(s"Failed to wake io_uring")
         }
       }
   }
@@ -200,8 +198,7 @@ private[uring] object Ring {
   inline val InternalId = 1L
 
   /** The failure of a call whose result is `res`, a negated `errno`. */
-  def failure(what: String, res: Int): IOException =
-    new IOException(s"$what: ${fromCString(string.strerror(-res))}")
+  def failure(what: String, res: Int): IOException = Results.failure(what, res)
 
   /** Why this kernel's io_uring will not do, or null: the backend needs the synchronous cancel of Linux 6.0, so that
     * taking an op back returns once the kernel has let go of it, and completions that wait rather than drop when the

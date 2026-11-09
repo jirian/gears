@@ -3,7 +3,6 @@ package uring
 
 import java.io.IOException
 import scala.scalanative.libc.string
-import scala.scalanative.posix.errno
 import scala.scalanative.posix.fcntl
 import scala.scalanative.posix.netdb
 import scala.scalanative.posix.netdbOps.*
@@ -43,7 +42,6 @@ private[uring] final class OpenFile(path: String, write: Boolean, into: Slot[Fil
 }
 
 private[uring] object Files {
-  private def cError(): String = fromCString(string.strerror(errno.errno))
 
   def checkPath(path: String): Unit =
     if path.indexOf('\u0000') >= 0 then throw new IllegalArgumentException(s"A path has no NUL: $path")
@@ -51,14 +49,14 @@ private[uring] object Files {
   def open(path: String, write: Boolean): FileHandle = Zone.acquire { implicit z =>
     val access = if write then fcntl.O_WRONLY else fcntl.O_RDONLY
     val fd = fcntl.open(toCString(path), access | fcntl.O_NONBLOCK | Linux.O_CLOEXEC)
-    if fd < 0 then throw new IOException(s"Failed to open $path: ${cError()}")
+    if fd < 0 then throw Results.failed(s"Failed to open $path")
     try {
       val info = stackalloc[stat.stat]()
-      if stat.fstat(fd, info) < 0 then throw new IOException(s"Failed to inspect $path: ${cError()}")
+      if stat.fstat(fd, info) < 0 then throw Results.failed(s"Failed to inspect $path")
       if stat.S_ISREG(info.st_mode) == 0 then throw new IOException(s"Not a regular file: $path")
       val flags = fcntl.fcntl(fd, fcntl.F_GETFL, 0)
       if flags < 0 || fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~fcntl.O_NONBLOCK) < 0 then
-        throw new IOException(s"Failed to make $path blocking: ${cError()}")
+        throw Results.failed(s"Failed to make $path blocking")
     } catch {
       case e: Throwable =>
         unistd.close(fd)

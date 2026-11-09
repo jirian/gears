@@ -311,25 +311,141 @@ private[http] object Wire {
     ByteBuffer.wrap(out)
   }
 
-  /** Writes a body to `stream`, behind its `head`, which goes out with the first write: chunked, or as is, at most
-    * `declared` bytes if that is not negative, or nothing at all if `suppress`, as for a `HEAD`. Each write within
-    * `timeout`.
+  /** A connection's bytes on their way out: a message's head, and with it a body or a chunk small enough to copy, all
+    * written with one write, of one buffer, the same each time while the bytes fit, so that a stream keeps the op it
+    * made for it. ISO-8859-1: what goes in has been checked to have nothing above U+00FF.
+    */
+  final class OutBuffer(initial: Int) {
+    private var bytes = new Array[Byte](initial)
+    private var view = ByteBuffer.wrap(bytes)
+    private var count = 0
+
+    def size: Int = count
+    def capacity: Int = bytes.length
+    def isEmpty: Boolean = count == 0
+
+    /** Drops what it holds, unwritten. */
+    def reset(): Unit = count = 0
+
+    private def room(n: Int): Unit =
+      if count + n > bytes.length then {
+        bytes = java.util.Arrays.copyOf(bytes, math.max(2 * bytes.length, count + n))
+        view = ByteBuffer.wrap(bytes)
+      }
+
+    def put(from: Array[Byte], offset: Int, length: Int): Unit = {
+      room(length)
+      System.arraycopy(from, offset, bytes, count, length)
+      count += length
+    }
+
+    def put(from: Array[Byte]): Unit = put(from, 0, from.length)
+
+    def putLatin1(text: String): Unit = {
+      room(text.length)
+      var i = 0
+      while i < text.length do {
+        bytes(count + i) = text.charAt(i).toByte
+        i += 1
+      }
+      count += text.length
+    }
+
+    def putCrlf(): Unit = {
+      room(2)
+      bytes(count) = '\r'
+      bytes(count + 1) = '\n'
+      count += 2
+    }
+
+    def putDecimal(n: Long): Unit = putLatin1(java.lang.Long.toString(n))
+
+    /** `n` in hex, as a chunk's size line has it. */
+    def putHex(n: Int): Unit = {
+      var digits = 1
+      while digits < 8 && (n >>> (4 * digits)) != 0 do digits += 1
+      room(digits)
+      var i = digits - 1
+      while i >= 0 do {
+        val d = (n >>> (4 * (digits - 1 - i))) & 0xf
+        bytes(count + i) = (if d < 10 then '0' + d else 'a' + d - 10).toByte
+        i -= 1
+      }
+      count += digits
+    }
+
+    /** A header field: `name` and `value`, which `Headers` has checked. */
+    def putField(name: String, value: String): Unit = {
+      putLatin1(name)
+      room(2)
+      bytes(count) = ':'
+      bytes(count + 1) = ' '
+      count += 2
+      putLatin1(value)
+      putCrlf()
+    }
+
+    /** A head: `firstLine`, checked here, then `headers` and the empty line. */
+    def putHead(firstLine: String, headers: Headers): Unit = {
+      var i = 0
+      while i < firstLine.length do {
+        val c = firstLine.charAt(i)
+        // Never truncated: U+010A would go out as LF. Headers are checked as they are built; this guards the first line.
+        if c > '\u00ff' || c == '\r' || c == '\n' || c == '\u0000' then
+          throw new IllegalArgumentException(
+            s"A character that may not go out in a message head: U+${c.toInt.toHexString}"
+          )
+        i += 1
+      }
+      putLatin1(firstLine)
+      putCrlf()
+      val it = headers.iterator
+      while it.hasNext do {
+        val (k, v) = it.next()
+        putField(k, v)
+      }
+      putCrlf()
+    }
+
+    /** Writes what it holds, and empties it. */
+    def writeTo(stream: Stream, timeout: Duration)(using Async): Unit = {
+      val v = view
+      v.limit(count)
+      v.position(0)
+      count = 0
+      stream.write(v, timeout)
+    }
+
+    /** What it holds, to go out with other buffers, or null if nothing; it is empty then. */
+    def take(): ByteBuffer | Null =
+      if count == 0 then null
+      else {
+        val b = ByteBuffer.wrap(bytes, 0, count)
+        count = 0
+        b
+      }
+  }
+
+  /** Writes a body to `stream`, behind the head in `out`, which goes out with the first write: chunked, or as is, at
+    * most `declared` bytes if that is not negative, or nothing at all if `suppress`, as for a `HEAD`. A write small
+    * enough is copied into `out` with its framing and goes out in one write of one buffer. Each write within `timeout`.
     */
   final class Out(
       stream: Stream,
-      private var head: ByteBuffer | Null,
+      out: OutBuffer,
       chunked: Boolean,
       declared: Long,
       suppress: Boolean,
       timeout: Duration
   ) extends BodyWriter {
     private var written = 0L
+    private var headOut = false
 
     /** How many body bytes have been written. */
     def bytesWritten: Long = written
 
-    /** Whether the head has gone out. */
-    def committed: Boolean = head == null
+    /** Whether the head has gone out, or begun to. */
+    def committed: Boolean = headOut
 
     // A vectored write's buffers are an array of their own each time: an op keeps the array it was built with.
     def write(bytes: Array[Byte], offset: Int, length: Int)(using Async): Unit =
@@ -338,33 +454,35 @@ private[http] object Wire {
         if declared >= 0 && written + length > declared then
           throw new IllegalStateException(s"A body longer than its Content-Length of $declared")
         written += length
-        val data = ByteBuffer.wrap(bytes, offset, length)
-        val h = head
-        head = null
+        headOut = true
         if chunked then {
-          val size = ByteBuffer.wrap((Integer.toHexString(length) + "\r\n").getBytes(StandardCharsets.ISO_8859_1))
-          val end = ByteBuffer.wrap(Crlf)
-          stream.write(if h == null then Array(size, data, end) else Array(h, size, data, end), timeout)
-        } else if h == null then stream.write(data, timeout)
-        else stream.write(Array(h, data), timeout)
+          out.putHex(length)
+          out.putCrlf()
+        }
+        if out.size + length + 2 <= out.capacity then {
+          out.put(bytes, offset, length)
+          if chunked then out.putCrlf()
+          out.writeTo(stream, timeout)
+        } else {
+          val data = ByteBuffer.wrap(bytes, offset, length)
+          val pending = out.take()
+          if chunked then stream.write(Array(pending.nn, data, ByteBuffer.wrap(Crlf)), timeout)
+          else if pending == null then stream.write(data, timeout)
+          else stream.write(Array(pending.nn, data), timeout)
+        }
       }
 
-    private def flushHead()(using Async): Unit = {
-      val h = head
-      if h != null then {
-        head = null
-        stream.write(h, timeout)
+    private def flushHead()(using Async): Unit =
+      if !out.isEmpty then {
+        headOut = true
+        out.writeTo(stream, timeout)
       }
-    }
 
     /** Ends the body: the last chunk if chunked, and the head if nothing was written. */
-    def finish()(using Async): Unit =
-      if chunked && !suppress then {
-        val h = head
-        head = null
-        val last = ByteBuffer.wrap(LastChunk)
-        if h == null then stream.write(last, timeout) else stream.write(Array(h, last), timeout)
-      } else flushHead()
+    def finish()(using Async): Unit = {
+      if chunked && !suppress then out.put(LastChunk)
+      flushHead()
+    }
   }
 
   /** Today's date as a `Date` header has it (RFC 9110, 5.6.7), formatted once a second. */

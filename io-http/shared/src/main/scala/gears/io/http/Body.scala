@@ -53,8 +53,10 @@ object Body {
   def apply(bytes: Array[Byte], contentType: String = "application/octet-stream"): Body =
     new Bytes(bytes, Some(contentType))
 
+  private[http] val PlainText = "text/plain; charset=utf-8"
+
   /** `text` in UTF-8, `text/plain` unless `contentType` says otherwise. */
-  def text(text: String, contentType: String = "text/plain; charset=utf-8"): Body =
+  def text(text: String, contentType: String = PlainText): Body =
     new Bytes(text.getBytes(charset(Some(contentType))), Some(contentType))
 
   /** `value`, encoded by its encoder, with the encoder's `Content-Type`. */
@@ -71,6 +73,7 @@ object Body {
   /** The charset `contentType` names, UTF-8 if it names none or one this platform does not know. */
   def charset(contentType: Option[String]): Charset =
     contentType match {
+      case Some(t) if t eq PlainText      => StandardCharsets.UTF_8 // the default, from `text`, without parsing it
       case Some(t) if t.indexOf(';') >= 0 =>
         Text
           .split(t, ';')

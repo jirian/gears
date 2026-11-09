@@ -74,7 +74,7 @@ object Tcp {
       if left <= 0 then throw new TimeoutException(s"Connecting to $address timed out")
       io.perform(op, FiniteDuration(left, java.util.concurrent.TimeUnit.NANOSECONDS))
     }
-    new SocketStream(io, into.clear())
+    new SocketStream(io)(into.clear())
   }
 
   /** `host`'s addresses on `port`: itself if it is numeric, else what resolving it gives, IPv4 first. */
@@ -113,7 +113,7 @@ object Tcp {
   def listen(address: IpSocketAddress)(using io: Io[IpStreams], async: Async): Listener = {
     val into = Slot[io.backend.Listener]()
     io.perform(io.backend.ops.listen(address, into))
-    new Listener(io, into.clear())
+    new Listener(io)(into.clear())
   }
 
   /** The port of a listener's or a stream's address. */
@@ -129,13 +129,13 @@ object Unix {
   def connect(path: String)(using io: Io[UnixStreams], async: Async): SocketStream = {
     val into = Slot[io.backend.Connection]()
     io.perform(io.backend.ops.connect(UnixAddress(path), into))
-    new SocketStream(io, into.clear())
+    new SocketStream(io)(into.clear())
   }
 
   def listen(path: String)(using io: Io[UnixStreams], async: Async): Listener = {
     val into = Slot[io.backend.Listener]()
     io.perform(io.backend.ops.listen(UnixAddress(path), into))
-    new Listener(io, into.clear())
+    new Listener(io)(into.clear())
   }
 }
 

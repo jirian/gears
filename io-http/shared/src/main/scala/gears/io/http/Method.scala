@@ -22,9 +22,23 @@ enum Method {
   }
 
   override def toString: String = name
+
+  // `Other("GET")` would not equal `Get`: a known method is only its own case.
+  if isInstanceOf[Other] then require(!Method.knownNames.contains(name), s"$name is a known method: use its case")
+}
+
+/** The HTTP versions spoken here: 1.1, and 1.0 for a server's older clients. */
+enum HttpVersion(val text: String) {
+  case Http10 extends HttpVersion("HTTP/1.0")
+  case Http11 extends HttpVersion("HTTP/1.1")
+
+  override def toString: String = text
 }
 
 object Method {
+
+  /** The names of the methods with cases of their own. */
+  private val knownNames = Set("GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE", "CONNECT")
 
   /** The method a request line's token names. */
   def parse(token: String): Method = token match {

@@ -285,7 +285,7 @@ private[http] object Server {
       idle = false
       if head == null then return false
       val h = head.nn
-      val http11 = h.version == "HTTP/1.1"
+      val http11 = h.version == HttpVersion.Http11
       val (url, framing) =
         try (requestUrl(h, stream.secure), checkedFraming(h))
         catch {
@@ -415,7 +415,7 @@ private[http] object Server {
       */
     private def checkedFraming(h: Wire.RequestHead): Wire.Framing = {
       val framing = Wire.framing(h.headers, Wire.Framing.NoBody)
-      if h.version != "HTTP/1.1" && framing == Wire.Framing.Chunked then
+      if h.version != HttpVersion.Http11 && framing == Wire.Framing.Chunked then
         throw new Wire.Malformed(Status.BadRequest, "Chunked encoding is HTTP/1.1's")
       framing match {
         case Wire.Framing.Length(n) if n > config.limits.body =>
@@ -435,7 +435,7 @@ private[http] object Server {
       def malformed(what: String) = new Wire.Malformed(Status.BadRequest, what)
       val hosts = h.headers.getAll("Host")
       if hosts.length > 1 then throw malformed("More than one Host header")
-      if hosts.isEmpty && h.version == "HTTP/1.1" then throw malformed("No Host header")
+      if hosts.isEmpty && h.version == HttpVersion.Http11 then throw malformed("No Host header")
       val host = hosts.headOption.filter(_.nonEmpty).getOrElse("localhost")
       if host.exists(c => c == '/' || c == '?' || c == '#' || c == '@' || c <= ' ') then
         throw malformed(s"A malformed Host header: $host")
@@ -451,7 +451,7 @@ private[http] object Server {
     /** Answers with `response` and ends the connection, lingering (`linger`). */
     private def respondAndClose(stream: Stream, response: Response)(using Async): Unit =
       try {
-        val h = Wire.RequestHead(Method.Get, "/", "HTTP/1.1", Headers.empty)
+        val h = Wire.RequestHead(Method.Get, "/", HttpVersion.Http11, Headers.empty)
         writeResponse(stream, response, h, reusable = false)
         linger(stream)
       } catch case _: IOException | _: TimeoutException => ()
@@ -499,7 +499,7 @@ private[http] object Server {
           response = response.copy(headers = response.headers.remove("Content-Length"))
           None
       })
-      val chunked = !noBody && length.isEmpty && h.version == "HTTP/1.1"
+      val chunked = !noBody && length.isEmpty && h.version == HttpVersion.Http11
       val untilClose = !noBody && length.isEmpty && !chunked
       val keep = reusable && !untilClose
       responseHead(response, h, keep, chunked)
@@ -533,7 +533,7 @@ private[http] object Server {
       val forbids = response.status.forbidsBody
       val length = response.body.length
       val ownLength = !upgrade && (forbids || chunked || length.isDefined)
-      val ownConnection = !upgrade && (!keepAlive || h.version == "HTTP/1.0")
+      val ownConnection = !upgrade && (!keepAlive || h.version == HttpVersion.Http10)
       out.putLatin1("HTTP/1.1 ")
       out.putDecimal(response.status.code)
       out.putLatin1(" ")
@@ -561,7 +561,7 @@ private[http] object Server {
             out.putCrlf()
           }
         if !keepAlive then out.putField("Connection", "close")
-        else if h.version == "HTTP/1.0" then out.putField("Connection", "keep-alive")
+        else if h.version == HttpVersion.Http10 then out.putField("Connection", "keep-alive")
       }
       out.putCrlf()
     }

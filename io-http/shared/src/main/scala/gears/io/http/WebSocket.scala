@@ -355,7 +355,7 @@ object WebSocket {
     val h = request.headers
     val keys = h.getAll("Sec-WebSocket-Key")
     val offered = h.tokens("Sec-WebSocket-Protocol")
-    val valid = request.method == Method.Get && request.version == "HTTP/1.1" &&
+    val valid = request.method == Method.Get && request.version == HttpVersion.Http11 &&
       h.hasToken("Connection", "upgrade") && h.hasToken("Upgrade", "websocket") && keys.size == 1 &&
       validKey(keys.head) && request.body.length.forall(_ == 0) && offered.forall(Headers.isToken)
     if !valid then throw HttpError(Status.BadRequest, "Not a WebSocket handshake")

@@ -16,7 +16,7 @@ final case class Request(
     headers: Headers = Headers.empty,
     body: Body = Body.empty,
     timeout: Option[FiniteDuration] = None,
-    version: String = "HTTP/1.1",
+    version: HttpVersion = HttpVersion.Http11,
     pathParams: Map[String, String] = Map.empty,
     attributes: Map[Attribute[?], Any] = Map.empty
 ) {
@@ -270,7 +270,7 @@ final case class Cookie(
     maxAge: Option[Long] = None,
     secure: Boolean = false,
     httpOnly: Boolean = false,
-    sameSite: Option[String] = None
+    sameSite: Option[Cookie.SameSite] = None
 ) {
   require(Headers.isToken(name), s"Not a cookie name: $name")
   require(value.forall(c => c > ' ' && c < 127 && c != '"' && c != ',' && c != ';' && c != '\\'), s"Not a cookie value")
@@ -279,10 +279,6 @@ final case class Cookie(
   require(
     domain.forall(d => d.nonEmpty && d.forall(c => c.isLetterOrDigit && c < 127 || c == '-' || c == '.')),
     s"Not a cookie domain: ${domain.get}"
-  )
-  require(
-    sameSite.forall(s => Set("strict", "lax", "none").contains(s.toLowerCase)),
-    s"Not a SameSite value: ${sameSite.get}"
   )
 
   /** The `Set-Cookie` value. */
@@ -293,12 +289,25 @@ final case class Cookie(
     maxAge.foreach(a => b.append("; Max-Age=").append(a))
     if secure then b.append("; Secure")
     if httpOnly then b.append("; HttpOnly")
-    sameSite.foreach(s => b.append("; SameSite=").append(s))
+    sameSite.foreach(s => b.append("; SameSite=").append(s.text))
     b.toString
   }
 }
 
 object Cookie {
+
+  /** When a browser sends the cookie with a request from another site (RFC 6265bis, 5.4.7). */
+  enum SameSite(val text: String) {
+    case Strict extends SameSite("Strict")
+    case Lax extends SameSite("Lax")
+    case None extends SameSite("None")
+  }
+
+  object SameSite {
+
+    /** The value an attribute names, ignoring case, if it names one. */
+    def parse(text: String): Option[SameSite] = values.find(_.text.equalsIgnoreCase(text))
+  }
 
   /** Printable ASCII, no `;`. */
   private def isAttributeValue(v: String): Boolean = v.forall(c => c >= ' ' && c < 127 && c != ';')
@@ -324,7 +333,7 @@ object Cookie {
                   case "max-age"  => c.copy(maxAge = v.flatMap(_.toLongOption))
                   case "secure"   => c.copy(secure = true)
                   case "httponly" => c.copy(httpOnly = true)
-                  case "samesite" => c.copy(sameSite = v)
+                  case "samesite" => c.copy(sameSite = v.flatMap(SameSite.parse))
                   case _          => c
                 })
                 .getOrElse(c)

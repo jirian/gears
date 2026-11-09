@@ -235,8 +235,13 @@ class UrlSuite extends FunSuite {
   test("a cookie's attributes cannot carry attributes of their own; a bad one parsed is ignored") {
     intercept[IllegalArgumentException](Cookie("a", "b", path = Some("/; Domain=evil.example")))
     intercept[IllegalArgumentException](Cookie("a", "b", domain = Some("evil.example; Secure")))
-    intercept[IllegalArgumentException](Cookie("a", "b", sameSite = Some("Lax; Domain=x")))
-    assertEquals(Cookie("a", "b", path = Some("/x"), sameSite = Some("Lax")).rendered, "a=b; Path=/x; SameSite=Lax")
+    assertEquals(
+      Cookie("a", "b", path = Some("/x"), sameSite = Some(Cookie.SameSite.Lax)).rendered,
+      "a=b; Path=/x; SameSite=Lax"
+    )
+    assertEquals(Cookie.parse("a=b; SameSite=strict").flatMap(_.sameSite), Some(Cookie.SameSite.Strict))
+    assertEquals(Cookie.parse("a=b; SameSite=Lax; Domain=x").flatMap(_.sameSite), Some(Cookie.SameSite.Lax))
+    assertEquals(Cookie.parse("a=b; SameSite=sometimes").flatMap(_.sameSite), scala.None, "an unknown value ignored")
     assertEquals(Cookie.parse("a=b; SameSite=Sideways; Path=/p"), Some(Cookie("a", "b", path = Some("/p"))))
   }
 

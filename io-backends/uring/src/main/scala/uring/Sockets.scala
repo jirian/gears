@@ -3,7 +3,6 @@ package uring
 
 import java.io.IOException
 import java.nio.charset.StandardCharsets
-import scala.scalanative.libc.string
 import scala.scalanative.posix.errno
 import scala.scalanative.posix.sys.socket
 import scala.scalanative.posix.sys.stat
@@ -44,8 +43,6 @@ private[uring] object Sockets {
   inline val SO_REUSEADDR = 2
   inline val Backlog = 4096
 
-  def cError(): String = fromCString(string.strerror(errno.errno))
-
   /** A socket address's room, for a call to fill or read: an array, which Scala Native never moves. */
   final class Storage {
     val bytes = new Array[Byte](StorageSize)
@@ -63,7 +60,7 @@ private[uring] object Sockets {
       case _: UnixAddress      => AF_UNIX
     }
     val fd = socket.socket(family, transport | Linux.SOCK_NONBLOCK | Linux.SOCK_CLOEXEC, 0)
-    if fd < 0 then throw new IOException(s"Failed to open a socket: ${cError()}")
+    if fd < 0 then throw Results.failed(s"Failed to open a socket")
     if family == AF_INET6 then
       try setInt(fd, IPPROTO_IPV6, IPV6_V6ONLY, 0, "IPV6_V6ONLY")
       catch {
@@ -176,19 +173,18 @@ private[uring] object Sockets {
     val s = new Storage
     s.length = StorageSize
     val res = if peer then socket.getpeername(fd, s.at, s.lengthAt) else socket.getsockname(fd, s.at, s.lengthAt)
-    if res != 0 then throw new IOException(s"Failed to read a socket's address: ${cError()}")
+    if res != 0 then throw Results.failed(s"Failed to read a socket's address")
     read(s)
   }
 
   def bind(fd: Int, address: IpSocketAddress | UnixAddress): Unit = {
     val s = new Storage
     write(address, s)
-    if socket.bind(fd, s.at, s.length.toUInt) != 0 then
-      throw new IOException(s"Failed to bind to $address: ${cError()}")
+    if socket.bind(fd, s.at, s.length.toUInt) != 0 then throw Results.failed(s"Failed to bind to $address")
   }
 
   def listen(fd: Int): Unit =
-    if socket.listen(fd, Backlog) != 0 then throw new IOException(s"Failed to listen: ${cError()}")
+    if socket.listen(fd, Backlog) != 0 then throw Results.failed(s"Failed to listen")
 
   /** Starts connecting `fd` to `address`: true if it connected at once, false if it is connecting. `EAGAIN` is a
     * failure: for a Unix socket it means the listener's backlog is full, and nothing was started.
@@ -198,7 +194,7 @@ private[uring] object Sockets {
     write(address, s)
     if socket.connect(fd, s.at, s.length.toUInt) == 0 then true
     else if errno.errno == errno.EINPROGRESS || errno.errno == errno.EINTR then false
-    else throw new IOException(s"Failed to connect to $address: ${cError()}")
+    else throw Results.failed(s"Failed to connect to $address")
   }
 
   /** Fails unless a connection under way on `fd` was made: its error (`SO_ERROR`) is none, and it has a peer, since a
@@ -206,16 +202,15 @@ private[uring] object Sockets {
     */
   def checkConnected(fd: Int, address: AnyRef): Unit = {
     val error = getInt(fd, socket.SOL_SOCKET, socket.SO_ERROR, "SO_ERROR")
-    if error != 0 then throw new IOException(s"Failed to connect to $address: ${fromCString(string.strerror(error))}")
+    if error != 0 then throw Results.failure(s"Failed to connect to $address", -error)
     val s = new Storage
     s.length = StorageSize
-    if socket.getpeername(fd, s.at, s.lengthAt) != 0 then
-      throw new IOException(s"Failed to connect to $address: ${cError()}")
+    if socket.getpeername(fd, s.at, s.lengthAt) != 0 then throw Results.failed(s"Failed to connect to $address")
   }
 
   def shutdownOutput(fd: Int): Unit =
     if socket.shutdown(fd, socket.SHUT_WR) != 0 && errno.errno != errno.ENOTCONN then
-      throw new IOException(s"Failed to shut down a connection's output: ${cError()}")
+      throw Results.failed(s"Failed to shut down a connection's output")
 
   /** Removes the socket file at `path`, as a restarted server's would be; fails, leaving it, on any other file. */
   def replaceSocketFile(path: String): Unit = Zone.acquire { implicit z =>
@@ -240,7 +235,7 @@ private[uring] object Sockets {
     val v = stackalloc[CInt]()
     !v = value
     if socket.setsockopt(fd, level, name, v.asInstanceOf[Ptr[Byte]], sizeof[CInt].toUInt) != 0 then
-      throw new IOException(s"Failed to set $what: ${cError()}")
+      throw Results.failed(s"Failed to set $what")
   }
 
   def getInt(fd: Int, level: Int, name: Int, what: String): Int = {
@@ -248,7 +243,7 @@ private[uring] object Sockets {
     val length = stackalloc[socket.socklen_t]()
     !length = sizeof[CInt].toUInt
     if socket.getsockopt(fd, level, name, v.asInstanceOf[Ptr[Byte]], length) != 0 then
-      throw new IOException(s"Failed to read $what: ${cError()}")
+      throw Results.failed(s"Failed to read $what")
     !v
   }
 

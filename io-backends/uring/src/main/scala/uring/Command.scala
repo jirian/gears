@@ -363,42 +363,62 @@ private[uring] final class MessageHeader(buffers: Int, named: Boolean) {
 
 // ---- Streams
 
+/** A command that moves bytes between `bufs` and its handle: an entry has their stand-ins (`staging`), committed by as
+  * many bytes as each completion moved, and let go of, untouched, if its result is never applied.
+  */
+private[uring] abstract class Transfer(bufs: Array[ByteBuffer], copyIn: Boolean) extends Command {
+  protected val staging = new Staging(bufs, copyIn = copyIn, copyOut = !copyIn)
+
+  /** What it failed to do, should it fail: "read from <handle>", say. */
+  protected def failing: String
+
+  /** Whether the result `res` only asks for the entry to be submitted again. */
+  protected def again(res: Int): Boolean = Results.transient(res)
+
+  /** After a completion moved `n` bytes: a positional one advances its offset. */
+  protected def moved(n: Int): Unit = ()
+
+  protected def finish(res: Int): Boolean =
+    if again(res) then false
+    else if res < 0 then {
+      staging.end()
+      throw Results.failure(s"Failed to $failing", res)
+    } else {
+      staging.commit(res)
+      moved(res)
+      true
+    }
+
+  override protected def discard(): Unit = staging.end()
+}
+
 /** Fills `buf` between position and limit. Done once at least one byte has been read, or at end of stream; refused if
   * `buf` has no room, since a read of nothing would look like the end of the stream.
   */
-private[uring] final class ReadIntoBuffer(val handle: UringHandle, buf: ByteBuffer) extends Command {
+private[uring] final class ReadIntoBuffer(val handle: UringHandle, buf: ByteBuffer)
+    extends Transfer(Array(buf), copyIn = false) {
   Checks.checkFillable(buf)
   override protected def direction = Command.Direction.Reading
   override def check(): Unit = if !buf.hasRemaining() then throw Checks.bufferFull(buf)
   override protected def readinessEvents: Int = Linux.POLLIN
-  private val staging = new Staging(Array(buf), copyIn = false, copyOut = true)
+  protected def failing: String = s"read from $handle" // a count of 0, at end of stream, leaves the buffer as it was
 
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
     val b = staging.begin()(0)
     io_uring_prep_read(sqe, fd, NativeBuffer.atPosition(b), b.remaining().toUInt, Results.currentPosition)
   }
 
-  protected def finish(res: Int): Boolean =
-    if Results.transient(res) then false
-    else if res < 0 then {
-      staging.end()
-      throw Results.failure(s"Failed to read from $handle", res)
-    } else {
-      staging.commit(res) // 0 at end of stream, which leaves the buffer as it was
-      true
-    }
-
   override def tryAtOnce(): Boolean = NonBlocking.read(fd, buf) != 0 // -1 at EOF, which leaves the buffer as it was
-  override protected def discard(): Unit = staging.end()
 }
 
 /** Fills `bufs` in order with one `readv`, as `ReadIntoBuffer` fills one (see `Ops.read`). */
-private[uring] final class ReadIntoBuffers(val handle: UringHandle, bufs: Array[ByteBuffer]) extends Command {
+private[uring] final class ReadIntoBuffers(val handle: UringHandle, bufs: Array[ByteBuffer])
+    extends Transfer(bufs, copyIn = false) {
   Checks.checkFillable(bufs)
   override protected def direction = Command.Direction.Reading
   override def check(): Unit = if !Checks.anyRemaining(bufs) then throw Checks.buffersFull(bufs)
   override protected def readinessEvents: Int = Linux.POLLIN
-  private val staging = new Staging(bufs, copyIn = false, copyOut = true)
+  protected def failing: String = s"read from $handle"
   private val header = new MessageHeader(math.min(bufs.length, NonBlocking.MaxBuffers), named = false)
 
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
@@ -406,55 +426,35 @@ private[uring] final class ReadIntoBuffers(val handle: UringHandle, bufs: Array[
     io_uring_prep_readv(sqe, fd, header.vectors.asInstanceOf[Ptr[iovec]], count.toUInt, Results.currentPosition)
   }
 
-  protected def finish(res: Int): Boolean =
-    if Results.transient(res) then false
-    else if res < 0 then {
-      staging.end()
-      throw Results.failure(s"Failed to read from $handle", res)
-    } else {
-      staging.commit(res)
-      true
-    }
-
   override def tryAtOnce(): Boolean = NonBlocking.readv(fd, bufs) != 0
-  override protected def discard(): Unit = staging.end()
 }
 
 /** Drains `buf` between position and limit. Done once at least one byte has been written, or, with nothing remaining,
   * at once, with no system call.
   */
-private[uring] final class WriteFromBuffer(val handle: UringHandle, buf: ByteBuffer) extends Command {
+private[uring] final class WriteFromBuffer(val handle: UringHandle, buf: ByteBuffer)
+    extends Transfer(Array(buf), copyIn = true) {
   override protected def direction = Command.Direction.Writing
   override protected def readinessEvents: Int = Linux.POLLOUT
   override def nothingToDo: Boolean = !buf.hasRemaining()
-  private val staging = new Staging(Array(buf), copyIn = true, copyOut = false)
+  protected def failing: String = s"write to $handle"
 
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
     val b = staging.begin()(0)
     io_uring_prep_write(sqe, fd, NativeBuffer.atPosition(b), b.remaining().toUInt, Results.currentPosition)
   }
 
-  protected def finish(res: Int): Boolean =
-    if Results.transient(res) then false
-    else if res < 0 then {
-      staging.end()
-      throw Results.failure(s"Failed to write to $handle", res)
-    } else {
-      staging.commit(res)
-      true
-    }
-
   override def tryAtOnce(): Boolean = NonBlocking.write(fd, buf) >= 0
-  override protected def discard(): Unit = staging.end()
 }
 
 /** Drains `bufs` in order with one `writev`, as `WriteFromBuffer` drains one (see `Ops.write`). */
-private[uring] final class WriteFromBuffers(val handle: UringHandle, bufs: Array[ByteBuffer]) extends Command {
+private[uring] final class WriteFromBuffers(val handle: UringHandle, bufs: Array[ByteBuffer])
+    extends Transfer(bufs, copyIn = true) {
   Checks.checkBuffers(bufs)
   override protected def direction = Command.Direction.Writing
   override protected def readinessEvents: Int = Linux.POLLOUT
   override def nothingToDo: Boolean = !Checks.anyRemaining(bufs)
-  private val staging = new Staging(bufs, copyIn = true, copyOut = false)
+  protected def failing: String = s"write to $handle"
   private val header = new MessageHeader(math.min(bufs.length, NonBlocking.MaxBuffers), named = false)
 
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
@@ -462,18 +462,7 @@ private[uring] final class WriteFromBuffers(val handle: UringHandle, bufs: Array
     io_uring_prep_writev(sqe, fd, header.vectors.asInstanceOf[Ptr[iovec]], count.toUInt, Results.currentPosition)
   }
 
-  protected def finish(res: Int): Boolean =
-    if Results.transient(res) then false
-    else if res < 0 then {
-      staging.end()
-      throw Results.failure(s"Failed to write to $handle", res)
-    } else {
-      staging.commit(res)
-      true
-    }
-
   override def tryAtOnce(): Boolean = NonBlocking.writev(fd, bufs) >= 0
-  override protected def discard(): Unit = staging.end()
 }
 
 // ---- Done at once, or on a close
@@ -1099,55 +1088,33 @@ private[uring] object BlockingTask {
   * advances by the bytes read, so that performing the op again goes on from there. A kernel worker runs it.
   */
 private[uring] final class PositionalRead(val handle: FileHandle, buf: ByteBuffer, private var offset: Long)
-    extends Command {
+    extends Transfer(Array(buf), copyIn = false) {
   Checks.checkFillable(buf)
   override def check(): Unit = if !buf.hasRemaining() then throw Checks.bufferFull(buf)
-  private val staging = new Staging(Array(buf), copyIn = false, copyOut = true)
+  protected def failing: String = s"read $handle at $offset"
+  override protected def again(res: Int): Boolean = res == -errno.EINTR
+  override protected def moved(n: Int): Unit = offset += n
 
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
     val b = staging.begin()(0)
     io_uring_prep_read(sqe, fd, NativeBuffer.atPosition(b), b.remaining().toUInt, offset.toULong)
   }
-
-  protected def finish(res: Int): Boolean =
-    if res == -errno.EINTR then false
-    else if res < 0 then {
-      staging.end()
-      throw Results.failure(s"Failed to read $handle at $offset", res)
-    } else {
-      staging.commit(res)
-      offset += res
-      true
-    }
-
-  override protected def discard(): Unit = staging.end()
 }
 
 /** A write at an offset (see `FileOps.write`): drains `buf` into the file at the op's offset, which each completion
   * advances by the bytes written; with nothing remaining, it completes at once, writing nothing.
   */
 private[uring] final class PositionalWrite(val handle: FileHandle, buf: ByteBuffer, private var offset: Long)
-    extends Command {
+    extends Transfer(Array(buf), copyIn = true) {
   override def nothingToDo: Boolean = !buf.hasRemaining()
-  private val staging = new Staging(Array(buf), copyIn = true, copyOut = false)
+  protected def failing: String = s"write $handle at $offset"
+  override protected def again(res: Int): Boolean = res == -errno.EINTR
+  override protected def moved(n: Int): Unit = offset += n
 
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
     val b = staging.begin()(0)
     io_uring_prep_write(sqe, fd, NativeBuffer.atPosition(b), b.remaining().toUInt, offset.toULong)
   }
-
-  protected def finish(res: Int): Boolean =
-    if res == -errno.EINTR then false
-    else if res < 0 then {
-      staging.end()
-      throw Results.failure(s"Failed to write $handle at $offset", res)
-    } else {
-      staging.commit(res)
-      offset += res
-      true
-    }
-
-  override protected def discard(): Unit = staging.end()
 }
 
 /** `fsync` (see `FileOps.sync`). */

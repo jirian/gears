@@ -20,14 +20,16 @@ import openssl.*
 private[tls] object TlsPlatform {
 
   /** An `SSL_CTX`, freed by nobody: contexts live as long as the process, one per configuration (`Tls`). */
-  private final class Context(val ctx: Ptr[SSL_CTX], val verify: Boolean)
+  final class Context(val ctx: Ptr[SSL_CTX], val verify: Boolean)
+  type ClientContext = Context
+  type ServerContext = Context
 
   /** TLS 1.2 at least, as `TlsStream` promises, whatever the system's OpenSSL configuration allows. */
   private def atLeastTls12(ctx: Ptr[SSL_CTX]): Unit =
     if SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, TLS1_2_VERSION.toSize, null) != 1 then
       fail(ctx, "Failed to require TLS 1.2 or later")
 
-  def clientContext(config: TlsClientConfig): AnyRef = {
+  def clientContext(config: TlsClientConfig): ClientContext = {
     val ctx = SSL_CTX_new(TLS_client_method())
     if ctx == null then throw new IOException(s"SSL_CTX_new failed: ${lastError()}")
     atLeastTls12(ctx)
@@ -43,7 +45,7 @@ private[tls] object TlsPlatform {
     new Context(ctx, config.verify)
   }
 
-  def serverContext(config: TlsServerConfig): AnyRef = {
+  def serverContext(config: TlsServerConfig): ServerContext = {
     val ctx = SSL_CTX_new(TLS_server_method())
     if ctx == null then throw new IOException(s"SSL_CTX_new failed: ${lastError()}")
     atLeastTls12(ctx)
@@ -63,11 +65,11 @@ private[tls] object TlsPlatform {
     throw new IOException(s"$what: $detail")
   }
 
-  def client(stream: Stream, host: String, context: AnyRef, timeout: Duration)(using Async): TlsStream =
-    open(stream, context.asInstanceOf[Context], host, timeout)
+  def client(stream: Stream, host: String, context: ClientContext, timeout: Duration)(using Async): TlsStream =
+    open(stream, context, host, timeout)
 
-  def server(stream: Stream, context: AnyRef, timeout: Duration)(using Async): TlsStream =
-    open(stream, context.asInstanceOf[Context], null, timeout)
+  def server(stream: Stream, context: ServerContext, timeout: Duration)(using Async): TlsStream =
+    open(stream, context, null, timeout)
 
   private def open(stream: Stream, context: Context, host: String | Null, timeout: Duration)(using Async): TlsStream = {
     val tls =

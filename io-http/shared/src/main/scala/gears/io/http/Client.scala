@@ -235,7 +235,8 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
     body.contentType.foreach(t => headers = headers.setIfAbsent("Content-Type", t))
     if !Headers.isToken(request.method.name) then
       throw new IllegalArgumentException(s"Not a method token: '${request.method.name}'")
-    val head = Wire.head(s"${request.method.name} ${url.target} HTTP/1.1", headers)
+    val head = new Wire.OutBuffer(4096)
+    head.putHead(s"${request.method.name} ${url.target} HTTP/1.1", headers)
     val out = new Wire.Out(stream, head, chunked, body.length.getOrElse(-1L), false, config.timeouts.write)
     if hasBody then body.writeTo(out)
     out.finish()

@@ -232,6 +232,9 @@ private[http] object Server {
     private val t = config.timeouts
     private given Io[gears.io.net.DefaultCapabilities] = io
 
+    /** Each response's head, and its body if small, on their way out. */
+    private val out = new Wire.OutBuffer(16 * 1024)
+
     // The watch for the client going away (`ServerConfig.cancelAbandoned`): one future per connection at most, started
     // by the first request that may need it, in the server's group rather than the connection's, so that it ends on its
     // own, never cancelled, when there is nothing left to watch. A request being answered is `answering`.
@@ -357,7 +360,8 @@ private[http] object Server {
         }
       response.body match {
         case upgrade: Body.Upgrade =>
-          stream.write(responseHead(response, h, keepAlive = true, chunked = false), t.write)
+          responseHead(response, h, keepAlive = true, chunked = false)
+          out.writeTo(stream, t.write)
           upgrade.run(stream, input)
           false
         case _ =>
@@ -518,7 +522,7 @@ private[http] object Server {
       val chunked = !noBody && length.isEmpty && h.version == "HTTP/1.1"
       val untilClose = !noBody && length.isEmpty && !chunked
       val keep = reusable && !untilClose
-      val out = responseHead(response, h, keep, chunked)
+      responseHead(response, h, keep, chunked)
       val writer = new Wire.Out(stream, out, chunked, length.getOrElse(-1L), noBody || head, t.write)
       try {
         if !noBody && !head then response.body.writeTo(writer)
@@ -539,25 +543,47 @@ private[http] object Server {
       }
     }
 
-    /** The head of `response`, its framing headers set, to go out with the body's first write. */
-    private def responseHead(
-        response: Response,
-        h: Wire.RequestHead,
-        keepAlive: Boolean,
-        chunked: Boolean
-    ): java.nio.ByteBuffer = {
-      var headers = response.headers.remove("Transfer-Encoding")
-      if !headers.contains("Date") then headers = headers.add("Date", Wire.date())
-      response.body match {
-        case _: Body.Upgrade => ()
-        case body            =>
-          if response.status.forbidsBody then headers = headers.remove("Content-Length")
-          else if chunked then headers = headers.remove("Content-Length").add("Transfer-Encoding", "chunked")
-          else body.length.foreach(n => headers = headers.set("Content-Length", n.toString))
-          if !keepAlive then headers = headers.set("Connection", "close")
-          else if h.version == "HTTP/1.0" then headers = headers.set("Connection", "keep-alive")
+    /** Puts the head of `response` into `out`, in place of anything there, its framing headers set, to go out with the
+      * body's first write. The handler's fields go out as they are but those the framing sets, each name compared once,
+      * with no copy of the headers.
+      */
+    private def responseHead(response: Response, h: Wire.RequestHead, keepAlive: Boolean, chunked: Boolean): Unit = {
+      out.reset()
+      val upgrade = response.body.isInstanceOf[Body.Upgrade]
+      val forbids = response.status.forbidsBody
+      val length = response.body.length
+      val ownLength = !upgrade && (forbids || chunked || length.isDefined)
+      val ownConnection = !upgrade && (!keepAlive || h.version == "HTTP/1.0")
+      out.putLatin1("HTTP/1.1 ")
+      out.putDecimal(response.status.code)
+      out.putLatin1(" ")
+      out.putLatin1(response.status.reason)
+      out.putCrlf()
+      var dated = false
+      val it = response.headers.iterator
+      while it.hasNext do {
+        val (name, value) = it.next()
+        val dropped = name.equalsIgnoreCase("Transfer-Encoding") ||
+          ownLength && name.equalsIgnoreCase("Content-Length") ||
+          ownConnection && name.equalsIgnoreCase("Connection")
+        if !dropped then {
+          if !dated && name.equalsIgnoreCase("Date") then dated = true
+          out.putField(name, value)
+        }
       }
-      Wire.head(s"HTTP/1.1 ${response.status.code} ${response.status.reason}", headers)
+      if !dated then out.putField("Date", Wire.date())
+      if !upgrade then {
+        if !forbids then
+          if chunked then out.putField("Transfer-Encoding", "chunked")
+          else if length.isDefined then {
+            out.putLatin1("Content-Length: ")
+            out.putDecimal(length.get)
+            out.putCrlf()
+          }
+        if !keepAlive then out.putField("Connection", "close")
+        else if h.version == "HTTP/1.0" then out.putField("Connection", "keep-alive")
+      }
+      out.putCrlf()
     }
   }
 }

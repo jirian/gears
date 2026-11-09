@@ -5,6 +5,7 @@ package uring
 import java.nio.ByteBuffer
 import scala.scalanative.memory.PointerBuffer
 import scala.scalanative.memory.PointerBufferOps.given
+import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
@@ -14,24 +15,23 @@ import scala.scalanative.unsigned.*
   */
 private[uring] object NativeBuffer {
 
+  /** Whether the kernel can be handed `buf` at its own address: it has native memory behind it, as `PointerBuffer.wrap`
+    * makes, or is over a heap array, as `ByteBuffer.allocate` and, on Scala Native, `allocateDirect` make, which the
+    * collector does not move and the buffer keeps alive. A read-only heap buffer hides its array, and is not.
+    */
+  def addressable(buf: ByteBuffer): Boolean = buf.hasPointer() || buf.hasArray()
+
   /** Runs `body` with a buffer the kernel can address standing for `buf`, and returns what it returns: `buf` itself if
-    * it has native memory behind it, as `allocate` and `PointerBuffer.wrap` make; one over its own array where it is on
-    * the heap, as `ByteBuffer.allocate` and, on Scala Native, `allocateDirect` make, which the collector does not move
-    * and `buf` keeps alive through the call; else, for a read-only one, a stand-in over memory of its own, holding
-    * `buf`'s remaining bytes if `copyIn`, so that an op takes any buffer, at a copy's cost for such a one. What `body`
-    * moves the stand-in's position over is then `buf`'s: copied back into it if `copyOut`, its position advanced as
-    * far. For a call that is done as it returns: the kernel keeps none of these.
+    * it is `addressable`; else, a read-only one, a stand-in over memory of its own, holding `buf`'s remaining bytes if
+    * `copyIn`, so that an op takes any buffer, at a copy's cost for such a one. What `body` moves the stand-in's
+    * position over is then `buf`'s: copied back into it if `copyOut`, its position advanced as far. For a call that is
+    * done as it returns: the kernel keeps none of these.
     */
   inline def staged[A](buf: ByteBuffer, inline copyIn: Boolean, inline copyOut: Boolean)(
       inline body: ByteBuffer => A
   ): A =
-    if buf.hasPointer() then body(buf)
-    else if buf.hasArray() && buf.hasRemaining() then {
-      val stand = Staging.inArray(buf)
-      val result = body(stand)
-      buf.position(buf.position() + stand.position())
-      result
-    } else {
+    if addressable(buf) then body(buf)
+    else {
       val zone = Zone.open()
       try {
         val stand = standIn(buf, stagingMemory(buf.remaining())(using zone), copyIn)
@@ -41,35 +41,38 @@ private[uring] object NativeBuffer {
       } finally zone.close()
     }
 
-  /** As the other `staged`, for buffers taken in order: each with native memory stands for itself, the others each by a
+  /** As the other `staged`, for buffers taken in order: each `addressable` one stands for itself, the others each by a
     * stand-in of its own.
     */
   inline def staged[A](bufs: Array[ByteBuffer], inline copyIn: Boolean, inline copyOut: Boolean)(
       inline body: Array[ByteBuffer] => A
   ): A =
-    if bufs.forall(_.hasPointer()) then body(bufs)
+    if allAddressable(bufs) then body(bufs)
     else {
       val stands = bufs.clone()
-      var zone: Zone | Null = null // the copies' memory, if any, all of it freed as the op is done
+      val zone = Zone.open() // the copies' memory, all of it freed as the op is done
       try {
-        for i <- bufs.indices if !bufs(i).hasPointer() do {
-          val b = bufs(i)
-          stands(i) =
-            if b.hasArray() && b.hasRemaining() then Staging.inArray(b)
-            else {
-              if zone == null then zone = Zone.open()
-              standIn(b, stagingMemory(b.remaining())(using zone.nn), copyIn)
-            }
+        var i = 0
+        while i < bufs.length do {
+          if !addressable(bufs(i)) then
+            stands(i) = standIn(bufs(i), stagingMemory(bufs(i).remaining())(using zone), copyIn)
+          i += 1
         }
         val result = body(stands)
-        for i <- bufs.indices if stands(i) ne bufs(i) do {
-          val b = bufs(i)
-          if b.hasArray() && b.hasRemaining() then b.position(b.position() + stands(i).position())
-          else settle(b, stands(i), copyOut)
+        i = 0
+        while i < bufs.length do {
+          if !(stands(i) eq bufs(i)) then settle(bufs(i), stands(i), copyOut)
+          i += 1
         }
         result
-      } finally if zone != null then zone.nn.close()
+      } finally zone.close()
     }
+
+  def allAddressable(bufs: Array[ByteBuffer]): Boolean = {
+    var i = 0
+    while i < bufs.length && addressable(bufs(i)) do i += 1
+    i == bufs.length
+  }
 
   /** Memory for a stand-in of `size` bytes, in `zone`. */
   def stagingMemory(size: Int)(using zone: Zone): Ptr[Byte] = alloc[Byte](math.max(size, 1))
@@ -98,8 +101,10 @@ private[uring] object NativeBuffer {
     } else buf.position(buf.position() + moved)
   }
 
-  /** The address of the buffer's current position. */
-  def atPosition(buf: ByteBuffer): Ptr[Byte] = buf.pointer() + buf.position()
+  /** The address of an `addressable` buffer's current position. */
+  def atPosition(buf: ByteBuffer): Ptr[Byte] =
+    if buf.hasPointer() then buf.pointer() + buf.position()
+    else buf.array().asInstanceOf[ByteArray].atUnsafe(buf.arrayOffset() + buf.position())
 
   /** Moves the position forward after the kernel filled or drained `n` bytes at it. */
   def advance(buf: ByteBuffer, n: Int): Unit = buf.position(buf.position() + n)

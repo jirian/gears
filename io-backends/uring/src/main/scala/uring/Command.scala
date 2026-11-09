@@ -272,7 +272,7 @@ private[uring] object Checks {
 // ---- Buffers given to the kernel, from the backend on async-io
 
 private[uring] final class Staging(bufs: Array[ByteBuffer], copyIn: Boolean, copyOut: Boolean) {
-  private val direct = bufs.forall(_.hasPointer())
+  private val direct = NativeBuffer.allAddressable(bufs)
   private val stands = if direct then bufs else new Array[ByteBuffer](bufs.length)
   private var zone: Zone | Null = null
 
@@ -284,8 +284,7 @@ private[uring] final class Staging(bufs: Array[ByteBuffer], copyIn: Boolean, cop
       while i < bufs.length do {
         val b = bufs(i)
         stands(i) =
-          if b.hasPointer() then b
-          else if b.hasArray() && b.hasRemaining() then Staging.inArray(b)
+          if NativeBuffer.addressable(b) then b
           else {
             if zone == null then zone = Zone.open()
             NativeBuffer.standIn(b, NativeBuffer.stagingMemory(b.remaining())(using zone.nn), copyIn)
@@ -303,8 +302,7 @@ private[uring] final class Staging(bufs: Array[ByteBuffer], copyIn: Boolean, cop
       var i = 0
       while i < bufs.length do {
         val b = bufs(i)
-        // One over the buffer's own array moved the bytes in place: only its position is still to move.
-        if !(stands(i) eq b) then NativeBuffer.settle(b, stands(i), copyOut && !b.hasArray())
+        if !(stands(i) eq b) then NativeBuffer.settle(b, stands(i), copyOut)
         i += 1
       }
       end()
@@ -318,16 +316,6 @@ private[uring] final class Staging(bufs: Array[ByteBuffer], copyIn: Boolean, cop
       zone = null
       z.close()
     }
-  }
-}
-
-private[uring] object Staging {
-
-  /** A buffer over `buf`'s remaining bytes, in its own array, positioned at 0. */
-  def inArray(buf: ByteBuffer): ByteBuffer = {
-    val at = buf.array().asInstanceOf[ByteArray].at(buf.arrayOffset() + buf.position())
-    val stand = scala.scalanative.memory.PointerBuffer.wrap(at, buf.remaining())
-    stand
   }
 }
 

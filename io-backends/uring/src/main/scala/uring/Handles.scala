@@ -53,6 +53,9 @@ sealed abstract class UringHandle(val fd: Int, kind: String) {
   private[uring] val reading = new AtomicBoolean()
   private[uring] val writing = new AtomicBoolean()
 
+  /** Its read parked off the ring, waiting for a pool's buffer, if one is: a close starts it again, to fail. */
+  @volatile private[uring] var parked: Command | Null = null
+
   def isClosing: Boolean = closing
 
   /** Whether a command on it is tried at once with a non-blocking system call first: not on a regular file, where a
@@ -84,6 +87,8 @@ sealed abstract class UringHandle(val fd: Int, kind: String) {
       closing = true
     }
     beginClosing()
+    val waiting = parked
+    if waiting != null && waiting.leaveParking() then waiting.owner.nn.startTurn(waiting)
     // A command counted after this read sees `closing` as it submits, and its entry becomes a no-op.
     rings.forEach { (ring, n) =>
       if n.get() > 0 then {

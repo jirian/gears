@@ -365,7 +365,7 @@ class HttpSuite extends FunSuite {
       assertEquals(Http.get(server.url.resolve("/")).text(), "ok")
       assertEquals(server.connections, 1, "the run's client kept its connection for the second request")
     }
-    Io.run(using gears.io.net.Platform.backend) {
+    Io.run(using gears.io.net.Defaults.backend) {
       Async.group {
         val server = Http.server(routes, quiet)
         assertEquals(Http.get(server.url.resolve("/")).text(), "ok")

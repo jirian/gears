@@ -1,6 +1,6 @@
 // The termination signals `Http.serve` stops gracefully on, SIGTERM and SIGINT, caught in C: a handler may call only
 // async-signal-safe functions, which code compiled by Scala Native, with its collector's safepoints, is not. The
-// handler writes the signal's number to a pipe, which a thread of the program reads (`Platform.onTermination`).
+// handler writes the signal's number to a pipe, which a thread of the program reads (`DefaultPlatform.onTermination`).
 
 #define _POSIX_C_SOURCE 200809L
 

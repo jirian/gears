@@ -13,7 +13,8 @@ import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 import scala.util.Success
 
-/** The shortest ways in, with the platform's default backend, NIO on the JVM and io_uring on Scala Native:
+/** The shortest ways in, with the platform's default backend, the reference backend on the JVM and io_uring on Scala
+  * Native:
   * {{{
   * import gears.io.http.*
   *
@@ -23,20 +24,23 @@ import scala.util.Success
   * @main def fetch(): Unit =
   *   Http.run { println(Http.get("https://example.com").ensureSuccess().text()) }
   * }}}
-  * A program that already runs with an `Io` uses `Http.server`, which serves in the caller's scope, and an
-  * `HttpClient`, or the module's functions, which share one client per run (see `client`).
+  * Each run of these gives its program, or its routes, an `HttpClient` as a context value, closed as the run returns,
+  * which the module's functions (`get`, `send`, ...) send with: where there is none, as in a run of `Io.run` or
+  * `Defaults.run`, each request has a client of its own, which keeps no connection. A program that already runs with an
+  * `Io` uses `Http.server`, which serves in the caller's scope, and makes an `HttpClient` to send many requests with.
   */
 object Http {
 
   /** Serves `routes` on `port`, every interface, until the process is asked to end (see the other `serve`). */
-  def serve(port: Int)(routes: Routes): Unit = serve(ServerConfig(port = port))(routes)
+  def serve(port: Int)(routes: HttpClient ?=> Routes): Unit = serve(ServerConfig(port = port))(routes)
 
   /** Serves `routes` as `config` says until the process is sent SIGTERM, as a container's runtime stops it, or SIGINT,
     * as Ctrl-C does: then it shuts the server down gracefully (`Server.shutdown`), the requests under way given up to
-    * `grace` to finish, and returns. A second signal ends the process at once.
+    * `grace` to finish, and returns. A second signal ends the process at once. The routes are made in the run, with its
+    * client, which their handlers send with.
     */
-  def serve(config: ServerConfig, grace: FiniteDuration = 10.seconds)(routes: Routes): Unit =
-    Defaults.run {
+  def serve(config: ServerConfig, grace: FiniteDuration = 10.seconds)(routes: HttpClient ?=> Routes): Unit =
+    run {
       Async.group {
         val running = server(routes, config)
         val asked = Future.Promise[Unit]()
@@ -64,8 +68,8 @@ object Http {
     * `body` reaches the server at `server.url`, with the module's functions or a client of its own. It starts a run of
     * its own (`run`), so it is not for use inside one.
     */
-  def testServer[A](routes: Routes, config: ServerConfig = ServerConfig())(
-      body: Server => (Io[DefaultCapabilities], Async.Spawn) ?=> A
+  def testServer[A](routes: HttpClient ?=> Routes, config: ServerConfig = ServerConfig())(
+      body: Server => (Io[DefaultCapabilities], Async.Spawn, HttpClient) ?=> A
   ): A =
     run {
       Async.group {
@@ -74,56 +78,39 @@ object Http {
       }
     }
 
-  /** Runs `program` with an `Io` over the platform's default backend, and returns what it returns: for a script, or a
-    * `main`. The client the module's functions share is closed as it returns.
+  /** Runs `program` with an `Io` over the platform's default backend, and an `HttpClient` for the module's functions,
+    * and returns what it returns: for a script, or a `main`. The client is closed as it returns.
     */
-  def run[T](program: Io[DefaultCapabilities] ?=> Async.Spawn ?=> T): T = Defaults.run(program)
-
-  private val clients = new java.util.IdentityHashMap[Io[?], HttpClient]()
-
-  /** The client the module's functions share on `io`, made the first time with the default configuration and closed as
-    * `io`'s run returns: for an `Io` of `run`, `serve`, `testServer` or `Defaults.run`. Another `Io`'s run cannot close
-    * it, so there the module's functions use a client for each request, which keeps no connection, and this throws
-    * `IllegalStateException`: a program with such an `Io` that sends many requests keeps an `HttpClient`.
-    */
-  def client(using io: Io[IpStreams & Resolving]): HttpClient =
-    shared(io).getOrElse(
-      throw new IllegalStateException(
-        "The module's client is shared in a run of Http's or Defaults'; make an HttpClient"
-      )
-    )
-
-  private def shared(io: Io[IpStreams & Resolving]): Option[HttpClient] =
-    clients.synchronized {
-      val c = clients.get(io)
-      if c != null then Some(c)
-      else {
-        if !Defaults.atEnd(io)(Option(clients.synchronized(clients.remove(io))).foreach(_.close())) then scala.None
-        else {
-          val made = new HttpClient()(using io)
-          clients.put(io, made)
-          Some(made)
-        }
-      }
+  def run[T](program: Io[DefaultCapabilities] ?=> Async.Spawn ?=> HttpClient ?=> T): T =
+    Defaults.run { io ?=> spawn ?=>
+      val client = new HttpClient()
+      try program(using io)(using spawn)(using client)
+      finally client.close()
     }
 
-  /** Runs `body` with the shared client, or with one of its own, closed after, where there is none. */
-  private def withClient[A](body: HttpClient => A)(using io: Io[IpStreams & Resolving], async: Async): A =
-    shared(io) match {
-      case Some(c) => body(c)
-      case _       => new HttpClient()(using io).use(body)
-    }
+  /** Runs `body` with the context's client, or with one of its own, closed after, where there is none. */
+  private def withClient[A](body: HttpClient => A)(using io: Io[IpStreams & Resolving], async: Async)(using
+      client: HttpClient | Null
+  ): A =
+    if client != null then body(client) else new HttpClient().use(body)
 
-  def send(request: Request)(using Io[IpStreams & Resolving], Async): Response = withClient(_.send(request))
-  def get(url: String | Url, headers: (String, String)*)(using Io[IpStreams & Resolving], Async): Response =
-    send(Request.get(url).withHeaders(headers*))
-  def post(url: String | Url, body: Body)(using Io[IpStreams & Resolving], Async): Response =
-    send(Request.post(url, body))
-  def put(url: String | Url, body: Body)(using Io[IpStreams & Resolving], Async): Response =
-    send(Request.put(url, body))
-  def delete(url: String | Url)(using Io[IpStreams & Resolving], Async): Response = send(Request.delete(url))
+  def send(request: Request)(using Io[IpStreams & Resolving], Async)(using client: HttpClient | Null = null): Response =
+    withClient(_.send(request))
+  def get(url: String | Url, headers: (String, String)*)(using Io[IpStreams & Resolving], Async)(using
+      client: HttpClient | Null = null
+  ): Response = send(Request.get(url).withHeaders(headers*))
+  def post(url: String | Url, body: Body)(using Io[IpStreams & Resolving], Async)(using
+      client: HttpClient | Null = null
+  ): Response = send(Request.post(url, body))
+  def put(url: String | Url, body: Body)(using Io[IpStreams & Resolving], Async)(using
+      client: HttpClient | Null = null
+  ): Response = send(Request.put(url, body))
+  def delete(url: String | Url)(using Io[IpStreams & Resolving], Async)(using
+      client: HttpClient | Null = null
+  ): Response = send(Request.delete(url))
 
   /** Sends `request` and runs `use` with its response as it arrives (see `HttpClient.stream`). */
-  def stream[A](request: Request)(use: Response => Async ?=> A)(using Io[IpStreams & Resolving], Async): A =
-    withClient(_.stream(request)(use))
+  def stream[A](request: Request)(use: Response => Async ?=> A)(using Io[IpStreams & Resolving], Async)(using
+      client: HttpClient | Null = null
+  ): A = withClient(_.stream(request)(use))
 }

@@ -23,9 +23,9 @@ class HttpSuite extends FunSuite {
 
   private val quiet = ServerConfig(host = "127.0.0.1", port = 0, log = _ => ())
 
-  /** Runs `body` with a server of `routes` on a port of its own, and the client the module shares. */
+  /** Runs `body` with a server of `routes` on a port of its own, and the run's client. */
   private def withServer[A](routes: Routes, config: ServerConfig = quiet)(
-      body: Server => (Io[DefaultCapabilities], Async.Spawn) ?=> A
+      body: Server => (Io[DefaultCapabilities], Async.Spawn, HttpClient) ?=> A
   ): A = Http.testServer(routes, config)(body)
 
   /** Sends `raw` on a new connection and returns all the server answers until it closes, or `wait` passes. */
@@ -358,19 +358,35 @@ class HttpSuite extends FunSuite {
     }
   }
 
-  test("the module's client lives as long as its run; under another Io each request has a client of its own") {
+  test("the module's functions send with the run's client; with none, each request has a client of its own") {
     val routes = Routes(GET("/") { _ => "ok" })
     withServer(routes) { server =>
       assertEquals(Http.get(server.url.resolve("/")).text(), "ok")
-      assert(Http.client eq Http.client, "one client for the run")
+      assertEquals(Http.get(server.url.resolve("/")).text(), "ok")
+      assertEquals(server.connections, 1, "the run's client kept its connection for the second request")
     }
     Io.run(using gears.io.net.Platform.backend) {
       Async.group {
         val server = Http.server(routes, quiet)
-        intercept[IllegalStateException](Http.client)
         assertEquals(Http.get(server.url.resolve("/")).text(), "ok")
         assertEquals(Http.get(server.url.resolve("/")).text(), "ok")
       }
+    }
+  }
+
+  test("a handler that sends with the module's functions under Http.serve's routes uses the run's client") {
+    val upstream = Routes(GET("/") { _ => "up" })
+    Http.testServer(upstream, quiet) { up =>
+      var seen: HttpClient | Null = null
+      val proxy = Routes(GET("/") { _ =>
+        seen = summon[HttpClient]
+        Http.get(up.url.resolve("/")).text()
+      })
+      Async.group {
+        val server = Http.server(proxy, quiet)
+        assertEquals(Http.get(server.url.resolve("/")).text(), "up")
+      }
+      assert(seen eq summon[HttpClient], "the handler's client is the run's")
     }
   }
 

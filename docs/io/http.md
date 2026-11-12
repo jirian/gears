@@ -2,13 +2,17 @@
 
 `ioHttp` (`io-http/`, cross-built for the JVM and Scala Native) is the higher level programs use: byte streams over
 connections (`gears.io.net`), TLS (`gears.io.tls`), and an HTTP/1.1 server and client with WebSockets
-(`gears.io.http`). It is written against `gears.async.io` alone, and runs on each platform's default backend: the
-reference backend on the JVM (no JDK flags), and io_uring on Scala Native (Linux 6.0 or later, with liburing and
-OpenSSL). A program that wants another backend, such as kqueue, runs with its own `Io.run` and uses
-`Http.server` and `HttpClient`, which take an `Io` over any backend with the default backends' capabilities
-(`DefaultCapabilities`, which the reference backend and io_uring both have): a handler is given that `Io`, so the capabilities are
-in its type. Making them a type parameter of `Routes` instead was weighed and left: Scala cannot infer it from what a
-handler's body uses, so every route would have to name it, for a gain no backend here needs.
+(`gears.io.http`). It is written against `gears.async.io` alone, and depends on no backend: `Http.server` and
+`HttpClient` take an `Io` over any backend with the default backends' capabilities (`DefaultCapabilities`), and a
+handler is given that `Io`, so the capabilities are in its type. On Scala Native it needs OpenSSL, for TLS. Making the
+capabilities a type parameter of `Routes` instead was weighed and left: Scala cannot infer it from what a handler's
+body uses, so every route would have to name it, for a gain no backend here needs.
+
+`ioHttpDefaults` (`io-http-defaults/`) adds the shortest ways in on each platform's default backend: `Http.run`,
+`Http.serve`, `Http.testServer`, the module's client functions (`Http.get`, ...) and `Defaults.run`, with the reference
+backend on the JVM (no JDK flags) and io_uring on Scala Native (Linux 6.0 or later, with liburing). A program that
+wants another backend, such as kqueue, depends on `ioHttp` alone and runs with its own `Io.run`. The higher level's
+tests live in `ioHttpDefaults`, which runs them on those backends.
 
 ## Getting started
 

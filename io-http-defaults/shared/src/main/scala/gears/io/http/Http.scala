@@ -6,8 +6,8 @@ import gears.async.io.Io
 import gears.async.io.IpStreams
 import gears.async.io.Resolving
 import gears.io.net.DefaultCapabilities
+import gears.io.net.DefaultPlatform
 import gears.io.net.Defaults
-import gears.io.net.Platform
 
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
@@ -44,7 +44,7 @@ object Http {
       Async.group {
         val running = server(routes, config)
         val asked = Future.Promise[Unit]()
-        val finished = Platform.onTermination(() => asked.complete(Success(())))
+        val finished = DefaultPlatform.onTermination(() => asked.complete(Success(())))
         try {
           Future {
             asked.asFuture.await
@@ -89,28 +89,46 @@ object Http {
     }
 
   /** Runs `body` with the context's client, or with one of its own, closed after, where there is none. */
-  private def withClient[A](body: HttpClient => A)(using io: Io[IpStreams & Resolving], async: Async)(using
+  private def withClient[A](body: HttpClient => A)(using
+      io: Io[IpStreams & Resolving],
+      async: Async
+  )(using
       client: HttpClient | Null
   ): A =
     if client != null then body(client) else new HttpClient().use(body)
 
   def send(request: Request)(using Io[IpStreams & Resolving], Async)(using client: HttpClient | Null = null): Response =
     withClient(_.send(request))
-  def get(url: String | Url, headers: (String, String)*)(using Io[IpStreams & Resolving], Async)(using
+  def get(url: String | Url, headers: (String, String)*)(using
+      Io[IpStreams & Resolving],
+      Async
+  )(using
       client: HttpClient | Null = null
   ): Response = send(Request.get(url).withHeaders(headers*))
-  def post(url: String | Url, body: Body)(using Io[IpStreams & Resolving], Async)(using
+  def post(url: String | Url, body: Body)(using
+      Io[IpStreams & Resolving],
+      Async
+  )(using
       client: HttpClient | Null = null
   ): Response = send(Request.post(url, body))
-  def put(url: String | Url, body: Body)(using Io[IpStreams & Resolving], Async)(using
+  def put(url: String | Url, body: Body)(using
+      Io[IpStreams & Resolving],
+      Async
+  )(using
       client: HttpClient | Null = null
   ): Response = send(Request.put(url, body))
-  def delete(url: String | Url)(using Io[IpStreams & Resolving], Async)(using
+  def delete(url: String | Url)(using
+      Io[IpStreams & Resolving],
+      Async
+  )(using
       client: HttpClient | Null = null
   ): Response = send(Request.delete(url))
 
   /** Sends `request` and runs `use` with its response as it arrives (see `HttpClient.stream`). */
-  def stream[A](request: Request)(use: Response => Async ?=> A)(using Io[IpStreams & Resolving], Async)(using
+  def stream[A](request: Request)(use: Response => Async ?=> A)(using
+      Io[IpStreams & Resolving],
+      Async
+  )(using
       client: HttpClient | Null = null
   ): A = withClient(_.stream(request)(use))
 }

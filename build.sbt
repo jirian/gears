@@ -160,8 +160,8 @@ lazy val ioUring =
     .dependsOn(ioRuntime % "compile->compile;test->test", ioTestkit.native % Test)
 
 // The higher level for programs: byte streams over connections, TLS, and an HTTP/1.1 server and client with WebSockets
-// (`gears.io.net`, `gears.io.tls`, `gears.io.http`), written against `gears.async.io` and run on each platform's
-// default backend: the reference backend on the JVM, io_uring on Scala Native, which also needs OpenSSL for TLS.
+// (`gears.io.net`, `gears.io.tls`, `gears.io.http`), written against `gears.async.io` alone, so that a program brings
+// the backend it runs on. On Scala Native it needs OpenSSL, for TLS.
 lazy val ioHttp =
   crossProject(JVMPlatform, NativePlatform)
     .crossType(CrossType.Full)
@@ -173,11 +173,30 @@ lazy val ioHttp =
       libraryDependencies += munit % Test,
       testFrameworks += MUnitFramework
     )
+    .jvmSettings(scalacOptions += "-release:21")
+    .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
+    .dependsOn(root)
+
+// The higher level's shortest ways in, on each platform's default backend: `Http.run`, `serve` and `testServer`, the
+// module's client functions, and `Defaults.run`, with the reference backend on the JVM and io_uring on Scala Native.
+// Its tests are the higher level's, which run on these backends.
+lazy val ioHttpDefaults =
+  crossProject(JVMPlatform, NativePlatform)
+    .crossType(CrossType.Full)
+    .in(file("io-http-defaults"))
+    .settings(
+      name := "gears-io-http-defaults",
+      publish / skip := false,
+      versionScheme := Some("early-semver"),
+      libraryDependencies += munit % Test,
+      testFrameworks += MUnitFramework
+    )
     .jvmSettings(
       scalacOptions += "-release:21",
       Test / fork := true
     )
     .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
+    .dependsOn(ioHttp)
     .jvmConfigure(_.dependsOn(ioReference))
     .nativeConfigure(_.dependsOn(ioUring))
 
@@ -206,5 +225,5 @@ lazy val ioHttpBench =
     )
     .jvmSettings(scalacOptions += "-release:21", run / fork := true)
     .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
-    .jvmConfigure(_.dependsOn(ioHttp.jvm))
-    .nativeConfigure(_.dependsOn(ioHttp.native))
+    .jvmConfigure(_.dependsOn(ioHttpDefaults.jvm))
+    .nativeConfigure(_.dependsOn(ioHttpDefaults.native))

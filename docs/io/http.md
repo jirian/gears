@@ -22,6 +22,11 @@ import gears.io.http.*
   Http.run { println(Http.get("https://example.com").ensureSuccess().text()) }
 ```
 
+`Http.run`, `Http.serve` and `Http.testServer` give their program, or their routes, an `HttpClient` as a context value,
+closed as the run returns, and the module's functions (`Http.get`, `Http.send`, ...) send with it, so a run's requests,
+and those of a server's handlers, share its kept connections. With none in context, as under a plain `Io.run`, each
+request has a client of its own: a program there that sends many keeps an `HttpClient`.
+
 A fuller server:
 
 ```scala

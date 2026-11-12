@@ -1,18 +1,19 @@
 # gears-io-http: streams, TLS, HTTP and WebSockets
 
-`ioHttp` (`io-http/`, cross-built for the JVM and Scala Native) is the higher level programs use: byte streams over
-connections (`gears.io.net`), TLS (`gears.io.tls`), and an HTTP/1.1 server and client with WebSockets
-(`gears.io.http`). It is written against `gears.async.io` alone, and depends on no backend: `Http.server` and
-`HttpClient` take an `Io` over any backend with the default backends' capabilities (`DefaultCapabilities`), and a
-handler is given that `Io`, so the capabilities are in its type. On Scala Native it needs OpenSSL, for TLS. Making the
-capabilities a type parameter of `Routes` instead was weighed and left: Scala cannot infer it from what a handler's
-body uses, so every route would have to name it, for a gain no backend here needs.
+`ioHttp` (`io-http/`, cross-built for the JVM and Scala Native, published as `gears-io-http`) is the higher level
+programs use: byte streams over connections (`gears.io.net`), TLS (`gears.io.tls`), and an HTTP/1.1 server and client
+with WebSockets (`gears.io.http`), on each platform's default backend: the reference backend on the JVM (no JDK flags),
+and io_uring on Scala Native (Linux 6.0 or later, with liburing and OpenSSL). Its `Http` is the front door: `Http.run`,
+`Http.serve` and `Http.testServer` start a run on the default backend, and `Http.server` and the client functions
+(`Http.get`, ...) work in it.
 
-`ioHttpDefaults` (`io-http-defaults/`) adds the shortest ways in on each platform's default backend: `Http.run`,
-`Http.serve`, `Http.testServer`, the module's client functions (`Http.get`, ...) and `Defaults.run`, with the reference
-backend on the JVM (no JDK flags) and io_uring on Scala Native (Linux 6.0 or later, with liburing). A program that
-wants another backend, such as kqueue, depends on `ioHttp` alone and runs with its own `Io.run`. The higher level's
-tests live in `ioHttpDefaults`, which runs them on those backends.
+All of it but the front door is `ioHttpCore` (`io-http-core/`, `gears-io-http-core`), written against `gears.async.io`
+alone, with no backend: a program that wants another backend, such as kqueue, or a library, depends on it and runs with
+its own `Io.run`, serving with `Server.start(routes, config)` and sending with an `HttpClient`. Both take an `Io` over
+any backend with the default backends' capabilities (`DefaultCapabilities`), and a handler is given that `Io`, so the
+capabilities are in its type. Making them a type parameter of `Routes` instead was weighed and left: Scala cannot infer
+it from what a handler's body uses, so every route would have to name it, for a gain no backend here needs. The higher
+level's tests live in `ioHttp`, which runs them on the default backends.
 
 ## Getting started
 

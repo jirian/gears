@@ -28,6 +28,7 @@ import scala.util.Success
   * which the module's functions (`get`, `send`, ...) send with: where there is none, as in a run of `Io.run` or
   * `Defaults.run`, each request has a client of its own, which keeps no connection. A program that already runs with an
   * `Io` uses `Http.server`, which serves in the caller's scope, and makes an `HttpClient` to send many requests with.
+  * One on another backend, with gears-io-http-core alone, has what these stand on: `Server.start` and `HttpClient`.
   */
 object Http {
 

@@ -122,8 +122,9 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         if command.hasDeadline then addTimer(command)
         return false
       }
+      var parked = false
       val finished =
-        try command.doneAtOnce()
+        try command.doneAtOnce() || { parked = !command.readyToSubmit(); false }
         catch {
           case failure: Throwable =>
             endUse(command)
@@ -132,6 +133,10 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       if finished then {
         endUse(command)
         true
+      } else if parked then {
+        // Started again by what it parked on (`startTurn`).
+        if command.hasDeadline then addTimer(command)
+        false
       } else {
         command.onRing(own.ring)
         try submit(command)
@@ -242,7 +247,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
                 Failure(gears.async.cancellation())
               } else
                 try {
-                  submit(command)
+                  if command.readyToSubmit() then submit(command) // else it parked, to be started again
                   null
                 } catch {
                   case failure: Throwable =>
@@ -282,11 +287,12 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       }
     }
 
-    /** Starts `command`, whose turn it is now, or which a close ended the wait of, on this worker: from any thread,
-      * through the inbox. One withdrawn meanwhile, or whose handle is closing, is fired as such.
+    /** Starts `command`, whose turn it is now, which was parked, or which a close ended the wait of, on this worker:
+      * from any thread, through the inbox. One withdrawn meanwhile, or whose handle is closing, is fired as such.
       */
     private[uring] def startTurn(command: Command): Unit = {
       val run: Runnable = () => {
+        command.resume()
         val handle = command.handle
         if command.wantOut || handle.isClosing then
           settle(command, Failure(if handle.isClosing then handle.closedFailure else gears.async.cancellation()))
@@ -296,7 +302,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
             if finished then {
               command.done = true
               settle(command, WorkpoolScheduler.SuccessUnit)
-            } else {
+            } else if command.readyToSubmit() then {
               command.onRing(own.ring)
               submit(command)
             }
@@ -316,6 +322,13 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         command.release()
         command.handle.leave()
         true
+      case Command.Stage.Parked =>
+        if command.leaveParking() then {
+          command.resume()
+          command.discardSubmission() // a file's buffer, taken before it parked
+          endUse(command)
+          true
+        } else false // started again already: that start fires it
       case Command.Stage.Prepared =>
         own.ring.nop(command.sqe)
         withdrawn(command)

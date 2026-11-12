@@ -327,4 +327,89 @@ class UringSuite extends munit.FunSuite {
       pipes.foreach((r, w) => { close(r); close(w) })
     }
   }
+
+  test("pooled reads wait while the pool is empty, take nothing meanwhile, and all go on as buffers come back") {
+    onPool(2) { io ?=>
+      val pool = UringBackend.pool(16, 1)
+      val (r0, w0) = pipe()
+      rawWrite(w0, "a")
+      val first = Slot[Received]()
+      io.perform(ops.read(r0, pool, first))
+      val held = first.clear()
+      val pipes = List.fill(3)(pipe())
+      val slots = pipes.map(_ => Slot[Received]())
+      val reads = pipes.zip(slots).map { case ((r, w), into) =>
+        rawWrite(w, "b")
+        performing(ops.read(r, pool, into))
+      }
+      AsyncOperations.sleep(50)
+      for (f, performed) <- reads do assert(performed.get() == null, s"it should wait, not ${performed.get()}")
+      for (r, w) <- pipes do {
+        assertEquals(rawRead(r), "b", "a read that waits takes nothing")
+        rawWrite(w, "b")
+      }
+      held.release()
+      // Each as the one before gives its buffer back: a release starts every read waiting, and one takes it.
+      var served = 0
+      val until = System.nanoTime() + 5_000_000_000L
+      while served < reads.length && System.nanoTime() < until do {
+        slots.find(s => !s.isEmpty) match {
+          case Some(into) =>
+            val got = into.clear()
+            assertEquals(got.buffer.remaining(), 1)
+            got.release()
+            served += 1
+          case None => AsyncOperations.sleep(1)
+        }
+      }
+      assertEquals(served, reads.length)
+      for (f, performed) <- reads do {
+        f.awaitResult: Unit
+        assert(performed.get().nn.isSuccess, performed.get())
+      }
+      assertEquals(pool.available, 1)
+      (r0, w0) :: pipes foreach ((r, w) => { close(r); close(w) })
+      pool.close()
+    }
+  }
+
+  test("a pooled read waiting for a buffer is ended by a cancel, a time limit, or its handle's close") {
+    onPool(2) { io ?=>
+      val pool = UringBackend.pool(16, 1)
+      val (r0, w0) = pipe()
+      rawWrite(w0, "a")
+      val first = Slot[Received]()
+      io.perform(ops.read(r0, pool, first))
+      val held = first.clear()
+      val (r, w) = pipe()
+      rawWrite(w, "b")
+
+      val (cancelled, performed) = performing(ops.read(r, pool, Slot[Received]()))
+      AsyncOperations.sleep(20)
+      cancelled.cancel()
+      cancelled.awaitResult: Unit
+      assert(performed.get().nn.failed.toOption.exists(_.isInstanceOf[CancellationException]), performed.get())
+
+      Try(io.perform(ops.read(r, pool, Slot[Received]()), 20.millis)) match {
+        case Failure(_: java.util.concurrent.TimeoutException) => ()
+        case other                                             => fail(s"expected a time-out, not $other")
+      }
+
+      val (closed, closedPerformed) = performing(ops.read(r, pool, Slot[Received]()))
+      AsyncOperations.sleep(20)
+      close(r)
+      closed.awaitResult: Unit
+      assert(
+        closedPerformed.get().nn.failed.toOption.exists(_.isInstanceOf[ClosedChannelException]),
+        closedPerformed.get()
+      )
+
+      held.release()
+      assertEquals(pool.available, 1, "none of them holds a buffer")
+      close(w)
+      close(r0)
+      close(w0)
+      pool.close()
+    }
+  }
 }

@@ -19,6 +19,10 @@ import scala.scalanative.unsigned.*
   * `Received` may be released from any thread: a stack of buffer indexes whose head is a compare-and-set word, the
   * index tagged with a count of changes so that a buffer released and taken again meanwhile cannot be mistaken for the
   * one seen.
+  *
+  * A read that finds no buffer free parks here (`park`), and every release starts the reads parked again, on their
+  * workers: all of them, since the one a buffer would go to may find nothing to read, and wait for its descriptor
+  * holding none, while another has bytes waiting.
   */
 private[uring] final class NativePool(val bufferSize: Int, val buffers: Int) extends BufferPool {
   require(bufferSize > 0 && buffers > 0, "A pool needs buffers of some size")
@@ -51,6 +55,47 @@ private[uring] final class NativePool(val bufferSize: Int, val buffers: Int) ext
 
   def available: Int = free.get()
 
+  // Reads parked, and how many: a release looks at the count, and takes the lock only if there are some. A park counts
+  // itself before it looks at `free`, and a release adds to `free` before it looks at the count, so one of them sees
+  // the other.
+  private val parked = new java.util.ArrayDeque[Command]()
+  private val parkedCount = new AtomicInteger()
+
+  /** Parks `read` until a buffer is released: false if one is free now, and it is not parked. Its worker's thread. */
+  private[uring] def park(read: Command): Boolean = synchronized {
+    parkedCount.incrementAndGet()
+    if free.get() > 0 then {
+      parkedCount.decrementAndGet()
+      false
+    } else {
+      parked.addLast(read)
+      true
+    }
+  }
+
+  /** Takes `read` out, if it is parked here: false if a release has started it again already. Any thread. */
+  private[uring] def leave(read: Command): Boolean = synchronized {
+    parked.remove(read) && {
+      parkedCount.decrementAndGet()
+      true
+    }
+  }
+
+  /** Starts every read parked here again, on its worker. */
+  private def unpark(): Unit =
+    if parkedCount.get() > 0 then {
+      val reads = synchronized {
+        val all = parked.toArray(new Array[Command](0))
+        parked.clear()
+        parkedCount.addAndGet(-all.length)
+        all
+      }
+      // A worker that has stopped has no read to start: the runtime is ending.
+      for read <- reads do
+        try read.owner.nn.startTurn(read)
+        catch case _: IllegalStateException => ()
+    }
+
   /** Takes a free buffer, cleared, or null if none is. */
   def take(): PoolBuffer | Null = {
     if closed then throw new IllegalStateException("The pool is closed")
@@ -82,6 +127,7 @@ private[uring] final class NativePool(val bufferSize: Int, val buffers: Int) ext
       throw new IllegalStateException(s"Buffer ${buffer.index} of the pool was released already")
     push(buffer)
     free.incrementAndGet()
+    unpark()
   }
 
   private def push(buffer: PoolBuffer): Unit = {

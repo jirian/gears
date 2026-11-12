@@ -139,6 +139,25 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   /** Its entry is out of the ring: completed, withdrawn, or turned into a no-op. */
   private[uring] final def outOfRing(): Unit = stage = Command.Stage.Idle
 
+  /** Whether it may go to the ring now, asked on its worker before each submission: false if it has parked instead
+    * (`park`), off the ring, until something of the backend's own starts it again on its worker
+    * (`UringWorker.startTurn`).
+    */
+  private[uring] def readyToSubmit(): Boolean = true
+
+  /** Takes it out of where it parked, from any thread: false if something has started it again already. */
+  private[uring] def leaveParking(): Boolean = false
+
+  /** It waits off the ring, where `leaveParking` takes it out. Worker thread. */
+  protected final def park(): Unit = stage = Command.Stage.Parked
+
+  /** It has been started again, out of parking, if it was parked. Worker thread. */
+  private[uring] final def resume(): Unit =
+    if stage == Command.Stage.Parked then {
+      stage = Command.Stage.Idle
+      if handle.parked eq this then handle.parked = null
+    }
+
   /** Done with no entry: nothing to do, or done at once by a non-blocking call, if its handle allows that. */
   private[uring] final def doneAtOnce(): Boolean = nothingToDo || (handle.triesAtOnce && tryAtOnce())
 
@@ -207,8 +226,10 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
 private[uring] object Command {
   enum Direction { case Neither, Reading, Writing }
 
-  /** A performance's stage on its worker: not in the ring; an entry prepared and not yet submitted; submitted. */
-  enum Stage { case Idle, Prepared, Submitted }
+  /** A performance's stage on its worker: not in the ring; an entry prepared and not yet submitted; submitted; parked
+    * off the ring, waiting for the backend to start it again.
+    */
+  enum Stage { case Idle, Prepared, Submitted, Parked }
 
   def alreadyPending(op: AnyRef): IllegalArgumentException =
     new IllegalArgumentException(s"An op reading, or writing, as $op does, is already pending on its handle")
@@ -492,6 +513,10 @@ private[uring] final class CloseHandle(handle: UringHandle) extends SingleUseAbs
   * waits for the descriptor to be readable, and the buffer is taken then, and the bytes read without waiting, so that
   * reads waiting on idle streams hold at most half the pool between them and never exhaust it. A buffer taken is given
   * back if the read fails, finds nothing after all, or is withdrawn.
+  *
+  * While the pool has no buffer free, the read waits for one, parked on the pool, which starts it again as a buffer is
+  * released (`NativePool.park`): it takes nothing from the descriptor meanwhile, so the source is held back, as
+  * `BufferPool` allows.
   */
 private[uring] final class PooledRead(val handle: UringHandle, pool: NativePool, into: Slot[Received]) extends Command {
   override protected def direction = Command.Direction.Reading
@@ -499,19 +524,44 @@ private[uring] final class PooledRead(val handle: UringHandle, pool: NativePool,
   private var held: pool.PoolBuffer | Null = null
   private var pollNext = false // a read straight into a buffer found nothing: wait for readiness first
 
-  private def take(): pool.PoolBuffer = {
-    val slot = pool.take()
-    if slot == null then throw new IOException("The pool has no buffer free")
-    slot.nn
-  }
-
   // A regular file is always readable, and a read of it blocks on the disk: it is read only by a kernel worker, into
-  // a buffer taken now, never polled and then read on this thread.
+  // a buffer taken before it is submitted (`readyToSubmit`), never polled and then read on this thread.
   private val file = handle.isInstanceOf[FileHandle]
 
+  /** Parks it on the pool, which has no buffer free: false if one is free after all, or the handle is closing, and it
+    * is not parked.
+    */
+  private def parkOnPool(): Boolean = {
+    handle.parked = this
+    if pool.park(this) && !(handle.isClosing && leaveParking()) then {
+      park()
+      true
+    } else {
+      handle.parked = null
+      false
+    }
+  }
+
+  override private[uring] def leaveParking(): Boolean =
+    pool.leave(this) && {
+      handle.parked = null
+      true
+    }
+
+  // A socket's read needs no buffer to wait for readiness, only to read; a file's needs one to be submitted. A closing
+  // handle's goes to the ring, which fails it as closed.
+  override private[uring] def readyToSubmit(): Boolean =
+    if file then {
+      var ready = true
+      while held == null && ready && !handle.isClosing do {
+        held = pool.take()
+        if held == null && parkOnPool() then ready = false
+      }
+      ready
+    } else pool.available > 0 || handle.isClosing || !parkOnPool()
+
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = {
-    if held == null && (file || !pollNext && pool.available * 2 > pool.buffers) then
-      held = if file then take() else pool.take()
+    if held == null && !file && !pollNext && pool.available * 2 > pool.buffers then held = pool.take()
     val slot = held
     if slot == null then io_uring_prep_poll_add(sqe, fd, Linux.POLLIN.toUInt)
     else io_uring_prep_read(sqe, fd, slot.address, slot.buffer.capacity().toUInt, Results.currentPosition)
@@ -545,7 +595,8 @@ private[uring] final class PooledRead(val handle: UringHandle, pool: NativePool,
   }
 
   override def tryAtOnce(): Boolean = {
-    val slot = take()
+    val slot = pool.take()
+    if slot == null then return false // the worker parks it (`readyToSubmit`)
     val read =
       try NonBlocking.read(fd, slot.buffer) // -1 at EOF, which leaves the buffer as it was
       catch {

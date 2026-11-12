@@ -228,11 +228,21 @@ final class Routes private (routes: Seq[Route], middleware: List[Middleware]) {
       Io[DefaultCapabilities]
   ): Response =
     if middleware.isEmpty then routeSegments(request, segments, from)
-    else middleware.foldRight[Handler](req => routeSegments(req, segments, from))((m, next) => m(next))(request)
+    else mounted(request.withAttr(Routes.rest, new Routes.Rest(segments, from)))
+
+  /** A mount's middleware around its routes, composed once: the path left to match travels with the request. */
+  private lazy val mounted: Handler = middleware.foldRight[Handler] { req =>
+    val rest = req.attr(Routes.rest).get
+    routeSegments(req, rest.segments, rest.from)
+  }((m, next) => m(next))
 }
 
 object Routes {
   def apply(routes: Route*): Routes = new Routes(routes, Nil)
+
+  /** What a mount has left of a request's path: its segments, from `from` on. */
+  private final class Rest(val segments: Array[String], val from: Int)
+  private val rest = new Attribute[Rest]("mount")
 
   /** A route tree's node: its literal children, its `{name}` child, its `{name...}` routes, the routes that end here,
     * and routes mounted here.

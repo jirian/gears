@@ -14,16 +14,52 @@ import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-/** The threads blocking work runs on, off the workers: started as needed, kept a minute once idle, daemons. */
+/** The threads blocking work runs on, off the workers, in two pools with a cap each: one for name lookups, one for the
+  * rest (opens, and `BlockingOps.blocking`), so that lookups a slow resolver holds up cannot starve an open. A pool
+  * starts threads as work comes, up to its cap, then queues it, first come, first served; a task cancelled or out of
+  * time while it waits is skipped when its turn comes, without taking a thread. Threads are daemons, ended once idle
+  * for a minute. A lookup nothing can interrupt, given up on, keeps its thread until it returns: the cap bounds how
+  * many a resolver that does not answer can hold.
+  */
 private[uring] object BlockingPool {
-  private val counter = new java.util.concurrent.atomic.AtomicInteger()
-  private val executor = java.util.concurrent.Executors.newCachedThreadPool { body =>
-    val thread = new Thread(body, s"gears-io-uring-blocking-${counter.incrementAndGet()}")
-    thread.setDaemon(true)
-    thread
-  }
 
-  def run(task: Runnable): Unit = executor.execute(task)
+  /** Threads for name lookups at most, each lookup a `getaddrinfo` call. */
+  inline val Lookups = 16
+
+  /** Threads for the rest at most: a body of `BlockingOps.blocking` that waits for another past this many waits for
+    * ever.
+    */
+  inline val Others = 64
+
+  val lookups: Pool = new Pool("lookup", Lookups)
+  val others: Pool = new Pool("blocking", Others)
+
+  /** Up to `cap` threads, then a queue. */
+  final class Pool(name: String, cap: Int) {
+    private val counter = new java.util.concurrent.atomic.AtomicInteger()
+    private val executor = {
+      val e = new java.util.concurrent.ThreadPoolExecutor(
+        cap,
+        cap,
+        60L,
+        java.util.concurrent.TimeUnit.SECONDS,
+        new java.util.concurrent.LinkedBlockingQueue[Runnable](),
+        { body =>
+          val thread = new Thread(body, s"gears-io-uring-$name-${counter.incrementAndGet()}")
+          thread.setDaemon(true)
+          thread
+        }
+      )
+      e.allowCoreThreadTimeOut(true)
+      e
+    }
+
+    def run(task: Runnable): Unit = executor.execute(task)
+
+    /** Its threads now, and the most it has had at once. */
+    def threads: Int = executor.getPoolSize()
+    def mostThreads: Int = executor.getLargestPoolSize()
+  }
 }
 
 /** Opens a regular file and writes its handle into `into` (see `FileOps.open`), on the blocking pool: it opens without
@@ -66,9 +102,15 @@ private[uring] object Files {
   }
 }
 
-/** Resolves a host name with `getaddrinfo`, on the blocking pool, which nothing interrupts. */
+/** Resolves a host name with `getaddrinfo`, on the lookups' pool, which nothing interrupts. */
 private[uring] final class Resolve(host: String, into: Slot[List[IpAddress]])
-    extends BlockingTask[List[IpAddress]](() => Resolve.lookup(host), into.set, List(into), interruptible = false) {
+    extends BlockingTask[List[IpAddress]](
+      () => Resolve.lookup(host),
+      into.set,
+      List(into),
+      interruptible = false,
+      pool = BlockingPool.lookups
+    ) {
   override def toString: String = s"resolve of $host"
 }
 

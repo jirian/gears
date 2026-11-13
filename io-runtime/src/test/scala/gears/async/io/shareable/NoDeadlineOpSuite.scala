@@ -26,7 +26,12 @@ private[shareable] object WaitingBackend extends Backend {
   type Handle = AnyRef
   type Readable = AnyRef
   type Writable = AnyRef
-  def ops: Kinded[Ops[Op, Handle]] = ???
+  def ops: Ops {
+    type Op = WaitingOp
+    type Handle = AnyRef
+    type Readable = AnyRef
+    type Writable = AnyRef
+  } = ???
   def pool(bufferSize: Int, buffers: Int): BufferPool = ???
   private[io] def run[T](program: Io[this.type] ?=> Async.Spawn ?=> T): T = ???
 }

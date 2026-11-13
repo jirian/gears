@@ -66,14 +66,16 @@ object UringBackend
 
 /** The io_uring backend's ops. */
 object UringOps
-    extends IpStreamOps[UringOp, UringHandle]
-    with IpDatagramOps[UringOp, UringHandle]
-    with UnixStreamOps[UringOp, UringHandle]
-    with FileOps[UringOp, UringHandle]
-    with PipeOps[UringOp, UringHandle]
-    with ResolveOps[UringOp, UringHandle]
-    with BlockingOps[UringOp, UringHandle] {
+    extends IpStreamOps
+    with IpDatagramOps
+    with UnixStreamOps
+    with FileOps
+    with PipeOps
+    with ResolveOps
+    with BlockingOps {
   import scala.annotation.targetName
+  type Op = UringOp
+  type Handle = UringHandle
   type Readable = UringReadable
   type Writable = UringWritable
   type Connection = ConnectionHandle

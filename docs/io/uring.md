@@ -135,13 +135,16 @@ So reads waiting on idle streams hold at most half the pool between them (`Uring
 
 ## Blocking work
 
-Blocking ops, name resolution (`getaddrinfo`) and opening a file run on a pool of threads (`BlockingPool`). A cancel or
+Blocking ops, name resolution (`getaddrinfo`) and opening a file run on threads off the workers (`BlockingPool`), in
+two pools with a cap each: up to 16 threads for lookups, and up to 64 for opens and blocking ops, so that lookups a
+resolver that does not answer holds up cannot starve an open. Past its cap a pool queues work, first come, first served.
+A body of `ops.blocking` that waits for another one past the 64th waits for ever. A cancel or
 a time limit skips one not yet started and interrupts a blocking op running, and `perform` returns only once it has
 returned. A resolve or an open, which nothing interrupts and which touches nothing of the caller's but its slot, is
 abandoned instead, so that the cancel or the limit holds at once, as `ResolveOps` promises: its value, once it comes, is
 not written, and a file it opened is closed. An op's outcome is written before it counts as delivered (`committed`), so
-that a time limit landing as the body returns never delivers an empty slot. Its outcome is handed back to the op's worker through the inbox and
-fired there: the runtime takes a firing that finds no listener to mean that the performer was cancelled, and the
+that a time limit landing as the body returns never delivers an empty slot. Its outcome is handed back to the op's worker through
+the inbox and fired there: the runtime takes a firing that finds no listener to mean that the performer was cancelled, and the
 worker's inbox runs only once the performer has suspended.
 
 ## Choices not taken

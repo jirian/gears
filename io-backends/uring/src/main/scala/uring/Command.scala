@@ -982,7 +982,7 @@ private object Datagrams {
 
 // ---- Run on the blocking pool (see Blocking.scala)
 
-/** An op run on the blocking pool (see `BlockingOps.blocking`): `body` runs on a pool thread, its value written by
+/** An op run on a blocking pool (see `BlockingOps.blocking`): `body` runs on a thread of `pool`, its value written by
   * `deliver`, and the op fired from that thread once it has returned. A cancel or a time limit before it starts skips
   * it; one while it runs interrupts it, if `interruptible`, and the op settles once it has returned, so that `perform`
   * returns only then; one after its value was written is too late, the op completing with it (`committed`). A body that
@@ -995,7 +995,8 @@ private[uring] class BlockingTask[A](
     deliver: A => Unit,
     slots: List[Slot[?]],
     interruptible: Boolean,
-    discard: A => Unit = (_: A) => ()
+    discard: A => Unit = (_: A) => (),
+    pool: BlockingPool.Pool = BlockingPool.others
 ) extends SingleUseAbstractTimerHeapOp
     with UringOp {
   import BlockingTask.*
@@ -1010,8 +1011,8 @@ private[uring] class BlockingTask[A](
   /** Checks made as it is performed: its slots empty. */
   def check(): Unit = Checks.notEmpty(slots*)
 
-  /** Hands the body to the pool. */
-  def start(): Unit = BlockingPool.run(() => runIt())
+  /** Hands the body to its pool. */
+  def start(): Unit = pool.run(() => runIt())
 
   private def runIt(): Unit = {
     val begun = synchronized {

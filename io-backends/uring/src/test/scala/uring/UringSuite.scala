@@ -145,6 +145,64 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
+  test("a blocking pool runs at most its cap at once, queues the rest, and skips one given up on while queued") {
+    onPool(2) { io ?=>
+      val pool = new BlockingPool.Pool("capped", 2)
+      val release = new java.util.concurrent.CountDownLatch(1)
+      val running = new java.util.concurrent.atomic.AtomicInteger()
+      val most = new java.util.concurrent.atomic.AtomicInteger()
+      def held(into: Slot[String]) = new BlockingTask[String](
+        () => {
+          most.accumulateAndGet(running.incrementAndGet(), math.max)
+          release.await()
+          running.decrementAndGet()
+          "done"
+        },
+        into.set,
+        List(into),
+        interruptible = false,
+        pool = pool
+      )
+      val slots = List.fill(2)(Slot[String]())
+      val holders = slots.map(into => performing(held(into)))
+      val until = System.nanoTime() + 5_000_000_000L
+      while running.get() < 2 && System.nanoTime() < until do AsyncOperations.sleep(5)
+      assertEquals(running.get(), 2, "both run, each on a thread of its own")
+
+      val ranQueued = new java.util.concurrent.atomic.AtomicBoolean()
+      val queued = new BlockingTask[String](
+        () => { ranQueued.set(true); "queued" },
+        Slot[String]().set,
+        Nil,
+        interruptible = false,
+        pool = pool
+      )
+      intercept[java.util.concurrent.TimeoutException](io.perform(queued, 100.millis))
+
+      release.countDown()
+      for (f, performed) <- holders do {
+        f.awaitResult: Unit
+        assert(performed.get().nn.isSuccess, performed.get())
+      }
+      val after = Slot[String]()
+      io.perform(held(after))
+      assertEquals(after.clear(), "done", "the queue drained, and the pool takes work again")
+      assert(!ranQueued.get(), "the task given up on while queued never ran")
+      assertEquals(most.get(), 2)
+      assert(pool.mostThreads <= 2, s"${pool.mostThreads} threads")
+    }
+  }
+
+  test("a burst of lookups is served by at most the lookups' cap of threads") {
+    onPool(2) { io ?=>
+      val lookups = List.fill(BlockingPool.Lookups * 3)(Slot[List[IpAddress]]())
+      val all = lookups.map(into => Future(io.perform(ops.resolve("localhost", into))))
+      all.foreach(_.await)
+      for into <- lookups do assert(into.clear().nonEmpty)
+      assert(BlockingPool.lookups.mostThreads <= BlockingPool.Lookups, s"${BlockingPool.lookups.mostThreads} threads")
+    }
+  }
+
   test("a blocking op that throws an Error fails with it, and does not hang") {
     returnsWithin(20.seconds) {
       onPool(2) { io ?=>

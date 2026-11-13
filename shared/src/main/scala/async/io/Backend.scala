@@ -40,14 +40,13 @@ trait Backend {
   type Readable <: Handle
   type Writable <: Handle
 
-  /** `O`, a kind of ops, building ops on this backend's streams; each capability refines it with the kinds it adds. */
-  type Kinded[O <: Ops[Op, Handle]] = O {
+  /** Builds this backend's ops. */
+  def ops: Ops {
+    type Op = Backend.this.Op
+    type Handle = Backend.this.Handle
     type Readable = Backend.this.Readable
     type Writable = Backend.this.Writable
   }
-
-  /** Builds this backend's ops. */
-  def ops: Kinded[Ops[Op, Handle]]
 
   /** Opens a pool of `buffers` buffers of up to `bufferSize` bytes each, for the reads into buffers of the backend's
     * (`Ops.read` with a pool). Close it once nothing of it is held.
@@ -82,19 +81,27 @@ trait StreamSockets extends Backend {
   /** A listening stream socket, from a listen, which accepts connections. */
   type Listener <: Handle
 
-  /** `O`, a kind of stream socket ops, building ops on this backend's kinds of handle. */
-  type StreamKinded[O <: StreamSocketOps[Op, Handle]] = Kinded[O] {
+  def ops: StreamSocketOps {
+    type Op = StreamSockets.this.Op
+    type Handle = StreamSockets.this.Handle
+    type Readable = StreamSockets.this.Readable
+    type Writable = StreamSockets.this.Writable
     type Connection = StreamSockets.this.Connection
     type Listener = StreamSockets.this.Listener
   }
-
-  def ops: StreamKinded[StreamSocketOps[Op, Handle]]
 }
 
 /** IP stream sockets, TCP (see `IpStreamOps`): an operating system's, or a host's, such as Node's; a browser has none.
   */
 trait IpStreams extends StreamSockets {
-  def ops: StreamKinded[IpStreamOps[Op, Handle]]
+  def ops: IpStreamOps {
+    type Op = IpStreams.this.Op
+    type Handle = IpStreams.this.Handle
+    type Readable = IpStreams.this.Readable
+    type Writable = IpStreams.this.Writable
+    type Connection = IpStreams.this.Connection
+    type Listener = IpStreams.this.Listener
+  }
 }
 
 /** IP datagram sockets, UDP (see `IpDatagramOps`), apart from IP stream sockets: some hosts have one and not the other.
@@ -107,7 +114,11 @@ trait IpDatagrams extends Backend {
   /** An IP datagram socket connected to one peer, which it alone sends to and receives from. */
   type ConnectedDatagram <: Handle
 
-  def ops: Kinded[IpDatagramOps[Op, Handle]] {
+  def ops: IpDatagramOps {
+    type Op = IpDatagrams.this.Op
+    type Handle = IpDatagrams.this.Handle
+    type Readable = IpDatagrams.this.Readable
+    type Writable = IpDatagrams.this.Writable
     type BoundDatagram = IpDatagrams.this.BoundDatagram
     type ConnectedDatagram = IpDatagrams.this.ConnectedDatagram
   }
@@ -124,19 +135,33 @@ trait RegularFiles extends Backend {
   /** A regular file: read and written as a stream and at offsets, and synced. */
   type File <: Readable & Writable
 
-  def ops: Kinded[FileOps[Op, Handle]] {
+  def ops: FileOps {
+    type Op = RegularFiles.this.Op
+    type Handle = RegularFiles.this.Handle
+    type Readable = RegularFiles.this.Readable
+    type Writable = RegularFiles.this.Writable
     type File = RegularFiles.this.File
   }
 }
 
 /** Host names resolved (see `ResolveOps`). */
 trait Resolving extends Backend {
-  def ops: Kinded[ResolveOps[Op, Handle]]
+  def ops: ResolveOps {
+    type Op = Resolving.this.Op
+    type Handle = Resolving.this.Handle
+    type Readable = Resolving.this.Readable
+    type Writable = Resolving.this.Writable
+  }
 }
 
 /** Pipes (see `PipeOps`). */
 trait Pipes extends Backend {
-  def ops: Kinded[PipeOps[Op, Handle]]
+  def ops: PipeOps {
+    type Op = Pipes.this.Op
+    type Handle = Pipes.this.Handle
+    type Readable = Pipes.this.Readable
+    type Writable = Pipes.this.Writable
+  }
 }
 
 /** Blocking code run as an op (see `BlockingOps`): where it may block, with the op's time limit and cancellation
@@ -144,14 +169,26 @@ trait Pipes extends Backend {
   * the calling thread where it may, the op then adding only the limit and the interrupt.
   */
 trait Blocking extends Backend {
-  def ops: Kinded[BlockingOps[Op, Handle]]
+  def ops: BlockingOps {
+    type Op = Blocking.this.Op
+    type Handle = Blocking.this.Handle
+    type Readable = Blocking.this.Readable
+    type Writable = Blocking.this.Writable
+  }
 }
 
 /** Unix domain stream sockets (see `UnixStreamOps`), on which the stream socket ops run (`StreamSocketOps`). Apart from
   * IP sockets: code that uses both asks for both, `IpStreams & UnixStreams`.
   */
 trait UnixStreams extends StreamSockets {
-  def ops: StreamKinded[UnixStreamOps[Op, Handle]]
+  def ops: UnixStreamOps {
+    type Op = UnixStreams.this.Op
+    type Handle = UnixStreams.this.Handle
+    type Readable = UnixStreams.this.Readable
+    type Writable = UnixStreams.this.Writable
+    type Connection = UnixStreams.this.Connection
+    type Listener = UnixStreams.this.Listener
+  }
 }
 
 /** Unix domain datagram sockets (see `UnixDatagramOps`), apart from IP sockets, as `UnixStreams` are. */
@@ -163,7 +200,11 @@ trait UnixDatagrams extends Backend {
   /** A Unix domain datagram socket connected to one peer, as `IpDatagrams.ConnectedDatagram` is. */
   type UnixConnectedDatagram <: Handle
 
-  def ops: Kinded[UnixDatagramOps[Op, Handle]] {
+  def ops: UnixDatagramOps {
+    type Op = UnixDatagrams.this.Op
+    type Handle = UnixDatagrams.this.Handle
+    type Readable = UnixDatagrams.this.Readable
+    type Writable = UnixDatagrams.this.Writable
     type UnixBoundDatagram = UnixDatagrams.this.UnixBoundDatagram
     type UnixConnectedDatagram = UnixDatagrams.this.UnixConnectedDatagram
   }
@@ -171,5 +212,10 @@ trait UnixDatagrams extends Backend {
 
 /** FIFOs waited on as pipes are (see `FifoOps`). */
 trait Fifos extends Backend {
-  def ops: Kinded[FifoOps[Op, Handle]]
+  def ops: FifoOps {
+    type Op = Fifos.this.Op
+    type Handle = Fifos.this.Handle
+    type Readable = Fifos.this.Readable
+    type Writable = Fifos.this.Writable
+  }
 }

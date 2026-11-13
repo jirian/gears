@@ -31,7 +31,9 @@ object FakeBackend extends Backend {
   type Readable = AnyRef
   type Writable = AnyRef
 
-  object ops extends Ops[FakeOp, AnyRef] {
+  object ops extends Ops {
+    type Op = FakeOp
+    type Handle = AnyRef
     type Readable = AnyRef
     type Writable = AnyRef
     def read(handle: AnyRef, buf: ByteBuffer): FakeOp & Repeatable = ???

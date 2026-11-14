@@ -66,8 +66,8 @@ object Tcp {
       address: IpSocketAddress,
       deadline: Long
   )(using io: Io[IpStreams], async: Async): SocketStream = {
-    val into = Slot[io.backend.Connection]()
-    val op = io.backend.ops.connect(address, into)
+    val into = Slot[io.ops.Connection]()
+    val op = io.ops.connect(address, into)
     if deadline == Long.MaxValue then io.perform(op)
     else {
       val left = deadline - System.nanoTime()
@@ -87,7 +87,7 @@ object Tcp {
       case Some(address) => List(address)
       case None          =>
         val into = Slot[List[IpAddress]]()
-        val op = io.backend.ops.resolve(bare, into)
+        val op = io.ops.resolve(bare, into)
         val left = deadline - System.nanoTime()
         if deadline == Long.MaxValue then io.perform(op)
         else if left <= 0 then throw new TimeoutException(s"Resolving $host timed out")
@@ -111,8 +111,8 @@ object Tcp {
   }
 
   def listen(address: IpSocketAddress)(using io: Io[IpStreams], async: Async): Listener = {
-    val into = Slot[io.backend.Listener]()
-    io.perform(io.backend.ops.listen(address, into))
+    val into = Slot[io.ops.Listener]()
+    io.perform(io.ops.listen(address, into))
     new Listener(io)(into.clear())
   }
 
@@ -127,14 +127,14 @@ object Tcp {
 object Unix {
 
   def connect(path: String)(using io: Io[UnixStreams], async: Async): SocketStream = {
-    val into = Slot[io.backend.Connection]()
-    io.perform(io.backend.ops.connect(UnixAddress(path), into))
+    val into = Slot[io.ops.Connection]()
+    io.perform(io.ops.connect(UnixAddress(path), into))
     new SocketStream(io)(into.clear())
   }
 
   def listen(path: String)(using io: Io[UnixStreams], async: Async): Listener = {
-    val into = Slot[io.backend.Listener]()
-    io.perform(io.backend.ops.listen(UnixAddress(path), into))
+    val into = Slot[io.ops.Listener]()
+    io.perform(io.ops.listen(UnixAddress(path), into))
     new Listener(io)(into.clear())
   }
 }

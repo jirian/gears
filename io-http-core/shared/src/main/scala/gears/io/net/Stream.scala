@@ -90,8 +90,8 @@ object Stream {
   * buffer read into and written from are kept, so that reading and writing the same buffer again, as a buffered reader
   * does, allocates nothing.
   */
-final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.backend.Connection) extends Stream {
-  private val ops = io.backend.ops
+final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.ops.Connection) extends Stream {
+  private val ops: io.ops.type = io.ops
 
   private val closed = new java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -152,9 +152,9 @@ final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.back
 }
 
 /** A listening socket of `io`'s backend, accepting `SocketStream`s. */
-final class Listener private[io] (val io: Io[StreamSockets])(handle: io.backend.Listener) {
-  private val into = Slot[io.backend.Connection]()
-  private val acceptOp = io.backend.ops.accept(handle, into)
+final class Listener private[io] (val io: Io[StreamSockets])(handle: io.ops.Listener) {
+  private val into = Slot[io.ops.Connection]()
+  private val acceptOp = io.ops.accept(handle, into)
   private val isClosed = new java.util.concurrent.atomic.AtomicBoolean(false)
 
   /** Whether `close` has been called. */
@@ -170,9 +170,9 @@ final class Listener private[io] (val io: Io[StreamSockets])(handle: io.backend.
   }
 
   /** The address it listens on, with the port the system chose if it was asked for port 0. */
-  def localAddress: IpSocketAddress | UnixAddress = io.backend.ops.localAddress(handle)
+  def localAddress: IpSocketAddress | UnixAddress = io.ops.localAddress(handle)
 
   /** Stops listening, once: a pending `accept` fails, and the port is free again as this returns. */
   def close()(using Async): Unit =
-    if isClosed.compareAndSet(false, true) then Stream.uncancelled(io.perform(io.backend.ops.close(handle)))
+    if isClosed.compareAndSet(false, true) then Stream.uncancelled(io.perform(io.ops.close(handle)))
 }

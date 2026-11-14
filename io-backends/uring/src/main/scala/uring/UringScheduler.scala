@@ -23,7 +23,7 @@ import uringStructOps.*
   * withdrawal to the op's, and waits for the op to settle.
   */
 private[uring] final class UringScheduler private (rings: Array[Ring])
-    extends WorkpoolScheduler[UringOp, UringBackend.type](UringBackend, rings.length)
+    extends WorkpoolScheduler[UringOp, UringOps.type](UringBackend, UringOps, rings.length)
     with NativeSuspend {
   override protected def selectWorker() = workerOfCurrentThread()
 
@@ -33,7 +33,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
   private def isWorkerOf(worker: UringWorker): Boolean = worker.isCurrent
 
   final class UringWorker(id: Int, givenRing: Ring)
-      extends WorkpoolScheduler.Worker[UringOp, UringBackend.type](id, UringBackend) {
+      extends WorkpoolScheduler.Worker[UringOp, UringOps.type](id, UringOps) {
 
     // Lazy: `Worker` starts its thread in its constructor, which uses these before this class's fields are set.
     private lazy val own = new Own

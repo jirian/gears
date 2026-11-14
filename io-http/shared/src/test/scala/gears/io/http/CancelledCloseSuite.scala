@@ -42,15 +42,15 @@ class CancelledCloseSuite extends FunSuite {
   test("the interface's close op, performed the same way, is either refused, leaving the port taken, or closes it") {
     val (failure, port) = Http.run {
       val io = summon[gears.async.io.Io[gears.io.net.DefaultCapabilities]]
-      val into = Slot[io.backend.Listener]()
-      io.perform(io.backend.ops.listen(IpSocketAddress(IpAddress.IPv4Loopback, 0), into))
+      val into = Slot[io.ops.Listener]()
+      io.perform(io.ops.listen(IpSocketAddress(IpAddress.IPv4Loopback, 0), into))
       val listener = into.clear()
-      val port = Tcp.port(io.backend.ops.localAddress(listener))
+      val port = Tcp.port(io.ops.localAddress(listener))
       val seen = new AtomicReference[Throwable | Null](null)
       val f = Future {
         try AsyncOperations.sleep(60_000)
         finally
-          try io.perform(io.backend.ops.close(listener))
+          try io.perform(io.ops.close(listener))
           catch case t: Throwable => seen.set(t)
       }
       AsyncOperations.sleep(50)

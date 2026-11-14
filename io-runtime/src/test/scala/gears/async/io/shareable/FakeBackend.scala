@@ -26,12 +26,9 @@ import scala.util.Try
   * by a request the device confirms later (`Withdrawal.Deferred`, io_uring's async cancel, IOCP's `CancelIoEx`).
   */
 object FakeBackend extends Backend {
-  type Op = FakeOp
-  type Handle = AnyRef
-  type Readable = AnyRef
-  type Writable = AnyRef
+  type Interface = ops.type
 
-  object ops extends Ops {
+  object ops extends ByteStreams {
     type Op = FakeOp
     type Handle = AnyRef
     type Readable = AnyRef
@@ -51,10 +48,10 @@ object FakeBackend extends Backend {
 
   def pool(bufferSize: Int, buffers: Int): BufferPool = ???
 
-  private[io] def run[T](program: Io[this.type] ?=> Async.Spawn ?=> T): T = onPool(4)(program)
+  private[io] def run[T](program: Io[Interface] ?=> Async.Spawn ?=> T): T = onPool(4)(program)
 
   /** Runs `program` on a pool of `workers` workers, shutting it down afterwards. */
-  def onPool[T](workers: Int)(program: Io[this.type] ?=> Async.Spawn ?=> T): T = {
+  def onPool[T](workers: Int)(program: Io[Interface] ?=> Async.Spawn ?=> T): T = {
     val pool = FakeScheduler(workers)
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
     given poolScheduler: pool.Scheduler = pool
@@ -189,7 +186,7 @@ final class FakeDevice(worker: FakeScheduler#FakeWorker) {
   * the completions its device has queued before and after each wait.
   */
 final class FakeScheduler(workers: Int)
-    extends WorkpoolScheduler[FakeOp, FakeBackend.type](FakeBackend, workers)
+    extends WorkpoolScheduler[FakeOp, FakeBackend.ops.type](FakeBackend, FakeBackend.ops, workers)
     with NativeSuspend {
   override protected def selectWorker() = workerOfCurrentThread()
 
@@ -198,7 +195,7 @@ final class FakeScheduler(workers: Int)
   /** The device of the calling thread's worker. */
   def device: FakeDevice = workerOfCurrentThread().asInstanceOf[FakeWorker].device
 
-  class FakeWorker(id: Int) extends WorkpoolScheduler.Worker[FakeOp, FakeBackend.type](id, FakeBackend) {
+  class FakeWorker(id: Int) extends WorkpoolScheduler.Worker[FakeOp, FakeBackend.ops.type](id, FakeBackend.ops) {
     // Lazy: `Worker` starts its thread in its constructor, which runs `waitForDeadline` before this class's fields
     // are set.
     lazy val device = new FakeDevice(this)

@@ -16,32 +16,15 @@ import scala.concurrent.duration.FiniteDuration
   * far it has IP stream and datagram sockets, Unix stream sockets, regular files, pipes, name resolution and blocking
   * ops.
   */
-object UringBackend
-    extends IpStreams
-    with IpDatagrams
-    with UnixStreams
-    with RegularFiles
-    with Pipes
-    with Resolving
-    with Blocking {
-  type Op = UringOp
-  type Handle = UringHandle
-  type Readable = UringReadable
-  type Writable = UringWritable
-  type Connection = ConnectionHandle
-  type Listener = ListenerHandle
-  type BoundDatagram = BoundDatagramHandle
-  type ConnectedDatagram = ConnectedDatagramHandle
-  type File = FileHandle
-
-  val ops: UringOps.type = UringOps
+object UringBackend extends Backend {
+  type Interface = UringOps.type
 
   def pool(bufferSize: Int, buffers: Int): BufferPool = new NativePool(bufferSize, buffers)
 
   /** Runs `program` on a pool of `GEARS_IO_URING_WORKERS` workers, one for each processor if it is not set, shutting it
     * down afterwards.
     */
-  private[io] def run[T](program: Io[this.type] ?=> Async.Spawn ?=> T): T =
+  private[io] def run[T](program: Io[Interface] ?=> Async.Spawn ?=> T): T =
     runOn(defaultWorkers)(program)
 
   /** The workers of a run: `GEARS_IO_URING_WORKERS`, or one for each processor. */
@@ -53,7 +36,7 @@ object UringBackend
       .getOrElse(Runtime.getRuntime.availableProcessors)
 
   /** Runs `program` over this backend as `Io.run` does, on a pool of `workers` workers, each with its own ring. */
-  def runOn[T](workers: Int)(program: Io[this.type] ?=> Async.Spawn ?=> T): T = {
+  def runOn[T](workers: Int)(program: Io[Interface] ?=> Async.Spawn ?=> T): T = {
     require(workers > 0, s"A pool has at least one worker, not $workers")
     val pool = UringScheduler(workers)
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
@@ -66,13 +49,13 @@ object UringBackend
 
 /** The io_uring backend's ops. */
 object UringOps
-    extends IpStreamOps
-    with IpDatagramOps
-    with UnixStreamOps
-    with FileOps
-    with PipeOps
-    with ResolveOps
-    with BlockingOps {
+    extends IpStreams
+    with IpDatagrams
+    with UnixStreams
+    with RegularFiles
+    with Pipes
+    with Resolving
+    with Blocking {
   import scala.annotation.targetName
   type Op = UringOp
   type Handle = UringHandle

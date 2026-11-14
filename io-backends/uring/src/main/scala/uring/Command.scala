@@ -860,7 +860,7 @@ private[uring] final class OpenDatagram(
 
 /** Receives one packet into `buf`, cleared first and left flipped, and writes its sender into `from`; on a connected
   * socket, whose sender is its peer, `from` is null. Done once a packet has arrived; the bytes beyond `buf`'s capacity
-  * are dropped (see `IpDatagramOps.receive`). Receives on one socket run side by side, each taking its own packet.
+  * are dropped (see `IpDatagrams.receive`). Receives on one socket run side by side, each taking its own packet.
   */
 private[uring] final class ReceiveFrom(val handle: DatagramHandle, buf: ByteBuffer, from: Slot[IpSocketAddress] | Null)
     extends Command {
@@ -914,7 +914,7 @@ private[uring] final class ReceiveFrom(val handle: DatagramHandle, buf: ByteBuff
 }
 
 /** Sends one packet, consuming `bufs`: from a bound socket to `to`, or from a connected one, `to` null, to its peer. An
-  * empty packet is refused on a connected socket (see `IpDatagramOps.send`). Done once it has gone, whole. Sends on one
+  * empty packet is refused on a connected socket (see `IpDatagrams.send`). Done once it has gone, whole. Sends on one
   * socket run side by side.
   */
 private[uring] final class SendTo(val handle: DatagramHandle, bufs: Array[ByteBuffer], to: IpSocketAddress | Null)
@@ -982,7 +982,7 @@ private object Datagrams {
 
 // ---- Run on the blocking pool (see Blocking.scala)
 
-/** An op run on a blocking pool (see `BlockingOps.blocking`): `body` runs on a thread of `pool`, its value written by
+/** An op run on a blocking pool (see `Blocking.blocking`): `body` runs on a thread of `pool`, its value written by
   * `deliver`, and the op fired from that thread once it has returned. A cancel or a time limit before it starts skips
   * it; one while it runs interrupts it, if `interruptible`, and the op settles once it has returned, so that `perform`
   * returns only then; one after its value was written is too late, the op completing with it (`committed`). A body that
@@ -1124,7 +1124,7 @@ private[uring] object BlockingTask {
 
 // ---- Regular files
 
-/** A read at an offset (see `FileOps.read`): fills `buf` from the file at the op's offset, which each completion
+/** A read at an offset (see `RegularFiles.read`): fills `buf` from the file at the op's offset, which each completion
   * advances by the bytes read, so that performing the op again goes on from there. A kernel worker runs it.
   */
 private[uring] final class PositionalRead(val handle: FileHandle, buf: ByteBuffer, private var offset: Long)
@@ -1141,8 +1141,8 @@ private[uring] final class PositionalRead(val handle: FileHandle, buf: ByteBuffe
   }
 }
 
-/** A write at an offset (see `FileOps.write`): drains `buf` into the file at the op's offset, which each completion
-  * advances by the bytes written; with nothing remaining, it completes at once, writing nothing.
+/** A write at an offset (see `RegularFiles.write`): drains `buf` into the file at the op's offset, which each
+  * completion advances by the bytes written; with nothing remaining, it completes at once, writing nothing.
   */
 private[uring] final class PositionalWrite(val handle: FileHandle, buf: ByteBuffer, private var offset: Long)
     extends Transfer(Array(buf), copyIn = true) {
@@ -1157,7 +1157,7 @@ private[uring] final class PositionalWrite(val handle: FileHandle, buf: ByteBuff
   }
 }
 
-/** `fsync` (see `FileOps.sync`). */
+/** `fsync` (see `RegularFiles.sync`). */
 private[uring] final class FileSync(val handle: FileHandle) extends Command {
   protected def prepare(sqe: Ptr[io_uring_sqe]): Unit = io_uring_prep_fsync(sqe, fd)
 

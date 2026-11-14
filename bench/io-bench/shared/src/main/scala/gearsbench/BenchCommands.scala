@@ -1,6 +1,6 @@
 package gearsbench
 
-import gears.async.io.Backend
+import gears.async.io.Interface
 import gears.async.io.IpAddress
 import gears.async.io.IpSocketAddress
 import gears.async.io.IpStreams
@@ -76,7 +76,7 @@ class BenchCommands(backends: DemoBackends) {
   }
 
   /** The runner, as the bench's: every backend a bench application offers has one. */
-  private def bench[C <: Backend](runner: DemoRunner[C]): BenchRunner[C] = runner match {
+  private def bench[C <: Interface](runner: DemoRunner[C]): BenchRunner[C] = runner match {
     case b: BenchRunner[C] @unchecked => b
     case other                        => throw new IllegalArgumentException(s"$other cannot run the bench on a pool")
   }

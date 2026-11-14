@@ -15,19 +15,18 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 /** The threads blocking work runs on, off the workers, in two pools with a cap each: one for name lookups, one for the
-  * rest (opens, and `BlockingOps.blocking`), so that lookups a slow resolver holds up cannot starve an open. A pool
-  * starts threads as work comes, up to its cap, then queues it, first come, first served; a task cancelled or out of
-  * time while it waits is skipped when its turn comes, without taking a thread. Threads are daemons, ended once idle
-  * for a minute. A lookup nothing can interrupt, given up on, keeps its thread until it returns: the cap bounds how
-  * many a resolver that does not answer can hold.
+  * rest (opens, and `Blocking.blocking`), so that lookups a slow resolver holds up cannot starve an open. A pool starts
+  * threads as work comes, up to its cap, then queues it, first come, first served; a task cancelled or out of time
+  * while it waits is skipped when its turn comes, without taking a thread. Threads are daemons, ended once idle for a
+  * minute. A lookup nothing can interrupt, given up on, keeps its thread until it returns: the cap bounds how many a
+  * resolver that does not answer can hold.
   */
 private[uring] object BlockingPool {
 
   /** Threads for name lookups at most, each lookup a `getaddrinfo` call. */
   inline val Lookups = 16
 
-  /** Threads for the rest at most: a body of `BlockingOps.blocking` that waits for another past this many waits for
-    * ever.
+  /** Threads for the rest at most: a body of `Blocking.blocking` that waits for another past this many waits for ever.
     */
   inline val Others = 64
 
@@ -62,9 +61,9 @@ private[uring] object BlockingPool {
   }
 }
 
-/** Opens a regular file and writes its handle into `into` (see `FileOps.open`), on the blocking pool: it opens without
-  * blocking, so that a FIFO, which it then refuses, cannot keep it waiting for a writer, and turns blocking off again
-  * for the regular file, so that io_uring reads uncached data from the disk rather than reporting would-block.
+/** Opens a regular file and writes its handle into `into` (see `RegularFiles.open`), on the blocking pool: it opens
+  * without blocking, so that a FIFO, which it then refuses, cannot keep it waiting for a writer, and turns blocking off
+  * again for the regular file, so that io_uring reads uncached data from the disk rather than reporting would-block.
   */
 private[uring] final class OpenFile(path: String, write: Boolean, into: Slot[FileHandle])
     extends BlockingTask[FileHandle](

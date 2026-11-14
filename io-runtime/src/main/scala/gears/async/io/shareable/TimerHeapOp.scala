@@ -61,11 +61,11 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
   /** Read while the op is being performed, as `clearTimeout` drops the time limit. */
   final override def hasDeadline: Boolean = hasOwnDeadline || timeoutDeadline >= 0
 
-  final def setTimeout(t: Int, source: TimerHeap.TimerSource[?]): Unit = timersLock.synchronized {
+  final def setTimeout(t: Long, source: TimerHeap.TimerSource[?]): Unit = timersLock.synchronized {
     worker = source
     if t < 0 then timeoutDeadline = -1L
     else
-      timeoutDeadline = TimerHeap.deadlineAfter(t * 1000000L)
+      timeoutDeadline = TimerHeap.deadlineAfter(if t > Long.MaxValue / 1000000L then Long.MaxValue else t * 1000000L)
   }
   final def clearTimeout(): Unit = timersLock.synchronized {
     worker = null

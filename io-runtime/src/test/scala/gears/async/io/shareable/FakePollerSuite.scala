@@ -20,10 +20,10 @@ import scala.util.Try
 class FakePollerSuite extends munit.FunSuite {
   override def munitTimeout: Duration = 60.seconds
 
-  private def scheduler(using io: Io[FakeBackend.type]): FakeScheduler = io.asInstanceOf[FakeScheduler]
+  private def scheduler(using io: Io[FakeBackend.ops.type]): FakeScheduler = io.asInstanceOf[FakeScheduler]
 
   /** Waits, on timers, until `condition` holds. */
-  private def eventually(condition: => Boolean)(using Io[FakeBackend.type], Async): Unit = {
+  private def eventually(condition: => Boolean)(using Io[FakeBackend.ops.type], Async): Unit = {
     val end = System.nanoTime() + 10.seconds.toNanos
     while !condition do {
       assert(System.nanoTime() < end, "the condition never held")
@@ -55,7 +55,7 @@ class FakePollerSuite extends munit.FunSuite {
   }
 
   private def performing(op: DeviceOp, timeout: FiniteDuration | Null = null)(using
-      io: Io[FakeBackend.type],
+      io: Io[FakeBackend.ops.type],
       spawn: Async.Spawn
   ): Performer = {
     val performed = new java.util.concurrent.atomic.AtomicReference[Try[Unit]]()
@@ -67,7 +67,7 @@ class FakePollerSuite extends munit.FunSuite {
   }
 
   /** Performs `op` in a future on the current worker's device, returning once the device holds it. */
-  private def started(op: DeviceOp)(using io: Io[FakeBackend.type], spawn: Async.Spawn): (Performer, FakeDevice) = {
+  private def started(op: DeviceOp)(using io: Io[FakeBackend.ops.type], spawn: Async.Spawn): (Performer, FakeDevice) = {
     val performer = performing(op)
     eventually(op.device != null && op.device.nn.holds(op))
     (performer, op.device.nn)

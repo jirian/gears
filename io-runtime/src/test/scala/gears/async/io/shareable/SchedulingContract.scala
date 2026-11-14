@@ -20,9 +20,9 @@ import scala.util.Success
 abstract class SchedulingContract extends munit.FunSuite {
 
   /** The backend, and a pool of `workers` workers performing its ops. */
-  type B <: Backend
-  val backend: B
-  def newPool(workers: Int): WorkpoolScheduler[?, ?] & Io[B]
+  type I <: Interface
+  val backend: Backend { type Interface = I }
+  def newPool(workers: Int): WorkpoolScheduler[?, ?] & Io[I]
 
   override def munitTimeout: Duration = 60.seconds
 
@@ -32,7 +32,7 @@ abstract class SchedulingContract extends munit.FunSuite {
   }
 
   /** `Io.run` on a pool of the given size. */
-  private def onPool[T](workers: Int)(program: Io[B] ?=> Async.Spawn ?=> T): T = {
+  private def onPool[T](workers: Int)(program: Io[I] ?=> Async.Spawn ?=> T): T = {
     val pool = newPool(workers)
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
     given poolScheduler: pool.Scheduler = pool
@@ -94,10 +94,10 @@ abstract class SchedulingContract extends munit.FunSuite {
     val ranBeforeResume = onPool(1) { io ?=>
       val deadline = System.nanoTime() + 5_000_000L
       val waiter = Future {
-        io.perform(io.backend.ops.deadlineTimer(deadline))
+        io.perform(io.ops.deadlineTimer(deadline))
         ran.get()
       }
-      io.perform(io.backend.ops.timer(1))
+      io.perform(io.ops.timer(1))
       for _ <- 1 to backlog do
         summon[Async].scheduler.execute { () =>
           spin(200_000L)
@@ -123,8 +123,8 @@ abstract class SchedulingContract extends munit.FunSuite {
   test("a waiter resumed by one timer can move the next timer due") {
     onPool(1) { io ?=>
       val due = System.nanoTime() + 20_000_000L
-      val first = io.backend.ops.deadlineTimer(due)
-      val second = io.backend.ops.deadlineTimer(due + 1000L)
+      val first = io.ops.deadlineTimer(due)
+      val second = io.ops.deadlineTimer(due + 1000L)
       val moved = new java.util.concurrent.atomic.AtomicLong(0L)
       val waiter = Future { io.perform(second); System.nanoTime() }
       val mover = Future {
@@ -132,7 +132,7 @@ abstract class SchedulingContract extends munit.FunSuite {
         moved.set(System.nanoTime() + 100_000_000L)
         second.moveTo(moved.get())
       }
-      io.perform(io.backend.ops.timer(1))
+      io.perform(io.ops.timer(1))
       spin(40_000_000L) // past both deadlines before the only worker next looks at its heap
       val returned = waiter.await
       mover.await
@@ -142,14 +142,14 @@ abstract class SchedulingContract extends munit.FunSuite {
 
   test("a pending deadline moved later returns at the new deadline, and one moved earlier at once") {
     onPool(2) { io ?=>
-      val later = io.backend.ops.deadlineTimer(System.nanoTime() + 10_000_000L)
+      val later = io.ops.deadlineTimer(System.nanoTime() + 10_000_000L)
       val target = System.nanoTime() + 60_000_000L
       val waitingLater = Future { io.perform(later); System.nanoTime() }
       later.moveTo(target)
       val returnedLater = waitingLater.await // not within `assert`, which holds a monitor as it evaluates its condition
       assert(returnedLater >= target, "it returned at the old deadline")
 
-      val earlier = io.backend.ops.deadlineTimer(System.nanoTime() + 60_000_000_000L)
+      val earlier = io.ops.deadlineTimer(System.nanoTime() + 60_000_000_000L)
       val waitingEarlier = Future { io.perform(earlier); System.nanoTime() }
       AsyncOperations.sleep(20)
       val moved = System.nanoTime()
@@ -163,7 +163,7 @@ abstract class SchedulingContract extends munit.FunSuite {
     onPool(2) { io ?=>
       val ran = java.util.concurrent.atomic.AtomicBoolean(false)
       val cancellable = summon[Async].scheduler.schedule(Long.MaxValue.nanos, () => ran.set(true))
-      val waiter = Future(io.perform(io.backend.ops.timer(Long.MaxValue.nanos)))
+      val waiter = Future(io.perform(io.ops.timer(Long.MaxValue.nanos)))
       AsyncOperations.sleep(50)
       assert(!ran.get(), "a scheduled body ran at once")
       assert(waiter.poll().isEmpty, "a timer completed at once")
@@ -175,7 +175,9 @@ abstract class SchedulingContract extends munit.FunSuite {
   }
 
   test("a negative timer is refused") {
-    intercept[IllegalArgumentException](backend.ops.timer((-1).milli))
+    val pool = newPool(1)
+    try intercept[IllegalArgumentException](pool.ops.timer((-1).milli))
+    finally pool.shutdown()
   }
 
   test("every task a pool accepts as it shuts down is run") {

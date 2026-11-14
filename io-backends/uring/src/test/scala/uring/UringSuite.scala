@@ -26,7 +26,7 @@ import scala.util.Try
 class UringSuite extends munit.FunSuite {
   override def munitTimeout: Duration = 60.seconds
 
-  private def onPool[T](workers: Int)(program: Io[UringBackend.type] ?=> Async.Spawn ?=> T): T = {
+  private def onPool[T](workers: Int)(program: Io[UringOps.type] ?=> Async.Spawn ?=> T): T = {
     val pool = UringScheduler(workers)
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
     given poolScheduler: pool.Scheduler = pool
@@ -34,16 +34,16 @@ class UringSuite extends munit.FunSuite {
     finally pool.shutdown()
   }
 
-  private def ops = UringBackend.ops
+  private def ops = UringOps
 
-  private def pipe()(using io: Io[UringBackend.type], async: Async): (UringReadable, UringWritable) = {
+  private def pipe()(using io: Io[UringOps.type], async: Async): (UringReadable, UringWritable) = {
     val read = Slot[UringReadable]()
     val write = Slot[UringWritable]()
     io.perform(ops.pipe(read, write))
     (read.clear(), write.clear())
   }
 
-  private def close(handle: UringHandle)(using io: Io[UringBackend.type], async: Async): Unit =
+  private def close(handle: UringHandle)(using io: Io[UringOps.type], async: Async): Unit =
     io.perform(ops.close(handle))
 
   /** Writes `text` with a plain system call, not through the backend. */
@@ -68,7 +68,7 @@ class UringSuite extends munit.FunSuite {
   }
 
   /** A future performing `op`, with what `perform` itself did: a cancelled future fails whatever its body did. */
-  private def performing(op: UringOp)(using io: Io[UringBackend.type], spawn: Async.Spawn) = {
+  private def performing(op: UringOp)(using io: Io[UringOps.type], spawn: Async.Spawn) = {
     val performed = new AtomicReference[Try[Unit] | Null](null)
     val future = Future {
       performed.set(Try(io.perform(op)))

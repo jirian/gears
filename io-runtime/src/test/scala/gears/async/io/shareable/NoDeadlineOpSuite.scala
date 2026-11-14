@@ -21,27 +21,24 @@ private[shareable] final class WaitingOp extends RepeatableAbstractTimerHeapOp {
   def wakeup(resumedAt: Long): Try[Unit] = WorkpoolScheduler.SuccessUnit
 }
 
-private[shareable] object WaitingBackend extends Backend {
+private[shareable] object WaitingOps extends gears.async.io.Interface {
   type Op = WaitingOp
-  type Handle = AnyRef
-  type Readable = AnyRef
-  type Writable = AnyRef
-  def ops: Ops {
-    type Op = WaitingOp
-    type Handle = AnyRef
-    type Readable = AnyRef
-    type Writable = AnyRef
-  } = ???
+  def timer(duration: FiniteDuration): WaitingOp & Repeatable = ???
+  def deadlineTimer(nanoTime: Long): WaitingOp & Repeatable & gears.async.io.Deadline = ???
+}
+
+private[shareable] object WaitingBackend extends Backend {
+  type Interface = WaitingOps.type
   def pool(bufferSize: Int, buffers: Int): BufferPool = ???
-  private[io] def run[T](program: Io[this.type] ?=> Async.Spawn ?=> T): T = ???
+  private[io] def run[T](program: Io[Interface] ?=> Async.Spawn ?=> T): T = ???
 }
 
 /** One worker, so that a task runs until it suspends, and in the order it was submitted. */
 private[shareable] final class WaitingScheduler
-    extends WorkpoolScheduler[WaitingOp, WaitingBackend.type](WaitingBackend, 1)
+    extends WorkpoolScheduler[WaitingOp, WaitingOps.type](WaitingBackend, WaitingOps, 1)
     with NativeSuspend {
   override protected def selectWorker() = workerOfCurrentThread()
-  override def makeWorker(id: Int) = new WorkpoolScheduler.Worker[WaitingOp, WaitingBackend.type](id, WaitingBackend) {
+  override def makeWorker(id: Int) = new WorkpoolScheduler.Worker[WaitingOp, WaitingOps.type](id, WaitingOps) {
     override def tryPerform(op: WaitingOp): Boolean = {
       if op.hasDeadline then addTimer(op)
       false
@@ -52,7 +49,7 @@ private[shareable] final class WaitingScheduler
 class NoDeadlineOpSuite extends munit.FunSuite {
   override def munitTimeout: Duration = 60.seconds
 
-  private def onPool[T](program: Io[WaitingBackend.type] ?=> Async.Spawn ?=> T): T = {
+  private def onPool[T](program: Io[WaitingOps.type] ?=> Async.Spawn ?=> T): T = {
     val pool = WaitingScheduler()
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
     given poolScheduler: pool.Scheduler = pool

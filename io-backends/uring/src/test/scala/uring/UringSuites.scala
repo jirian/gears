@@ -10,50 +10,50 @@ class UringContractSuite extends OpsContract {
 }
 
 class UringPipeSuite extends PipeContract {
-  val backend: Pipes = UringBackend
+  val backend: Backend { type Interface <: Pipes } = UringBackend
 }
 
 class UringSimpleIOSuite extends SimpleIOChecks with PipeFixture {
-  val backend: Pipes = UringBackend
+  val backend: Backend { type Interface <: Pipes } = UringBackend
 }
 
 /** Runs the same stream contracts over TCP, without exposing Pipes to the suite. */
 class UringSocketStreamSuite extends StreamContract with IpStreamFixture {
-  val backend: IpStreams = UringBackend
+  val backend: Backend { type Interface <: IpStreams } = UringBackend
 }
 
 class UringIpStreamSuite extends IpStreamContract {
-  val backend: IpStreams = UringBackend
+  val backend: Backend { type Interface <: IpStreams } = UringBackend
 }
 
 class UringUnixStreamSuite extends UnixStreamContract {
-  val backend: UnixStreams = UringBackend
+  val backend: Backend { type Interface <: UnixStreams } = UringBackend
 }
 
 class UringSimpleIOSocketSuite extends SimpleIOChecks with IpStreamFixture {
-  val backend: IpStreams = UringBackend
+  val backend: Backend { type Interface <: IpStreams } = UringBackend
 }
 
 class UringSimpleIOIpStreamSuite extends gears.io.testkit.SimpleIOIpStreamChecks {
-  val backend: IpStreams = UringBackend
+  val backend: Backend { type Interface <: IpStreams } = UringBackend
 }
 
 class UringIpDatagramSuite extends IpDatagramContract {
-  val backend: IpDatagrams = UringBackend
+  val backend: Backend { type Interface <: IpDatagrams } = UringBackend
 }
 
 class UringFileSuite extends FileContract {
-  val backend: RegularFiles = UringBackend
+  val backend: Backend { type Interface <: RegularFiles } = UringBackend
 }
 
 class UringResolveSuite extends ResolveContract {
-  val backend: Resolving = UringBackend
+  val backend: Backend { type Interface <: Resolving } = UringBackend
 }
 
 class UringBlockingSuite extends BlockingContract {
-  val backend: Blocking = UringBackend
+  val backend: Backend { type Interface <: Blocking } = UringBackend
 }
 
 class UringSimpleIOResolveSuite extends gears.io.testkit.SimpleIOResolveChecks {
-  val backend: Resolving = UringBackend
+  val backend: Backend { type Interface <: Resolving } = UringBackend
 }

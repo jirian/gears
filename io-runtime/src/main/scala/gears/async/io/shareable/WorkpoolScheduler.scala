@@ -8,6 +8,7 @@ import gears.async.CompletionGroup
 import gears.async.Listener
 import gears.async.Scheduler
 import gears.async.io.Backend
+import gears.async.io.Interface
 import gears.async.io.Io
 import gears.async.native.NativeSuspend
 
@@ -22,11 +23,11 @@ import gears.async.io.shareable.WorkpoolScheduler.DoAfter
 import gears.async.SuspendSupport
 import gears.async.io.shareable.TimerHeap
 
-abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, B <: Backend { type Op = Op1 }](val backend: B, workers: Int)
+abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, I <: Interface { type Op = Op1 }](val backend: Backend { type Interface = I }, val ops: I, workers: Int)
     extends Scheduler
     with AsyncSupport
     with AsyncOperations
-    with Io[B] {
+    with Io[I] {
 
   override private[async] def resumeAsync[T, R](suspension: Suspension[T, R])(arg: T)(using s: Scheduler): Unit =
     // Not here and now: the caller holds the listener's lock, and may hold a source's, partway through changing it.
@@ -40,24 +41,24 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, B <: Backend { ty
   //   s.execute(() => boundary(body))
 
 
-  def makeWorker(id: Int): Worker[Op1, B]
+  def makeWorker(id: Int): Worker[Op1, I]
 
   private val workerTicker = new java.util.concurrent.atomic.AtomicInteger(0)
-  private val workerGroup: Array[Worker[Op1, B]] = Array.tabulate(workers)(makeWorker)
+  private val workerGroup: Array[Worker[Op1, I]] = Array.tabulate(workers)(makeWorker)
   // Filled before any worker runs a task, and only read after: a lookup that allocates nothing, unlike a Scala Map's.
   private val members = {
-    val m = new java.util.IdentityHashMap[Thread, Worker[Op1, B]](workers * 2)
+    val m = new java.util.IdentityHashMap[Thread, Worker[Op1, I]](workers * 2)
     workerGroup.foreach(w => m.put(w.thread, w))
     m
   }
 
   /** This pool's worker whose thread this is, or null. */
-  private def currentWorker(): Worker[Op1, B] | Null = members.get(Thread.currentThread())
-  private def nextWorker(): Worker[Op1, B] = {
+  private def currentWorker(): Worker[Op1, I] | Null = members.get(Thread.currentThread())
+  private def nextWorker(): Worker[Op1, I] = {
     val index = Math.floorMod(workerTicker.getAndIncrement(), workerGroup.length)
     workerGroup(index)
   }
-  protected final def workerOfCurrentThread(): Worker[Op1, B] = {
+  protected final def workerOfCurrentThread(): Worker[Op1, I] = {
     val worker = currentWorker()
     if worker == null then throw new IllegalStateException("Current thread is not a worker")
     worker
@@ -66,11 +67,11 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, B <: Backend { ty
   /** The worker for an op. It must be the performer's own, or otherwise unable to fire the op before `await` has
     * registered its listener, as firing takes no listener to mean that the performer was cancelled.
     */
-  protected def selectWorker(): Worker[Op1, B]
+  protected def selectWorker(): Worker[Op1, I]
 
   type Scheduler = this.type
 
-  override def performWithin(op: backend.Op, timeoutMillis: Int)(using Async): Unit = {
+  override def performWithin(op: Op1, timeoutMillis: Long)(using Async): Unit = {
     op.requestEntry()
     try {
       val worker = selectWorker()
@@ -136,7 +137,7 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, B <: Backend { ty
 object WorkpoolScheduler {
 
   trait AsyncOp extends TimerOp, Async.Source[Try[Unit]] {
-    def setTimeout(timeoutMillis: Int, source: TimerSource[?]): Unit
+    def setTimeout(timeoutMillis: Long, source: TimerSource[?]): Unit
     def clearTimeout(): Unit
     def settled: Boolean
     def succeeded: Boolean
@@ -160,7 +161,7 @@ object WorkpoolScheduler {
     }
   }
 
-  abstract class Worker[Op1 <: TimerOp & ReentrantOp, B <: Backend { type Op = Op1 }](val id: Int, val backend: B) extends TimerHeap[Op1 | DoAfter] {
+  abstract class Worker[Op1 <: TimerOp & ReentrantOp, I <: Interface { type Op = Op1 }](val id: Int, val ops: I) extends TimerHeap[Op1 | DoAfter] {
     // private[kqueue] val inbox: java.util.concurrent.ArrayBlockingQueue[Runnable] =
     //   new java.util.concurrent.ArrayBlockingQueue[Runnable](1024)
     private val inbox: java.util.concurrent.ConcurrentLinkedQueue[Runnable] =

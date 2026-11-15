@@ -45,15 +45,15 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, I <: Interface { 
 
   private val workerTicker = new java.util.concurrent.atomic.AtomicInteger(0)
   private val workerGroup: Array[Worker[Op1, I]] = Array.tabulate(workers)(makeWorker)
-  // Filled before any worker runs a task, and only read after: a lookup that allocates nothing, unlike a Scala Map's.
-  private val members = {
-    val m = new java.util.IdentityHashMap[Thread, Worker[Op1, I]](workers * 2)
-    workerGroup.foreach(w => m.put(w.thread, w))
-    m
+  /** This pool's worker whose thread this is, or null: read from the thread, as a map's lookup allocates on Scala
+    * Native, and this runs for every op.
+    */
+  private def currentWorker(): Worker[Op1, I] | Null = Thread.currentThread() match {
+    case t: WorkpoolScheduler.WorkerThread =>
+      val w = t.worker
+      if w.id < workerGroup.length && (workerGroup(w.id) eq w) then w.asInstanceOf[Worker[Op1, I]] else null
+    case _ => null
   }
-
-  /** This pool's worker whose thread this is, or null. */
-  private def currentWorker(): Worker[Op1, I] | Null = members.get(Thread.currentThread())
   private def nextWorker(): Worker[Op1, I] = {
     val index = Math.floorMod(workerTicker.getAndIncrement(), workerGroup.length)
     workerGroup(index)
@@ -161,6 +161,11 @@ object WorkpoolScheduler {
     }
   }
 
+  /** A worker's thread, which knows its worker. */
+  final class WorkerThread(val worker: Worker[?, ?]) extends Thread {
+    override def run(): Unit = worker.loop()
+  }
+
   abstract class Worker[Op1 <: TimerOp & ReentrantOp, I <: Interface { type Op = Op1 }](val id: Int, val ops: I) extends TimerHeap[Op1 | DoAfter] {
     // private[kqueue] val inbox: java.util.concurrent.ArrayBlockingQueue[Runnable] =
     //   new java.util.concurrent.ArrayBlockingQueue[Runnable](1024)
@@ -193,7 +198,7 @@ object WorkpoolScheduler {
     private[WorkpoolScheduler] def resumeNext(continuation: Runnable): Unit = ready.addLast(continuation)
 
     private[WorkpoolScheduler] val thread = {
-      val t = new Thread(() => loop())
+      val t = new WorkpoolScheduler.WorkerThread(this)
       t.setDaemon(true)
       t.start()
       t

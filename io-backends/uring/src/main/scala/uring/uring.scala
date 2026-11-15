@@ -175,6 +175,9 @@ private[uring] object uring {
   @name("gears_io_uring_cq_overflowing")
   def io_uring_cq_overflowing(ring: Ptr[io_uring]): CInt = extern
 
+  @name("gears_io_uring_spin_check")
+  def io_uring_spin_check(ring: Ptr[io_uring]): CInt = extern
+
   @name("gears_io_uring_get_events")
   def io_uring_get_events(ring: Ptr[io_uring]): CInt = extern
 

@@ -4,6 +4,13 @@
 #include <liburing.h>
 #include <string.h>
 
+/* 1 if completions are in the ring, 2 if the kernel has work to run that posts them, which an enter runs, else 0. */
+int gears_io_uring_spin_check(struct io_uring *ring) {
+  if (io_uring_cq_ready(ring)) return 1;
+  if (IO_URING_READ_ONCE(*ring->sq.kflags) & IORING_SQ_TASKRUN) return 2;
+  return 0;
+}
+
 struct io_uring_sqe *gears_io_uring_get_sqe(struct io_uring *ring) {
   return io_uring_get_sqe(ring);
 }

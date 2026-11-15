@@ -191,7 +191,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
           if deadlineTask < 0 then java.util.concurrent.locks.LockSupport.park()
           else java.util.concurrent.locks.LockSupport.parkNanos(math.max(deadlineTask - System.nanoTime(), 0L))
       } else
-        try own.ring.await(deadlineTask, !isEmpty())(dispatch)
+        try own.ring.await(deadlineTask, !isEmpty(), spin = own.inFlight.nonEmpty)(dispatch)
         catch case failure: Throwable => fail(failure)
 
     /** The ring failed: it is torn down, so that the kernel lets go of every entry, and the ops it had are failed. */

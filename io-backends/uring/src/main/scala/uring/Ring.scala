@@ -72,22 +72,35 @@ private[uring] final class Ring(entries: Int, completions: Int) {
   }
 
   /** Submits the entries prepared and waits for completions: not at all if `hasWork` or a `wake` came, else until
-    * `deadline` on `System.nanoTime`'s clock, or with no limit if it is negative. Then hands each completion, by its
-    * user data and result, to `dispatch`. Worker thread only.
+    * `deadline` on `System.nanoTime`'s clock, or with no limit if it is negative. With `spin`, as when entries are in
+    * the kernel, it first watches the completion queue for up to `Ring.SpinNanos` before it sleeps: a completion that
+    * comes meanwhile then costs no sleep and wake-up of the thread, which take more than half of a round trip over a
+    * socket. Then hands each completion, by its user data and result, to `dispatch`. Worker thread only.
     */
-  def await(deadline: Long, hasWork: => Boolean)(dispatch: (Long, Int) => Unit): Unit = {
+  def await(deadline: Long, hasWork: => Boolean, spin: Boolean)(dispatch: (Long, Int) => Unit): Unit = {
     armWake()
     // First, as it may settle ops, whose continuations are work: the worker's own thread does not wake it.
     onSubmit()
-    sleeping.set(true)
-    val wait =
-      if signalled.get() || hasWork then 0L
-      else if deadline < 0 then -1L
-      else math.max(deadline - System.nanoTime(), 0L)
-    if wait == 0 then sleeping.set(false)
-    val res =
-      if wait == 0 then (if io_uring_sq_ready(ring).toInt > 0 then io_uring_submit(ring) else 0)
-      else io_uring_submit_and_wait(ring, wait)
+    var res = 0
+    if signalled.get() || hasWork then res = submitPrepared()
+    else {
+      val arrived = spin && {
+        res = submitPrepared()
+        val spinEnd = System.nanoTime() + Ring.SpinNanos
+        spinUntil(if deadline < 0 then spinEnd else math.min(deadline, spinEnd))
+      }
+      if !arrived then {
+        sleeping.set(true)
+        val wait =
+          if signalled.get() then 0L
+          else if deadline < 0 then -1L
+          else math.max(deadline - System.nanoTime(), 0L)
+        if wait == 0 then {
+          sleeping.set(false)
+          if io_uring_sq_ready(ring).toInt > 0 then res = io_uring_submit(ring)
+        } else res = io_uring_submit_and_wait(ring, wait)
+      }
+    }
     sleeping.set(false)
     signalled.set(false)
     afterSubmit()
@@ -97,6 +110,25 @@ private[uring] final class Ring(entries: Int, completions: Int) {
       res != -errno.ENOMEM
     then throw Ring.failure("Failed to submit to io_uring", res)
     reap(dispatch)
+  }
+
+  private def submitPrepared(): Int = if io_uring_sq_ready(ring).toInt > 0 then io_uring_submit(ring) else 0
+
+  /** Watches for a completion or a `wake` until `until`, and returns whether one came. The kernel posts a completion
+    * once the worker enters it (COOP_TASKRUN), and flags the ring meanwhile, so a flag has it enter without waiting.
+    */
+  private def spinUntil(until: Long): Boolean = {
+    var arrived = false
+    var spinning = true
+    while spinning do {
+      val state = io_uring_spin_check(ring)
+      if state == 1 || signalled.get() then {
+        arrived = true
+        spinning = false
+      } else if state == 2 then io_uring_get_events(ring): Unit
+      else if System.nanoTime() >= until then spinning = false
+    }
+    arrived
   }
 
   /** Called on the worker's thread just before the entries prepared go to the kernel, which may be in `await` or in
@@ -192,6 +224,12 @@ private[uring] final class Ring(entries: Int, completions: Int) {
 }
 
 private[uring] object Ring {
+
+  /** How long a worker with entries in the kernel watches for their completions before it sleeps. A round trip over a
+    * Unix socket took 13.7 µs without, 7.4 with 5 µs and 7.1 with 20; 20 also keeps the most of a time limit's and a
+    * pooled read's round trips from sleeping.
+    */
+  inline val SpinNanos = 20_000L
 
   /** The user data of the eventfd's read, and of entries whose completions are ignored. Ops get the numbers after. */
   inline val WakeId = 0L

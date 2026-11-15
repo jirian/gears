@@ -23,5 +23,6 @@ object ReferenceBench {
 
   val backends: DemoBackends = DemoBackends(Seq("reference" -> Runner), default = "reference")
 
-  def main(args: Array[String]): Unit = ParserForMethods(gearsbench.BenchCommands(backends)).runOrExit(args.toIndexedSeq)
+  def main(args: Array[String]): Unit =
+    ParserForMethods(gearsbench.BenchCommands(backends)).runOrExit(args.toIndexedSeq)
 }

@@ -213,6 +213,19 @@ lazy val ioUringDemos =
     )
     .dependsOn(ioUring, ioTestkit.native)
 
+// The gears bench (bench/io-bench) over the reference backend, the JVM's column beside io_uring's, as
+// `ioReferenceBench/run bench`.
+lazy val ioReferenceBench =
+  (project in file("bench/io-bench/jvm"))
+    .settings(
+      publish / skip := true,
+      scalacOptions += "-release:21",
+      Compile / mainClass := Some("referencebench.ReferenceBench"),
+      Compile / unmanagedSourceDirectories += (ThisBuild / baseDirectory).value / "bench/io-bench/shared/src/main/scala",
+      run / fork := true
+    )
+    .dependsOn(ioReference, ioTestkit.jvm)
+
 // The HTTP bench's server: gears-io-http serving the routes its Go counterpart serves, for a load generator to measure
 // against both (`ioHttpBenchNative/nativeLink`, `ioHttpBenchJVM/run <port>`).
 lazy val ioHttpBench =

@@ -186,23 +186,10 @@ private[uring] object uring {
 
 }
 
-private object uringTags {
-  import uring.*
-  // The types `at1` and its kind ask for: a `Tag[io_uring_sqe]` given would not be found for them.
-  val sqe: Tag.CStruct10[__u8, __u8, __u16, __s32, __u64, __u64, __u32, __u32, __u64, CArray[__u64, Nat._3]] = summon
-  val cqe: Tag.CStruct3[__u64, __s32, __u32] = summon
-}
-
 /** liburing's `static inline` prep helpers, and field accessors for the `CStruct`s above. */
 private[uring] object uringStructOps {
 
   import uring._
-
-  // Built once: a field access would otherwise build its struct's tag anew, an allocation per field on Scala Native.
-  private[uring] given sqeTag
-      : Tag.CStruct10[__u8, __u8, __u16, __s32, __u64, __u64, __u32, __u32, __u64, CArray[__u64, Nat._3]] =
-    uringTags.sqe
-  private[uring] given cqeTag: Tag.CStruct3[__u64, __s32, __u32] = uringTags.cqe
 
   def io_uring_prep_rw(
       op: Int,
@@ -220,9 +207,7 @@ private[uring] object uringStructOps {
     sqe.addr = if (addr eq null) 0.toULong else addr.toLong.toULong
     sqe.len = len
     sqe.rw_flags = 0.toUInt
-    sqe.__pad2(0) = 0.toULong
-    sqe.__pad2(1) = 0.toULong
-    sqe.__pad2(2) = 0.toULong
+    sqe.clearTail()
   }
 
   def io_uring_prep_nop(sqe: Ptr[io_uring_sqe]): Unit =
@@ -306,54 +291,66 @@ private[uring] object uringStructOps {
     sqe.msg_flags = flags.toUInt
   }
 
+  // The fields at their offsets in the kernel's ABI, not through the struct's tag: Scala Native works out a field's
+  // offset from the tag on every access, with virtual calls, which made preparing an entry 2% of an HTTP server's time.
   implicit final class io_uring_sqeOps(val io_uring_sqe: Ptr[io_uring_sqe]) extends AnyVal {
-    inline def opcode: __u8 = io_uring_sqe._1
-    inline def opcode_=(opcode: __u8): Unit = !io_uring_sqe.at1 = opcode
+    private inline def at[T](offset: Int): Ptr[T] = (io_uring_sqe.asInstanceOf[Ptr[Byte]] + offset).asInstanceOf[Ptr[T]]
 
-    inline def flags: __u8 = io_uring_sqe._2
-    inline def flags_=(flags: __u8): Unit = !io_uring_sqe.at2 = flags
+    inline def opcode: __u8 = !at[__u8](0)
+    inline def opcode_=(opcode: __u8): Unit = !at[__u8](0) = opcode
 
-    inline def ioprio: __u16 = io_uring_sqe._3
-    inline def ioprio_=(ioprio: __u16): Unit = !io_uring_sqe.at3 = ioprio
+    inline def flags: __u8 = !at[__u8](1)
+    inline def flags_=(flags: __u8): Unit = !at[__u8](1) = flags
 
-    inline def fd: __s32 = io_uring_sqe._4
-    inline def fd_=(fd: __s32): Unit = !io_uring_sqe.at4 = fd
+    inline def ioprio: __u16 = !at[__u16](2)
+    inline def ioprio_=(ioprio: __u16): Unit = !at[__u16](2) = ioprio
 
-    inline def off: __u64 = io_uring_sqe._5
-    inline def off_=(off: __u64): Unit = !io_uring_sqe.at5 = off
+    inline def fd: __s32 = !at[__s32](4)
+    inline def fd_=(fd: __s32): Unit = !at[__s32](4) = fd
 
-    inline def addr: __u64 = io_uring_sqe._6
-    inline def addr_=(addr: __u64): Unit = !io_uring_sqe.at6 = addr
+    inline def off: __u64 = !at[__u64](8)
+    inline def off_=(off: __u64): Unit = !at[__u64](8) = off
 
-    inline def len: __u32 = io_uring_sqe._7
-    inline def len_=(len: __u32): Unit = !io_uring_sqe.at7 = len
+    inline def addr: __u64 = !at[__u64](16)
+    inline def addr_=(addr: __u64): Unit = !at[__u64](16) = addr
 
-    inline def rw_flags: __kernel_rwf_t = io_uring_sqe._8
-    inline def rw_flags_=(rw_flags: __kernel_rwf_t): Unit = !io_uring_sqe.at8 = rw_flags
-    inline def msg_flags: __u32 = io_uring_sqe._8
-    inline def msg_flags_=(msg_flags: __u32): Unit = !io_uring_sqe.at8 = msg_flags
-    inline def accept_flags: __u32 = io_uring_sqe._8
-    inline def accept_flags_=(accept_flags: __u32): Unit = !io_uring_sqe.at8 = accept_flags
-    inline def cancel_flags: __u32 = io_uring_sqe._8
-    inline def cancel_flags_=(cancel_flags: __u32): Unit = !io_uring_sqe.at8 = cancel_flags
-    inline def poll32_events: __u32 = io_uring_sqe._8
-    inline def poll32_events_=(poll32_events: __u32): Unit = !io_uring_sqe.at8 = poll32_events
-    inline def open_flags: __u32 = io_uring_sqe._8
-    inline def open_flags_=(open_flags: __u32): Unit = !io_uring_sqe.at8 = open_flags
+    inline def len: __u32 = !at[__u32](24)
+    inline def len_=(len: __u32): Unit = !at[__u32](24) = len
 
-    inline def user_data: __u64 = io_uring_sqe._9
-    inline def user_data_=(user_data: __u64): Unit = !io_uring_sqe.at9 = user_data
+    // One union in the kernel's struct: the op's flags.
+    inline def rw_flags: __kernel_rwf_t = !at[__kernel_rwf_t](28)
+    inline def rw_flags_=(rw_flags: __kernel_rwf_t): Unit = !at[__kernel_rwf_t](28) = rw_flags
+    inline def msg_flags: __u32 = !at[__u32](28)
+    inline def msg_flags_=(msg_flags: __u32): Unit = !at[__u32](28) = msg_flags
+    inline def accept_flags: __u32 = !at[__u32](28)
+    inline def accept_flags_=(accept_flags: __u32): Unit = !at[__u32](28) = accept_flags
+    inline def cancel_flags: __u32 = !at[__u32](28)
+    inline def cancel_flags_=(cancel_flags: __u32): Unit = !at[__u32](28) = cancel_flags
+    inline def poll32_events: __u32 = !at[__u32](28)
+    inline def poll32_events_=(poll32_events: __u32): Unit = !at[__u32](28) = poll32_events
+    inline def open_flags: __u32 = !at[__u32](28)
+    inline def open_flags_=(open_flags: __u32): Unit = !at[__u32](28) = open_flags
 
-    inline def __pad2: CArray[__u64, Nat._3] = io_uring_sqe._10
+    inline def user_data: __u64 = !at[__u64](32)
+    inline def user_data_=(user_data: __u64): Unit = !at[__u64](32) = user_data
+
+    /** Zeroes the 24 bytes after `user_data`: the buffer index, personality, splice descriptor and third address. */
+    inline def clearTail(): Unit = {
+      !at[Long](40) = 0L
+      !at[Long](48) = 0L
+      !at[Long](56) = 0L
+    }
   }
 
   implicit final class io_uring_cqeOps(val io_uring_cqe: Ptr[io_uring_cqe]) extends AnyVal {
-    inline def user_data: __u64 = io_uring_cqe._1
-    inline def user_data_=(user_data: __u64): Unit = !io_uring_cqe.at1 = user_data
-    inline def res: __s32 = io_uring_cqe._2
-    inline def res_=(res: __s32): Unit = !io_uring_cqe.at2 = res
-    inline def flags: __u32 = io_uring_cqe._3
-    inline def flags_=(flags: __u32): Unit = !io_uring_cqe.at3 = flags
+    private inline def at[T](offset: Int): Ptr[T] = (io_uring_cqe.asInstanceOf[Ptr[Byte]] + offset).asInstanceOf[Ptr[T]]
+
+    inline def user_data: __u64 = !at[__u64](0)
+    inline def user_data_=(user_data: __u64): Unit = !at[__u64](0) = user_data
+    inline def res: __s32 = !at[__s32](8)
+    inline def res_=(res: __s32): Unit = !at[__s32](8) = res
+    inline def flags: __u32 = !at[__u32](12)
+    inline def flags_=(flags: __u32): Unit = !at[__u32](12) = flags
   }
 
   implicit final class __kernel_timespecOps(val __kernel_timespec: Ptr[__kernel_timespec]) extends AnyVal {

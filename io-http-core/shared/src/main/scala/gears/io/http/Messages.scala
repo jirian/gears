@@ -171,7 +171,7 @@ object Response {
 
   /** A response with `body`, and its `Content-Type`. */
   def apply(status: Status, body: Body): Response =
-    Response(status, body.contentType.fold(Headers.empty)(t => Headers("Content-Type" -> t)), body)
+    Response(status, body.contentType.fold(Headers.empty)(Headers.contentType), body)
 
   def ok(body: Body): Response = Response(Status.Ok, body)
   def ok(text: String): Response = Response(Status.Ok, Body.text(text))

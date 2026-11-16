@@ -63,8 +63,10 @@ private[http] object Wire {
         case _: EOFException => throw new Malformed(Status.BadRequest, "The stream ended within the head")
       }
     if bytes == null then return null
-    val lines = splitLines(bytes.nn)
-    val requestLine = lines.head
+    val b = bytes.nn
+    val end = b.length - 4
+    val firstEnd = lineEnd(b, 0, end)
+    val requestLine = latin1(b, 0, firstEnd)
     val first = requestLine.indexOf(' ')
     val second = requestLine.indexOf(' ', first + 1)
     if first <= 0 || second < 0 || requestLine.indexOf(' ', second + 1) >= 0 then
@@ -74,10 +76,11 @@ private[http] object Wire {
     val version = requestLine.substring(second + 1)
     if !Headers.isToken(methodToken) then throw new Malformed(Status.BadRequest, "A malformed method")
     val spoken = checkVersion(version)
-    if target.isEmpty || target.exists(c => c <= ' ' || c >= 127) then
-      throw new Malformed(Status.BadRequest, "A malformed request target")
+    var i = 0
+    while i < target.length && { val c = target.charAt(i); c > ' ' && c < 127 } do i += 1
+    if target.isEmpty || i < target.length then throw new Malformed(Status.BadRequest, "A malformed request target")
     if target.length > limits.head then throw new Malformed(Status.UriTooLong, "The target is too long")
-    val headers = parseFields(lines.tail, limits.headers)
+    val headers = parseFields(b, firstEnd + 2, end, limits.headers)
     RequestHead(Method.parse(methodToken), target, spoken, headers)
   }
 
@@ -94,8 +97,10 @@ private[http] object Wire {
           case _: EOFException          => throw new EOFException("The connection ended within a response head")
         }
       if bytes == null then throw new EOFException("The connection ended before a response")
-      val lines = splitLines(bytes.nn)
-      val statusLine = lines.head
+      val b = bytes.nn
+      val end = b.length - 4
+      val firstEnd = lineEnd(b, 0, end)
+      val statusLine = latin1(b, 0, firstEnd)
       val first = statusLine.indexOf(' ')
       if first < 0 then throw new IOException(s"A malformed status line: $statusLine")
       val version = checkVersion(statusLine.substring(0, first))
@@ -105,7 +110,7 @@ private[http] object Wire {
         throw new IOException(s"A malformed status line: $statusLine")
       val code = codeText.toInt
       if code < 100 || code > 599 then throw new IOException(s"A status out of range: $code")
-      val headers = parseFields(lines.tail, 1000)
+      val headers = parseFields(b, firstEnd + 2, end, 1000)
       if code >= 200 || code == 101 then head = ResponseHead(version, Status(code), headers)
     }
     head.nn
@@ -120,32 +125,67 @@ private[http] object Wire {
     else if version == "HTTP/1.0" then HttpVersion.Http10
     else throw new Malformed(Status.HttpVersionNotSupported, s"$version is not supported")
 
-  /** A head's lines, without the final empty ones; a bare LF is refused, as is a bare CR. */
-  private def splitLines(bytes: Array[Byte]): List[String] = {
-    val text = new String(bytes, 0, bytes.length - 4, StandardCharsets.ISO_8859_1)
-    val lines = Text.splitCrlf(text)
-    if lines.exists(l => l.indexOf('\n') >= 0 || l.indexOf('\r') >= 0) then
-      throw new Malformed(Status.BadRequest, "A bare CR or LF in the head")
-    lines
+  /** Where the line of `bytes` from `from` ends, before `end`: at its CRLF, or at `end`. A bare LF is refused, as is a
+    * bare CR.
+    */
+  private def lineEnd(bytes: Array[Byte], from: Int, end: Int): Int = {
+    var i = from
+    while i < end do {
+      val c = bytes(i)
+      if c == '\r' then {
+        if i + 1 < end && bytes(i + 1) == '\n' then return i
+        throw new Malformed(Status.BadRequest, "A bare CR or LF in the head")
+      }
+      if c == '\n' then throw new Malformed(Status.BadRequest, "A bare CR or LF in the head")
+      i += 1
+    }
+    end
   }
 
-  /** Header fields from their lines: `name: value`, the name a token right before the colon, the value trimmed. */
-  private def parseFields(lines: List[String], max: Int): Headers = {
-    if lines.length > max then throw new Malformed(Status.RequestHeaderFieldsTooLarge, s"More than $max header fields")
-    val fields = Vector.newBuilder[(String, String)]
-    for line <- lines do {
-      if line.nonEmpty && (line.charAt(0) == ' ' || line.charAt(0) == '\t') then
-        throw new Malformed(Status.BadRequest, "A folded header line")
-      val colon = line.indexOf(':')
-      if colon <= 0 then throw new Malformed(Status.BadRequest, "A malformed header line")
-      val name = line.substring(0, colon)
-      val value = line.substring(colon + 1).trim
-      if !Headers.isToken(name) then throw new Malformed(Status.BadRequest, s"A malformed header name: $name")
-      if value.exists(c => c == 0 || c == 127 || (c < ' ' && c != '\t')) then
-        throw new Malformed(Status.BadRequest, s"A control character in header $name")
-      fields += (name -> value)
+  /** The bytes from `from` to `to` as text, a byte a character. */
+  private def latin1(bytes: Array[Byte], from: Int, to: Int): String = {
+    val chars = new Array[Char](to - from)
+    var i = 0
+    while i < chars.length do {
+      chars(i) = (bytes(from + i) & 0xff).toChar
+      i += 1
     }
-    Headers.trusted(fields.result())
+    new String(chars)
+  }
+
+  /** Header fields from the lines of `bytes` between `from` and `end`, at most `max`: `name: value`, the name a token
+    * right before the colon, the value trimmed.
+    */
+  private def parseFields(bytes: Array[Byte], from: Int, end: Int, max: Int): Headers = {
+    var fields = new Array[String](16)
+    var n = 0
+    var at = from
+    while at <= end do {
+      if n == 2 * max then throw new Malformed(Status.RequestHeaderFieldsTooLarge, s"More than $max header fields")
+      val lineTo = lineEnd(bytes, at, end)
+      if lineTo > at && (bytes(at) == ' ' || bytes(at) == '\t') then
+        throw new Malformed(Status.BadRequest, "A folded header line")
+      var colon = at
+      while colon < lineTo && bytes(colon) != ':' do colon += 1
+      if colon == at || colon == lineTo then throw new Malformed(Status.BadRequest, "A malformed header line")
+      var i = at
+      while i < colon && Text.isTokenChar((bytes(i) & 0xff).toChar) do i += 1
+      val name = latin1(bytes, at, colon)
+      if i < colon then throw new Malformed(Status.BadRequest, s"A malformed header name: $name")
+      var vs = colon + 1
+      var ve = lineTo
+      while vs < ve && (bytes(vs) & 0xff) <= ' ' do vs += 1
+      while ve > vs && (bytes(ve - 1) & 0xff) <= ' ' do ve -= 1
+      i = vs
+      while i < ve && { val c = bytes(i) & 0xff; c != 0 && c != 127 && (c >= ' ' || c == '\t') } do i += 1
+      if i < ve then throw new Malformed(Status.BadRequest, s"A control character in header $name")
+      if n == fields.length then fields = java.util.Arrays.copyOf(fields, 2 * n)
+      fields(n) = name
+      fields(n + 1) = latin1(bytes, vs, ve)
+      n += 2
+      at = lineTo + 2
+    }
+    Headers.trusted(if n == fields.length then fields else java.util.Arrays.copyOf(fields, n))
   }
 
   /** How a message with `headers` is framed, given that it may have a body at all: chunked, a length, or `orElse`.
@@ -359,7 +399,25 @@ private[http] object Wire {
       count += 2
     }
 
-    def putDecimal(n: Long): Unit = putLatin1(java.lang.Long.toString(n))
+    def putDecimal(n: Long): Unit =
+      if n < 0 then putLatin1(java.lang.Long.toString(n))
+      else {
+        var digits = 1
+        var rest = n / 10
+        while rest > 0 do {
+          digits += 1
+          rest /= 10
+        }
+        room(digits)
+        var v = n
+        var i = count + digits - 1
+        while i >= count do {
+          bytes(i) = ('0' + (v % 10)).toByte
+          v /= 10
+          i -= 1
+        }
+        count += digits
+      }
 
     /** `n` in hex, as a chunk's size line has it. */
     def putHex(n: Int): Unit = {
@@ -400,10 +458,10 @@ private[http] object Wire {
       }
       putLatin1(firstLine)
       putCrlf()
-      val it = headers.iterator
-      while it.hasNext do {
-        val (k, v) = it.next()
-        putField(k, v)
+      var f = 0
+      while f < headers.size do {
+        putField(headers.name(f), headers.value(f))
+        f += 1
       }
       putCrlf()
     }

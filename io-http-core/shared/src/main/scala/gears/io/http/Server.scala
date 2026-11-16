@@ -437,8 +437,10 @@ private[http] object Server {
       if hosts.length > 1 then throw malformed("More than one Host header")
       if hosts.isEmpty && h.version == HttpVersion.Http11 then throw malformed("No Host header")
       val host = hosts.headOption.filter(_.nonEmpty).getOrElse("localhost")
-      if host.exists(c => c == '/' || c == '?' || c == '#' || c == '@' || c <= ' ') then
-        throw malformed(s"A malformed Host header: $host")
+      var i = 0
+      while i < host.length && { val c = host.charAt(i); c != '/' && c != '?' && c != '#' && c != '@' && c > ' ' } do
+        i += 1
+      if i < host.length then throw malformed(s"A malformed Host header: $host")
       val scheme = if secure then "https" else "http"
       if h.target.startsWith("/") then Url.ofRequest(scheme, host, h.target)
       else if h.target == "*" && h.method == Method.Options then Url.ofRequest(scheme, host, "/")
@@ -540,16 +542,18 @@ private[http] object Server {
       out.putLatin1(response.status.reason)
       out.putCrlf()
       var dated = false
-      val it = response.headers.iterator
-      while it.hasNext do {
-        val (name, value) = it.next()
-        val dropped = name.equalsIgnoreCase("Transfer-Encoding") ||
-          ownLength && name.equalsIgnoreCase("Content-Length") ||
-          ownConnection && name.equalsIgnoreCase("Connection")
+      val fields = response.headers
+      var i = 0
+      while i < fields.size do {
+        val name = fields.name(i)
+        val dropped = Text.sameName(name, "Transfer-Encoding") ||
+          ownLength && Text.sameName(name, "Content-Length") ||
+          ownConnection && Text.sameName(name, "Connection")
         if !dropped then {
-          if !dated && name.equalsIgnoreCase("Date") then dated = true
-          out.putField(name, value)
+          if !dated && Text.sameName(name, "Date") then dated = true
+          out.putField(name, fields.value(i))
         }
+        i += 1
       }
       if !dated then out.putField("Date", Wire.date())
       if !upgrade then {

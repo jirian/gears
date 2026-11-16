@@ -56,7 +56,7 @@ object Body {
 
   /** `text` in UTF-8, `text/plain` unless `contentType` says otherwise. */
   def text(text: String, contentType: String = PlainText): Body =
-    new Bytes(text.getBytes(charset(Some(contentType))), Some(contentType))
+    new Bytes(Text.encode(text, charset(Some(contentType))), Some(contentType))
 
   /** `value`, encoded by its encoder, with the encoder's `Content-Type`. */
   def encode[A](value: A)(using encoder: BodyEncoder[A]): Body =

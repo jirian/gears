@@ -103,18 +103,18 @@ object Url {
         host = authority.substring(0, colon)
         port = authority.substring(colon + 1)
       }
-      if host.isEmpty || !host.forall(c => c.isLetterOrDigit && c < 128 || c == '-' || c == '.') then
+      if host.isEmpty || !Text.forall(host)(c => c < 128 && Character.isLetterOrDigit(c) || c == '-' || c == '.') then
         throw malformed(s"A malformed Host header: $authority")
     }
     val number =
       if port.isEmpty then defaultPort(scheme)
-      else if port.length <= 5 && port.forall(c => c >= '0' && c <= '9') && port.toInt >= 1 && port.toInt <= 65535
+      else if port.length <= 5 && Text.forall(port)(c => c >= '0' && c <= '9') && port.toInt >= 1 && port.toInt <= 65535
       then port.toInt
       else throw malformed(s"A malformed Host header: $authority")
     val question = target.indexOf('?')
     val path = if question < 0 then target else target.substring(0, question)
     val query = if question < 0 then None else Some(target.substring(question + 1))
-    new Url(scheme, host.toLowerCase, number, path, query)
+    new Url(scheme, Text.asciiLower(host), number, path, query)
   }
 
   /** Whether `target` is a path starting with `/`, then a query after a `?` if any, of RFC 3986's characters for them:

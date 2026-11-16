@@ -126,4 +126,21 @@ class WireSuite extends FunSuite {
     assertEquals(Method.parse("PURGE"), Method.Other("PURGE"))
     intercept[IllegalArgumentException](Method.Other("GET"))
   }
+
+  test("header names compare ignoring case, as equalsIgnoreCase does, and a value's elements are found trimmed") {
+    val h = Headers("Content-Type" -> "text/plain", "connection" -> "Upgrade ,  Close", "X-Id" -> "1")
+    assertEquals(h.get("CONTENT-TYPE"), Some("text/plain"))
+    assertEquals(h.get("Content-Typf"), None)
+    assertEquals(h.get("Content_Type"), None) // '_' and DEL differ by the bit that folds a letter's case
+    assert(h.hasToken("Connection", "close"))
+    assert(h.hasToken("Connection", "UPGRADE"))
+    assert(!h.hasToken("Connection", "clos"))
+    assert(!h.hasToken("Connection", ""))
+    for (a, b) <- Seq("@" -> "`", "[" -> "{", "\u00e9" -> "\u00c9", "\u0131" -> "I", "k" -> "\u212a") do
+      assertEquals(Text.sameName(a, b), a.equalsIgnoreCase(b), s"$a vs $b")
+    assertEquals(h.set("CONNECTION", "close").getAll("connection"), Seq("close"))
+    assertEquals(h.remove("x-ID").size, 2)
+    assertEquals((h ++ Headers("A" -> "b")).iterator.toList.last, "A" -> "b")
+    assertEquals(h, Headers("Content-Type" -> "text/plain", "connection" -> "Upgrade ,  Close", "X-Id" -> "1"))
+  }
 }

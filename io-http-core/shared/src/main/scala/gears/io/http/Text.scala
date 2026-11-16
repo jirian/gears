@@ -1,5 +1,7 @@
 package gears.io.http
 
+import java.nio.charset.StandardCharsets
+
 /** Splitting header and path text without regular expressions: `String.split`, which Scala's `split(Char)` calls too,
   * runs a regex on Scala Native for every call, where the JVM has a fast path for one literal character; on the request
   * path that was a third of a server's time.
@@ -32,5 +34,86 @@ private[http] object Text {
     }
     out += text.substring(start)
     out.result()
+  }
+
+  /** Whether `a` and `b` are equal ignoring case, as `equalsIgnoreCase`, comparing ASCII letters without the Unicode
+    * case tables, which on Scala Native cost more than the rest of matching a header name.
+    */
+  def sameName(a: String, b: String): Boolean =
+    (a eq b) || a.length == b.length && regionSame(a, 0, b, b.length)
+
+  /** Whether `a` from `at` starts with the first `n` characters of `b`, ignoring case as `sameName`. */
+  private def regionSame(a: String, at: Int, b: String, n: Int): Boolean = {
+    var i = 0
+    while i < n do {
+      val x = a.charAt(at + i)
+      val y = b.charAt(i)
+      if x != y then {
+        if (x | y) < 128 then {
+          val lx = x | 0x20
+          if lx != (y | 0x20) || lx < 'a' || lx > 'z' then return false
+        } else {
+          val ux = Character.toUpperCase(x)
+          val uy = Character.toUpperCase(y)
+          if ux != uy && Character.toLowerCase(ux) != Character.toLowerCase(uy) then return false
+        }
+      }
+      i += 1
+    }
+    true
+  }
+
+  /** Whether one of `value`'s comma-separated elements, trimmed, is `token`, ignoring case: `Connection: close`. */
+  def hasElement(value: String, token: String): Boolean = {
+    var start = 0
+    while start <= value.length do {
+      var end = value.indexOf(',', start)
+      if end < 0 then end = value.length
+      var s = start
+      var e = end
+      while s < e && value.charAt(s) <= ' ' do s += 1
+      while e > s && value.charAt(e - 1) <= ' ' do e -= 1
+      if e > s && e - s == token.length && regionSame(value, s, token, token.length) then return true
+      start = end + 1
+    }
+    false
+  }
+
+  private val tokenChars: Array[Boolean] = {
+    val t = new Array[Boolean](128)
+    for c <- '!' to '~' do t(c) = "()<>@,;:\\\"/[]?={}".indexOf(c) < 0
+    t
+  }
+
+  /** Whether `c` may be in a token (RFC 9110, 5.6.2): printable ASCII but a separator. */
+  def isTokenChar(c: Char): Boolean = c < 128 && tokenChars(c)
+
+  /** Whether every character of `s` passes `p`, as `forall`, with `p` inlined: `StringOps.forall` boxes each character
+    * on Scala Native.
+    */
+  inline def forall(s: String)(inline p: Char => Boolean): Boolean = {
+    var i = 0
+    while i < s.length && p(s.charAt(i)) do i += 1
+    i == s.length
+  }
+
+  /** `text` in `charset`, ASCII text without the encoder, which a `ThreadLocal` and a buffer cost on Scala Native. */
+  def encode(text: String, charset: java.nio.charset.Charset): Array[Byte] = {
+    val out = new Array[Byte](text.length)
+    var i = 0
+    while i < out.length && text.charAt(i) < 128 do {
+      out(i) = text.charAt(i).toByte
+      i += 1
+    }
+    val ascii = charset == StandardCharsets.UTF_8 || charset == StandardCharsets.ISO_8859_1 ||
+      charset == StandardCharsets.US_ASCII
+    if i == out.length && ascii then out else text.getBytes(charset)
+  }
+
+  /** `s` with ASCII letters in lower case: `s` itself if it has none in upper case and nothing but ASCII. */
+  def asciiLower(s: String): String = {
+    var i = 0
+    while i < s.length && { val c = s.charAt(i); c < 128 && (c < 'A' || c > 'Z') } do i += 1
+    if i == s.length then s else s.toLowerCase
   }
 }

@@ -186,10 +186,23 @@ private[uring] object uring {
 
 }
 
+private object uringTags {
+  import uring.*
+  // The types `at1` and its kind ask for: a `Tag[io_uring_sqe]` given would not be found for them.
+  val sqe: Tag.CStruct10[__u8, __u8, __u16, __s32, __u64, __u64, __u32, __u32, __u64, CArray[__u64, Nat._3]] = summon
+  val cqe: Tag.CStruct3[__u64, __s32, __u32] = summon
+}
+
 /** liburing's `static inline` prep helpers, and field accessors for the `CStruct`s above. */
 private[uring] object uringStructOps {
 
   import uring._
+
+  // Built once: a field access would otherwise build its struct's tag anew, an allocation per field on Scala Native.
+  private[uring] given sqeTag
+      : Tag.CStruct10[__u8, __u8, __u16, __s32, __u64, __u64, __u32, __u32, __u64, CArray[__u64, Nat._3]] =
+    uringTags.sqe
+  private[uring] given cqeTag: Tag.CStruct3[__u64, __s32, __u32] = uringTags.cqe
 
   def io_uring_prep_rw(
       op: Int,

@@ -56,13 +56,13 @@ final case class Limits(
   *
   * `cancelAbandoned` is how long a handler runs before the server watches its connection for the client going away, and
   * cancels the handler if it has, as Go's server cancels a request's context: the handler sees a
-  * `CancellationException` at its next suspension, and the futures it started are cancelled with it. A connection is
-  * watched only once the handler has read the request's body, and not while the client has sent the next request
-  * already; a handler that finishes sooner costs nothing. A client that shuts its output down once it has sent its
-  * request, as `StreamSocketOps.shutdownOutput` suggests, looks gone too, and its handler is cancelled: as with Go's
-  * server, such a client is served with `Duration.Inf`. `Duration.Inf` never cancels: for a handler whose work must not
-  * stop halfway; a handler can instead protect just that part, running it with
-  * `Async.current.withGroup(CompletionGroup.Unlinked)`.
+  * `CancellationException` at its next suspension, and the futures it started are cancelled with it, as is the rest of
+  * the connection, which has no one left to answer. A connection is watched only once the handler has read the
+  * request's body, and not while the client has sent the next request already; a handler that finishes sooner costs
+  * nothing. A client that shuts its output down once it has sent its request, as `StreamSocketOps.shutdownOutput`
+  * suggests, looks gone too, and its handler is cancelled: as with Go's server, such a client is served with
+  * `Duration.Inf`. `Duration.Inf` never cancels: for a handler whose work must not stop halfway; a handler can instead
+  * protect just that part, running it with `Async.current.withGroup(CompletionGroup.Unlinked)`.
   */
 final case class ServerConfig(
     host: String = "0.0.0.0",
@@ -198,8 +198,8 @@ private[http] object Server {
     new Server(config, listener, done, state)
   }
 
-  /** A request being answered, for the watch of its connection: the group its handler runs in, when it began, and
-    * whether the watch is reading the connection for it (`Reading`), or no longer may (`Settled`).
+  /** A request being answered, for the watch of its connection: the connection's group, its handler's, when it began,
+    * and whether the watch is reading the connection for it (`Reading`), or no longer may (`Settled`).
     */
   final class Answering(val group: gears.async.CompletionGroup, val since: Long, body: Body) {
     val state = new AtomicInteger(Answering.Running)
@@ -255,7 +255,13 @@ private[http] object Server {
         current = tls.fold(raw)(Tls.server(raw, _, t.handshake))
         val input = new BufferedInput(current, 4096, math.max(config.limits.head, 4096))
         var open = !state.stopping.get()
-        while open do open = serveOne(current, input)
+        // In a group of the connection's own, which the watch cancels once the client is gone: the handler then, the
+        // futures it started, and whatever the connection waits on, as it has no one left to answer. A group of each
+        // request's own would cost a link to the connection's group and an unlink a request, a sixth of a server's
+        // time on Scala Native.
+        Async.group {
+          while open do open = serveOne(current, input)
+        }
       } catch {
         case _: CancellationException | _: ClosedChannelException | _: TimeoutException => ()
         case e: IOException                                                             =>
@@ -348,18 +354,16 @@ private[http] object Server {
       }
     }
 
-    /** Answers `request` with the routes, in a group of its own that the watch cancels if the client goes away. */
+    /** Answers `request` with the routes, in the connection's group, which the watch cancels if the client goes away.
+      */
     private def answer(request: Request, body: Body, input: BufferedInput)(using outer: Async): Response =
       config.cancelAbandoned match {
         case after: FiniteDuration =>
-          Async.group {
-            val a = new Answering(Async.current.group, System.nanoTime(), body)
-            answering = a
-            if watching.compareAndSet(false, true) then
-              watcher = Future(watch(after.toNanos, input))(using spawn, spawn)
-            try routes(request)
-            finally settle(a)(using outer)
-          }
+          val a = new Answering(outer.group, System.nanoTime(), body)
+          answering = a
+          if watching.compareAndSet(false, true) then watcher = Future(watch(after.toNanos, input))(using spawn, spawn)
+          try routes(request)
+          finally settle(a)
         case _ => routes(request)
       }
 

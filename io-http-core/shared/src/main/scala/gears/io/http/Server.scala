@@ -54,10 +54,10 @@ final case class Limits(
   * and size limits; TLS, if it serves HTTPS; and where it reports a handler's failure and a connection's, which never
   * reach a client. A plain value: starting it is `Http.server`'s.
   *
-  * `cancelAbandoned` is how long a handler runs before the server watches its connection for the client going away, and
-  * cancels the handler if it has, as Go's server cancels a request's context: the handler sees a
-  * `CancellationException` at its next suspension, and the futures it started are cancelled with it, as is the rest of
-  * the connection, which has no one left to answer. A connection is watched only once the handler has read the
+  * `cancelAbandoned` is how long a handler runs, give or take half of it, before the server watches its connection for
+  * the client going away, and cancels the handler if it has, as Go's server cancels a request's context: the handler
+  * sees a `CancellationException` at its next suspension, and the futures it started are cancelled with it, as is the
+  * rest of the connection, which has no one left to answer. A connection is watched only once the handler has read the
   * request's body, and not while the client has sent the next request already; a handler that finishes sooner costs
   * nothing. A client that shuts its output down once it has sent its request, as `StreamSocketOps.shutdownOutput`
   * suggests, looks gone too, and its handler is cancelled: as with Go's server, such a client is served with
@@ -131,6 +131,20 @@ private[http] object Server {
     private val accepting = new AtomicBoolean(true)
     private val noneLeft = Future.Promise[Unit]()
 
+    // The watch's clock (`ServerConfig.cancelAbandoned`): one timer for the server, which ticks every half of it,
+    // starts the watch of each request that has run that long, and wakes the watches.
+    @volatile private var tick = Future.Promise[Unit]()
+
+    /** Completes at the watch's next tick. */
+    def nextTick: Future[Unit] = tick.asFuture
+
+    /** A tick: wakes the watches waiting for it. From the one fiber that keeps the clock. */
+    def ticked(): Unit = {
+      val t = tick
+      tick = Future.Promise[Unit]()
+      t.complete(Success(()))
+    }
+
     /** Completes once no connection will be accepted (`acceptEnded`) and none is open. */
     def drained: Future[Unit] = noneLeft.asFuture
 
@@ -168,6 +182,19 @@ private[http] object Server {
       try
         Async.group {
           val connectionsGroup = summon[Async.Spawn]
+          config.cancelAbandoned match {
+            case after: FiniteDuration =>
+              val period = math.max(after.toMillis / 2, 1L)
+              Future {
+                while true do {
+                  gears.async.AsyncOperations.sleep(period)
+                  state.ticked()
+                  val now = System.nanoTime()
+                  state.open.forEach(_.watchIfDue(after.toNanos, now))
+                }
+              }: Unit
+            case _ => ()
+          }
           var accepting = true
           while accepting do {
             val stream =
@@ -236,11 +263,14 @@ private[http] object Server {
     private val out = new Wire.OutBuffer(16 * 1024)
 
     // The watch for the client going away (`ServerConfig.cancelAbandoned`): one future per connection at most, started
-    // by the first request that may need it, in the server's group rather than the connection's, so that it ends on its
-    // own, never cancelled, when there is nothing left to watch. A request being answered is `answering`.
+    // by the server's tick once a request has run that long, in the server's group rather than the connection's, so
+    // that it ends on its own, never cancelled, when there is nothing left to watch. A request being answered is
+    // `answering`. Started by each request instead, it started for nearly every one, a fiber a request: by the time it
+    // ran, the request was answered.
     private val watching = new AtomicBoolean(false)
     @volatile private var answering: Answering | Null = null
-    private var watcher: Future[Unit] | Null = null
+    @volatile private var watcher: Future[Unit] | Null = null
+    @volatile private var input: BufferedInput | Null = null
 
     /** Whether it waits for a request, with none begun. */
     @volatile var idle = false
@@ -254,6 +284,7 @@ private[http] object Server {
       try {
         current = tls.fold(raw)(Tls.server(raw, _, t.handshake))
         val input = new BufferedInput(current, 4096, math.max(config.limits.head, 4096))
+        this.input = input
         var open = !state.stopping.get()
         // In a group of the connection's own, which the watch cancels once the client is gone: the handler then, the
         // futures it started, and whatever the connection waits on, as it has no one left to answer. A group of each
@@ -321,7 +352,7 @@ private[http] object Server {
         else h.headers.hasToken("Connection", "keep-alive")
 
       val response =
-        try answer(request, body, input)
+        try answer(request, body)
         catch {
           case e: CancellationException => throw e
           case e: HttpError             => e.response
@@ -356,12 +387,11 @@ private[http] object Server {
 
     /** Answers `request` with the routes, in the connection's group, which the watch cancels if the client goes away.
       */
-    private def answer(request: Request, body: Body, input: BufferedInput)(using outer: Async): Response =
+    private def answer(request: Request, body: Body)(using outer: Async): Response =
       config.cancelAbandoned match {
         case after: FiniteDuration =>
           val a = new Answering(outer.group, System.nanoTime(), body)
           answering = a
-          if watching.compareAndSet(false, true) then watcher = Future(watch(after.toNanos, input))(using spawn, spawn)
           try routes(request)
           finally settle(a)
         case _ => routes(request)
@@ -373,15 +403,26 @@ private[http] object Server {
     private def settle(a: Answering)(using Async): Unit = {
       answering = null
       if !a.state.compareAndSet(Answering.Running, Answering.Settled) && a.state.get() == Answering.Reading then {
-        val w = watcher.nn
-        w.cancel() // a read cancelled took nothing (`Io.perform`)
-        w.awaitResult: Unit
+        val w = watcher // null if it has ended since
+        if w != null then {
+          w.cancel() // a read cancelled took nothing (`Io.perform`)
+          w.awaitResult: Unit
+        }
       }
+    }
+
+    /** At the watch's tick, `now`: starts the watch if a request has run `after` nanoseconds and none is on. */
+    def watchIfDue(after: Long, now: Long): Unit = {
+      val a = answering
+      val in = input
+      if a != null && in != null && now - a.since >= after && watching.compareAndSet(false, true) then
+        watcher = Future(watch(after, in.nn))(using spawn, spawn)
     }
 
     /** Watches the requests being answered, each from `after` nanoseconds after it began: reads the connection once its
       * body is read, and cancels the handler if the stream ended or failed. Bytes that arrive are the next request,
-      * which stay buffered for it. Ends when no request is being answered.
+      * which stay buffered for it. Ends when no request is being answered. It reads only once `watcher` is itself, so
+      * that `settle` can cancel the read.
       */
     private def watch(after: Long, input: BufferedInput)(using Async): Unit =
       try {
@@ -389,12 +430,13 @@ private[http] object Server {
         while going do {
           val a = answering
           if a == null then {
-            watching.set(false)
-            going = answering != null && watching.compareAndSet(false, true) // a request that came as it stopped
+            watcher = null
+            watching.set(false) // the tick starts another if a request runs long
+            going = false
           } else {
             val left = a.since + after - System.nanoTime()
-            if left > 0 then gears.async.AsyncOperations.sleep((left + 999_999) / 1_000_000)
-            else if a.state.get() == Answering.Running && a.bodyRead && input.buffered == 0 &&
+            if left > 0 then state.nextTick.await
+            else if watcher != null && a.state.get() == Answering.Running && a.bodyRead && input.buffered == 0 &&
               a.state.compareAndSet(Answering.Running, Answering.Reading)
             then {
               val gone =
@@ -402,14 +444,12 @@ private[http] object Server {
                 catch case _: IOException => true
               if gone then a.group.cancel()
               a.state.set(Answering.Settled)
-            } else
-              gears.async.AsyncOperations.sleep(
-                math.max(after / 1_000_000, 1L)
-              ) // its body is not read yet, or it was watched
+            } else state.nextTick.await // its body is not read yet, or it was watched
           }
         }
       } catch {
         case e: CancellationException =>
+          watcher = null
           watching.set(false) // `settle` waits for this, or the server is stopping
           throw e
       }

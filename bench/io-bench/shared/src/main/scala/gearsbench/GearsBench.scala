@@ -3,8 +3,8 @@ package gearsbench
 import gears.async.Async
 import gears.async.Future
 import gears.async.Future.awaitAll
-import gears.async.io.Interface
 import gears.async.io.Blocking
+import gears.async.io.Interface
 import gears.async.io.Io
 import gears.async.io.Received
 import gears.async.io.Slot
@@ -28,10 +28,10 @@ import java.nio.file.Paths
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 
-/** Stress tests for a reactor and its gears integration, to measure each change against. An echo server runs on one
-  * reactor thread and the clients on another, so both sides go through the reactor; each scenario is timed on its own
-  * and stresses a different cost (see `docs/io/bench.md`). Every line it prints for a scenario starts with `bench:` so
-  * that `bench/compare.sc` can collect the results.
+/** Stress tests for a backend and its gears integration, to measure each change against. An echo server runs on one
+  * worker and the clients on another, so both sides go through the backend; each scenario is timed on its own and
+  * stresses a different cost, which its `Scenario` names. Every line it prints for a scenario starts with `bench:`, so
+  * that a harness (`bench_runner.py` in jirian/gears-bench) can collect the results.
   *
   * Like the demos, the scenarios take the `Io` they run with and name no backend: the server's runs and the clients'
   * are started by the `DemoRunner` of the backend chosen, which a platform's demo application provides, on pools of the
@@ -275,7 +275,7 @@ object GearsBench {
     ),
     Scenario(
       "rearm-earlier",
-      "the same, its deadline moved earlier each time, which files it again in the reactor's heap",
+      "the same, its deadline moved earlier each time, which files it again in the worker's heap",
       2_000_000,
       new Client {
         def apply(io: Io[StreamSockets], connect: Connect[io.ops.Connection], count: Int, connections: Int)(using
@@ -323,12 +323,12 @@ object GearsBench {
     )
   )
 
-  /** `io`'s ops as ones with blocking ops, which a scenario that runs only on one needs: still `io`'s, so `io`
-    * performs them.
+  /** `io`'s ops as ones with blocking ops, which a scenario that runs only on one needs: still `io`'s, so `io` performs
+    * them.
     */
   private def blocking(io: Io[Interface]): Blocking & io.ops.type = io.ops match {
     case blocking: (Blocking & io.ops.type) => blocking
-    case _                                      => throw new IllegalArgumentException(s"$io has no blocking ops")
+    case _                                  => throw new IllegalArgumentException(s"$io has no blocking ops")
   }
 
   /** How many timers the `timers` scenario has pending at once. */
@@ -392,7 +392,7 @@ object GearsBench {
     waiting.await
   }
 
-  /** Prints one result line, in the format `bench/compare.sc` reads. */
+  /** Prints one result line, in the format the harness reads. */
   def report(name: String, count: Long, seconds: Double): Unit =
     println(f"bench: $name%-18s $count%10d $seconds%9.3f ${count / seconds}%12.0f ${seconds * 1e6 / count}%8.2f")
 
@@ -412,9 +412,9 @@ object GearsBench {
     x
   }
 
-  /** Ping-pongs `count` messages while a compute future on the same reactor thread runs slices of work until they are
-    * done. Between slices it yields to the scheduler with `io.yield`, so that the ping-pong continuations run in
-    * between. Reports the compute side as `mixed-compute`: the time per slice over the same period.
+  /** Ping-pongs `count` messages while a compute future on the same worker runs slices of work until they are done.
+    * Between slices it yields to the scheduler with `io.yield`, so that the ping-pong continuations run in between.
+    * Reports the compute side as `mixed-compute`: the time per slice over the same period.
     */
   private def mixed(io: Io[StreamSockets], connect: Connect[io.ops.Connection], count: Int)(using Async.Spawn): Unit = {
     val pingPongDone =
@@ -480,14 +480,16 @@ object GearsBench {
     computes.awaitAll
     val sorted = late.sorted
     def at(fraction: Double): Long = if sorted.isEmpty then 0L else sorted(((sorted.length - 1) * fraction).toInt)
-    // As one op taking the lateness, so that `compare.sc` shows it in µs.
+    // As one op taking the lateness, so that the harness shows it in µs.
     report("starvation-p50", 1, at(0.5) / 1e9)
     report("starvation-p99", 1, at(0.99) / 1e9)
     report("starvation-max", 1, at(1.0) / 1e9)
   }
 
   /** Opens a connection with `connect`, runs `body` on it, and closes it. */
-  private def withConnection(io: Io[StreamSockets], connect: Connect[io.ops.Connection])(body: io.ops.Connection => Unit)(using
+  private def withConnection(io: Io[StreamSockets], connect: Connect[io.ops.Connection])(
+      body: io.ops.Connection => Unit
+  )(using
       Async
   ): Unit = {
     val fd = connect()
@@ -627,11 +629,13 @@ object GearsBench {
     finally if pool != null then pool.close()
   }
 
-  /** Runs `pipelined` while a ticker future on the same reactor thread performs zero-length timers one after another,
-    * and reports the ticker as `fairness-tick`: the time between ticks over the same period. Futures whose operations
+  /** Runs `pipelined` while a ticker future on the same worker performs zero-length timers one after another, and
+    * reports the ticker as `fairness-tick`: the time between ticks over the same period. Futures whose operations
     * rarely wait must still let it run.
     */
-  private def fairness(io: Io[StreamSockets], connect: Connect[io.ops.Connection], count: Int)(using Async.Spawn): Unit = {
+  private def fairness(io: Io[StreamSockets], connect: Connect[io.ops.Connection], count: Int)(using
+      Async.Spawn
+  ): Unit = {
     val trafficDone = new java.util.concurrent.atomic.AtomicBoolean // read by the ticker, maybe on another worker
     var ticks = 0L
     val start = System.nanoTime()
@@ -672,7 +676,7 @@ object GearsBench {
     }
   }
 
-  /** Starts the echo server on a pool of `workers` reactor threads of its own and returns once it is listening. */
+  /** Starts the echo server on a pool of `workers` workers of its own and returns once it is listening. */
   private def startServer[B <: StreamSockets](
       endpoint: Endpoint[B],
       workers: Int
@@ -712,8 +716,8 @@ object GearsBench {
   /** Runs the echo server alone, on a pool of `workers` workers, until the process ends: for a bench on another
     * machine, which connects to it over the network (`run` with `server = false`).
     */
-  def serveForever[B <: StreamSockets](endpoint: Endpoint[B], workers: Int = 1)(
-      using BenchRunner[B]
+  def serveForever[B <: StreamSockets](endpoint: Endpoint[B], workers: Int = 1)(using
+      BenchRunner[B]
   ): Unit = {
     val listening = new CountDownLatch(1)
     val failure = new AtomicReference[Throwable | Null](null)
@@ -723,9 +727,9 @@ object GearsBench {
   }
 
   /** Runs the named scenarios, or all of them, each with its base count times `scale`, the clients on a pool of
-    * `workers` workers, and the echo server on another of the same size; with `warmup`,
-    * each runs first at a fifth of its count, for the JVM's JIT. Without `server`, the echo server is expected to be
-    * listening at `endpoint` already, such as `serveForever` on another machine.
+    * `workers` workers, and the echo server on another of the same size; with `warmup`, each runs first at a fifth of
+    * its count, for the JVM's JIT. Without `server`, the echo server is expected to be listening at `endpoint` already,
+    * such as `serveForever` on another machine.
     */
   def run[B <: StreamSockets](
       names: Seq[String],
@@ -756,9 +760,11 @@ object GearsBench {
     try {
       if server then startServer(endpoint, workers)
       summon[BenchRunner[B]].onPool(workers) { io ?=>
-        val connect = new Connect[io.ops.Connection] { def apply()(using Async): io.ops.Connection = endpoint.connect() }
+        val connect = new Connect[io.ops.Connection] {
+          def apply()(using Async): io.ops.Connection = endpoint.connect()
+        }
         // On the JVM, a first pass at a fifth of each count, so the JIT has compiled what is measured; its results,
-        // the few a scenario prints itself, come before the measured ones, which `compare.sc` keeps.
+        // the few a scenario prints itself, come before the measured ones, which the harness keeps.
         if warmup then
           for scenario <- runnable do
             scenario.body(io, connect, math.max(1, (scenario.baseCount * scale / 5).toInt), connections)

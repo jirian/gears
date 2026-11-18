@@ -358,8 +358,14 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         command.wantOut = true
         if isWorkerOf(this) then withdrawHere(command)
         else {
+          // By the time this worker runs it, that performance may have ended and the op been performed again, here or
+          // on another worker: it then has nothing to take back. Everything that settles a command does so on its
+          // worker's thread, so a performance found unsettled here stays so until this returns.
+          val performance = command.performance
           val handedOver = submit(() =>
-            if withdrawHere(command) then {
+            if command.performance == performance && (command.owner eq this) && !command.isSettled &&
+              withdrawHere(command)
+            then {
               command.outcome = Failure(gears.async.cancellation())
               fire(command)
             }

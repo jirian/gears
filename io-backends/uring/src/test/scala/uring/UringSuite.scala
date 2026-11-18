@@ -256,6 +256,52 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
+  test("a withdrawal handed to an op's worker leaves alone a later performance of the op") {
+    onPool(1) { io ?=>
+      var stale = 0 // rounds in which the withdrawal reached the worker only after the first performance had ended
+      for _ <- 1 to 100 do {
+        val (r, w) = pipe()
+        val buf = ByteBuffer.allocate(16)
+        val read = ops.read(r, buf)
+        val first = new AtomicReference[Try[Unit] | Null](null)
+        val second = new AtomicReference[Try[Unit] | Null](null)
+        val reader = Future {
+          first.set(Try(io.perform(read)))
+          first.get().nn.get
+          buf.clear()
+          second.set(Try(io.perform(read))) // nothing cancels this one
+        }
+        AsyncOperations.sleep(5) // so that the first waits in the kernel
+        val command = read.asInstanceOf[Command]
+        val handed = new java.util.concurrent.atomic.AtomicBoolean()
+        val madeDuringFirst = new java.util.concurrent.atomic.AtomicBoolean()
+        // From a thread of no worker, so that the withdrawal goes to the worker's inbox; the completion the write makes
+        // is reaped first in the worker's turn, and the reader performs the read again before the inbox is drained.
+        val foreign = new Thread(() => {
+          rawWrite(w, "data")
+          command.owner.nn.withdraw(command): Unit
+          // Only the first performance's performer ever withdraws it; a round where the second had already begun
+          // is not the case under test.
+          madeDuringFirst.set(command.performance == 1)
+          handed.set(true)
+        })
+        foreign.start()
+        while !handed.get() do AsyncOperations.sleep(1)
+        AsyncOperations.sleep(10)
+        rawWrite(w, "more")
+        reader.awaitResult: Unit
+        if first.get() == Success(()) && madeDuringFirst.get() then {
+          stale += 1
+          assertEquals(second.get(), Success(()), "the second performance was never cancelled")
+          assertEquals(text(buf), "more")
+        }
+        close(r)
+        close(w)
+      }
+      assert(stale > 0, "no round reached the worker late, so none tested anything")
+    }
+  }
+
   test("a read cancelled while it waits in the kernel takes nothing written after") {
     onPool(2) { io ?=>
       val (r, w) = pipe()

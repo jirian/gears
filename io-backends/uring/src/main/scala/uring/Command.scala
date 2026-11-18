@@ -101,9 +101,12 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   @volatile private[uring] var applied = false
   @volatile private[uring] var offHeap = false
   @volatile private[uring] var wantOut = false
+  // Counts its performances: a withdrawal handed to its worker acts on the one it was made for, not a later one.
+  @volatile private[uring] var performance = 0L
 
   override def onEntry(): Unit = {
     super.onEntry()
+    performance += 1
     stage = Command.Stage.Idle
     awaitingReadiness = false
     outcome = WorkpoolScheduler.SuccessUnit

@@ -77,6 +77,59 @@ class WireSuite extends FunSuite {
     }
   }
 
+  /** A chunked body read to its end: its text, or the status it is refused with. */
+  private def chunked(text: String)(using Async): Either[Int, String] = {
+    val source = new Wire.Source(
+      new BufferedInput(new InMemory(text)),
+      Wire.Framing.Chunked,
+      1 << 20,
+      1.second,
+      () => (),
+      n => new java.io.IOException(s"over $n")
+    )
+    val buf = ByteBuffer.allocate(256)
+    try {
+      while source.read(buf) >= 0 do ()
+      buf.flip()
+      Right(StandardCharsets.ISO_8859_1.decode(buf).toString)
+    } catch case e: Wire.Malformed => Left(e.status.code)
+  }
+
+  test("a chunked body: sizes in hex, extensions and trailers allowed as RFC 9112 has them") {
+    Http.run {
+      assertEquals(chunked("5\r\nhello\r\n0\r\n\r\n"), Right("hello"))
+      assertEquals(chunked("A\r\n0123456789\r\n0\r\n\r\n"), Right("0123456789"))
+      assertEquals(chunked("5;a=b;c\r\nhello\r\n0\r\n\r\n"), Right("hello"))
+      assertEquals(chunked("5 ; a = \"x \\\" y\"\r\nhello\r\n0\r\n\r\n"), Right("hello"), "whitespace around ; and =")
+      assertEquals(chunked("5\r\nhello\r\n0\r\nX-Sum: 1\r\nX-Other: two\r\n\r\n"), Right("hello"), "trailers")
+    }
+  }
+
+  test("a chunk line or trailer that another parser could end elsewhere is refused") {
+    Http.run {
+      for text <- Seq(
+          "2;\nxx\r\nhi\r\n0\r\n\r\n", // a bare LF in an extension
+          "2;a\rb\r\nhi\r\n0\r\n\r\n", // a bare CR in an extension
+          "2\nhi\r\n0\r\n\r\n", // a size line ended by a bare LF
+          " 2\r\nhi\r\n0\r\n\r\n", // whitespace before the size
+          "2 \r\nhi\r\n0\r\n\r\n", // whitespace after it, with no extension
+          "2;\r\nhi\r\n0\r\n\r\n", // an extension with no name
+          "2;a=\r\nhi\r\n0\r\n\r\n", // or no value after =
+          "2;a=\"x\r\nhi\r\n0\r\n\r\n", // a quoted value not closed
+          "2;a=b c\r\nhi\r\n0\r\n\r\n", // two tokens
+          "+2\r\nhi\r\n0\r\n\r\n",
+          "0x2\r\nhi\r\n0\r\n\r\n",
+          "\u00b2\r\nhi\r\n0\r\n\r\n", // a digit outside ASCII
+          "1234567890abcdef\r\n", // too many digits
+          "2\r\nhi\r\n0\r\nX-A: 1\nX-B: 2\r\n\r\n", // a bare LF in a trailer
+          "2\r\nhi\r\n0\r\nno colon\r\n\r\n", // a trailer that is no field
+          "2\r\nhi\r\n0\r\nX-A: 1\r\n folded\r\n\r\n", // a folded one
+          "2\r\nhiX\r\n0\r\n\r\n" // a chunk longer than its size
+        )
+      do assertEquals(chunked(text), Left(400), text)
+    }
+  }
+
   test("a message's framing: chunked, a length, or none, and the ambiguous ones refused") {
     def framing(fields: (String, String)*): Wire.Framing | Int =
       try Wire.framing(Headers(fields*), Wire.Framing.NoBody)

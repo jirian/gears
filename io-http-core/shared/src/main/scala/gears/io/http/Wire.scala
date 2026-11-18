@@ -142,6 +142,65 @@ private[http] object Wire {
     end
   }
 
+  /** The size a chunk's line gives, the line's first `end` bytes before its CRLF (RFC 9112, 7.1): hex digits, then
+    * extensions, each a `;` and a token, with `=` and a token or a quoted string, whitespace only around `;` and `=`.
+    * Anything else is refused, a bare CR or LF above all: a front end that ended the line there would frame the body
+    * otherwise, and read what follows as another request.
+    */
+  private[http] def chunkSize(line: Array[Byte], end: Int): Long = {
+    def malformed = new Malformed(Status.BadRequest, "A malformed chunk line")
+    def spaces(from: Int): Int = {
+      var i = from
+      while i < end && (line(i) == ' ' || line(i) == '\t') do i += 1
+      i
+    }
+    def token(from: Int): Int = {
+      var i = from
+      while i < end && Text.isTokenChar((line(i) & 0xff).toChar) do i += 1
+      if i == from then throw malformed
+      i
+    }
+    def quoted(from: Int): Int = { // from just after the opening quote, to just after the closing one
+      var i = from
+      while i < end && line(i) != '"' do {
+        val c = line(i) & 0xff
+        if c == '\\' then {
+          i += 1
+          val q = if i < end then line(i) & 0xff else -1
+          if !(q == '\t' || (q >= ' ' && q != 0x7f)) then throw malformed
+        } else if !(c == '\t' || c == ' ' || c == 0x21 || (c >= 0x23 && c <= 0x5b) || (c >= 0x5d && c != 0x7f)) then
+          throw malformed
+        i += 1
+      }
+      if i == end then throw malformed
+      i + 1
+    }
+    def hex(c: Int): Int =
+      if c >= '0' && c <= '9' then c - '0'
+      else if c >= 'a' && c <= 'f' then c - 'a' + 10
+      else if c >= 'A' && c <= 'F' then c - 'A' + 10
+      else -1
+    var size = 0L
+    var i = 0
+    while i < end && hex(line(i) & 0xff) >= 0 do {
+      if i == 15 then throw new Malformed(Status.BadRequest, "A chunk too large")
+      size = size * 16 + hex(line(i) & 0xff)
+      i += 1
+    }
+    if i == 0 then throw malformed
+    while i < end do {
+      i = spaces(i)
+      if i == end || line(i) != ';' then throw malformed
+      i = token(spaces(i + 1))
+      val eq = spaces(i)
+      if eq < end && line(eq) == '=' then {
+        val value = spaces(eq + 1)
+        i = if value < end && line(value) == '"' then quoted(value + 1) else token(value)
+      }
+    }
+    size
+  }
+
   /** The bytes from `from` to `to` as text, a byte a character. */
   private def latin1(bytes: Array[Byte], from: Int, to: Int): String = {
     val chars = new Array[Char](to - from)
@@ -291,17 +350,14 @@ private[http] object Wire {
     private def nextChunk()(using Async): Unit = {
       val line = input.readUntil(Crlf, 1024, timeout)
       if line == null then throw new EOFException("The body ended before its last chunk")
-      val text = new String(line.nn, 0, line.nn.length - 2, StandardCharsets.ISO_8859_1)
-      val sizeText = text.takeWhile(c => c != ';').trim
-      if sizeText.isEmpty || sizeText.length > 15 || !sizeText.forall(c => Character.digit(c, 16) >= 0) then
-        throw new Malformed(Status.BadRequest, s"A malformed chunk size: $sizeText")
-      chunkLeft = java.lang.Long.parseLong(sizeText, 16)
+      chunkLeft = chunkSize(line.nn, line.nn.length - 2)
       if chunkLeft == 0 then {
         var trailers = 0
         var line2 = input.readUntil(Crlf, 8192, timeout)
         while line2 != null && line2.nn.length > 2 do {
           trailers += 1
           if trailers > 100 then throw new Malformed(Status.BadRequest, "Too many trailer fields")
+          parseFields(line2.nn, 0, line2.nn.length - 2, 1): Unit // a trailer is a header field, and checked as one
           line2 = input.readUntil(Crlf, 8192, timeout)
         }
         if line2 == null then throw new EOFException("The body ended within its trailers")

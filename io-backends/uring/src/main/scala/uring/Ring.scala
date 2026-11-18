@@ -226,8 +226,8 @@ private[uring] final class Ring(entries: Int, completions: Int) {
 private[uring] object Ring {
 
   /** How long a worker with entries in the kernel watches for their completions before it sleeps. A round trip over a
-    * Unix socket took 13.7 µs without, 7.4 with 5 µs and 7.1 with 20; 20 also keeps the most of a time limit's and a
-    * pooled read's round trips from sleeping.
+    * Unix socket took 13.7 µs without, and 7.4, 7.1 and 7.1 with 5, 10 and 20 µs (2026-11-15; 7.4 with 20 on
+    * 2026-11-16); 20 also keeps the most of a time limit's and a pooled read's round trips from sleeping.
     */
   inline val SpinNanos = 20_000L
 

@@ -8,6 +8,12 @@
 int gears_io_uring_spin_check(struct io_uring *ring) {
   if (io_uring_cq_ready(ring)) return 1;
   if (IO_URING_READ_ONCE(*ring->sq.kflags) & IORING_SQ_TASKRUN) return 2;
+  /* Nothing yet: a pause before the next look, which leaves the core's other hardware thread room to run. */
+#if defined(__x86_64__) || defined(__i386__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  __asm__ __volatile__("yield");
+#endif
   return 0;
 }
 

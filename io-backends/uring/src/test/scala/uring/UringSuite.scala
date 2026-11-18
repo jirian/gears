@@ -477,6 +477,40 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
+  test("a pooled read started again after parking counts once on its ring, and not at all once it is done") {
+    onPool(1) { io ?=>
+      val pool = UringBackend.pool(16, 2)
+      def take(): Received = {
+        val (r, w) = pipe()
+        rawWrite(w, "a")
+        val into = Slot[Received]()
+        io.perform(ops.read(r, pool, into))
+        into.clear()
+      }
+      val one = take() // half the pool free: the read below waits for readiness, holding no buffer
+      val (r, w) = pipe()
+      val into = Slot[Received]()
+      val (reader, performed) = performing(ops.read(r, pool, into))
+      AsyncOperations.sleep(20)
+      val two = take() // the pool empty
+      rawWrite(w, "x") // readable, and no buffer to read into: it parks on the pool
+      AsyncOperations.sleep(20)
+      assertEquals(rawRead(r), "x") // so that, started again, it finds nothing and goes back to the ring
+      one.release()
+      AsyncOperations.sleep(20)
+      assert(performed.get() == null, s"it should wait, not ${performed.get()}")
+      rawWrite(w, "y")
+      reader.awaitResult: Unit
+      assert(performed.get().nn.isSuccess, performed.get())
+      into.clear().release()
+      assertEquals(r.entriesOnRings, 0)
+      two.release()
+      close(r)
+      close(w)
+      pool.close()
+    }
+  }
+
   test("a pooled read waiting for a buffer is ended by a cancel, a time limit, or its handle's close") {
     onPool(2) { io ?=>
       val pool = UringBackend.pool(16, 1)

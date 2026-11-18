@@ -43,6 +43,13 @@ sealed abstract class UringHandle(val fd: Int, kind: String) {
     n.nn.incrementAndGet(): Unit
   }
 
+  /** How many commands have entries on the descriptor, on every ring: for tests. */
+  private[uring] def entriesOnRings: Int = {
+    var n = 0
+    rings.forEach((_, count) => n += count.get())
+    n
+  }
+
   /** A command's entries on `ring` are done with. */
   private[uring] def offRing(ring: Ring): Unit = {
     val n = rings.get(ring)

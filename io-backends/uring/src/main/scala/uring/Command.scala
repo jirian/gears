@@ -174,10 +174,11 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   /** The ring its entries are on, counted by its handle (`onRing`) until it is done with it (`release`). */
   private var ringOf: Ring | Null = null
 
-  private[uring] final def onRing(ring: Ring): Unit = {
-    handle.onRing(ring)
-    ringOf = ring
-  }
+  private[uring] final def onRing(ring: Ring): Unit =
+    if ringOf ne ring then { // a pooled read started again after parking is counted on its ring already
+      handle.onRing(ring)
+      ringOf = ring
+    }
 
   /** Lets go of its stream's read or write, and of its count on its ring: it is done with its handle for now. */
   private[uring] final def release(): Unit = {

@@ -42,10 +42,12 @@ On the worker's thread:
 | Close a handle | 1 sync cancel by descriptor on each ring that had entries on it, then `close` once its uses end | `UringHandle.close` |
 | Wake a sleeping worker from another thread | 1 `write` to an eventfd the ring always has a read pending on | `Ring.wake` |
 
-Every stream, a socket's too, is read and written with `read` and `write` (and `readv`, `writev`); an `EAGAIN` makes
-the command wait for readiness with a `POLL_ADD`, then submit itself again (`Command.finishSubmission`). The backend
-before used `recv` and `send` on sockets, which the kernel waits for itself, with `IORING_RECVSEND_POLL_FIRST` after a
-try; on this runtime that measured slower everywhere (see Measurements), so it is not used.
+Every stream, a socket's too, is read and written with `read` and `write` (and `readv`, `writev`). On a descriptor
+that is not ready the kernel waits for readiness itself, for these opcodes on a non-blocking socket or pipe too (seen
+on Linux 7.3: no completion comes until there are bytes); only a kernel that answers `EAGAIN` makes the command wait
+with a `POLL_ADD` and submit itself again (`Command.finishSubmission`). The backend before used `recv` and `send` on
+sockets, with `IORING_RECVSEND_POLL_FIRST` after a try; on this runtime they measured no better (see Measurements),
+so they are not used.
 
 A worker wakes another only while that one sleeps: it sets `signalled`, then reads `sleeping`, which the worker set
 before it looked for work, so either the worker sees the signal and does not sleep, or the waker sees it asleep and
@@ -86,7 +88,7 @@ shared runtime did not wait, at the cost of `RegularFiles`' wording; this one ke
 ## Closing a handle
 
 `Ops.close` promises that once a close completes the descriptor's number may be reused, a listener's port listened on
-again, and a peer sees the end of the stream, even while the worker that holds an entry on it is busy. The close, from
+again, and a peer sees the end of the stream. The close, from
 any thread (`UringHandle.close`):
 
 1. marks the handle closing, so that no use of it begins;
@@ -94,6 +96,9 @@ any thread (`UringHandle.close`):
    per ring by the handle, and wakes each, from its own thread; each completes with `ECANCELED` and fails as closed. A
    ring with none is left alone, so a close costs nothing on the workers a connection's futures merely passed through;
 3. closes the descriptor once the last use has ended, which completes the close op.
+
+A close therefore waits for the next turn of each worker with an entry on the handle, since only that worker reaps the
+cancelled entry and ends its use: a worker kept busy by a long task holds the close up as long.
 
 An entry prepared but not yet submitted as the close begins is turned into a no-op when its worker submits, and its
 command failed as closed; one submitted as the close begins, which the close's cancel may have missed, is cancelled
@@ -163,62 +168,49 @@ release build of the HTTP server crashed under 64 connections, three runs in thr
 request's path segment), and ran with one worker only; with the nightly it ran eight in eight. The tests are not
 affected, and pass on both.
 
-The bench (`ioUringDemos/run bench`, release-fast, Immix, both builds on the nightly), over a Unix socket, the client's
-and the server's pools one worker each, pinned to two cores; µs/op, the median and quartiles of 10 runs taking turns
-(`../gears-jirian-validation/results/2026-11-07-uring-nightly.txt`), against the build before the move to the shared
-runtime (`bench-builds/iouringdemos`). The machine was not idle (load 3–8), so the columns compare with each other,
-not with earlier tables.
+The harness, its scripts and every run's results are in [jirian/gears-bench](https://github.com/jirian/gears-bench),
+by date; the project report's chapter 5 explains the tables below. Runs before 2026-11-15 were taken on a busy machine
+(load 3 to 9), and compare only with the columns beside them.
 
-| scenario | before (ReactorCore) | shared runtime |
+The bench (`ioUringDemos/run bench`, release-fast, Immix, on the nightly), over a Unix socket, the client's and the
+server's pools one worker each, pinned to two cores; µs/op, the median and quartiles of 10 rounds taking turns
+(`results/2026-11-16-backends.txt`, load 1 to 2). *Before* is the build before the move to the shared runtime, *no
+spin* the commit before the spin (0b6ac649); cats-effect is fs2 on Scala Native, over `epoll`.
+
+| scenario | before (ReactorCore) | no spin | io_uring | cats-effect |
+| --- | --- | --- | --- | --- |
+| pingpong | 10.7 [10.1–11.6] | 13.7 [13.6–13.8] | 7.4 [7.2–7.4] | 16.7 [16.6–16.8] |
+| pingpong-deadline | 12.3 [12.1–12.5] | 14.4 [14.0–14.6] | 7.7 [7.6–7.9] | 25.0 [24.8–25.1] |
+| pipelined | 1.40 [1.38–1.42] | 1.02 [0.93–1.03] | 0.98 [0.93–1.03] | 3.67 [3.59–3.69] |
+| concurrent | 6.7 [6.6–6.7] | 6.5 [6.4–6.5] | 6.5 [6.5–7.0] | – |
+| connections | 42 [42–42] | 36 [35–36] | 31 [30–31] | – |
+| timers | 181 [178–186] | 11.1 [10.8–11.4] | 11.3 [10.9–11.6] | 1.9 [1.8–2.0] |
+
+`timers`, half of whose timers are cancelled, went from 272–280 to 17–18 µs on the build before with nothing changed
+but gears' stackless cancellation exceptions (2026-10-30); on the shared runtime, which built two per cancel, it had
+been 419.
+
+HTTP against Go's `net/http` (`http_bench.py`, 5 rounds, the server on hardware threads 0 and 1, the load generator on
+4 to 7, two of which share the server's cores; thousands of requests per second; `results/2026-11-18-http.txt`, at
+7f50fe77):
+
+| path, connections | Go net/http | io_uring |
 | --- | --- | --- |
-| pingpong | 16.51 [16.09–17.22] | 17.20 [16.93–17.59] |
-| pingpong-deadline | 17.65 [17.34–17.93] | 16.92 [16.37–17.30] |
-| pipelined | 1.93 [1.82–1.98] | 1.26 [1.21–1.33] |
-| timers | 243 [242–245] | 419 [417–423] |
-| concurrent | 9.63 [9.52–9.76] | 9.64 [9.12–9.82] |
-| connections | 60.6 [58.6–61.3] | 53.9 [53.1–55.1] |
+| `/hello`, 1 | 29.3 | 35.8 |
+| `/hello`, 64 | 72.8 | 75.0 |
+| `/items/42`, 1 | 27.9 | 33.2 |
+| `/items/42`, 64 | 68.4 | 65.6 |
 
-So the shared runtime costs about 4% on ping-pong, gains as much with deadlines, is level on `concurrent`, and is
-faster on `pipelined` (35%) and `connections` (11%). `timers`, half of whose timers are cancelled, is slower for a
-reason outside the backend: counted with gdb, a cancel now builds two stack-traced `CancellationException`s instead of
-one (gears' `await`, which the runtime's `performWithin` goes through, and the future's own), each costing about
-250 µs in Scala Native's stack walk on Linux. Stackless cancellation exceptions in gears core (branch
-`stackless-cancellation`, proposed separately) take it to 18 µs: the final run below.
-
-The final run (2026-11-08, `results/2026-11-08-final-backends.txt`, load 6–9, same setup), with stackless cancels,
-against the same build before:
-
-| scenario | before (ReactorCore) | shared runtime, stackless cancels |
-| --- | --- | --- |
-| pingpong | 23.77 [20.05–32.47] | 22.76 [20.82–27.40] |
-| pingpong-deadline | 24.58 [20.95–27.75] | 26.85 [20.66–32.94] |
-| pipelined | 2.22 [2.12–2.49] | 1.71 [1.54–2.32] |
-| timers | 283 [266–307] | 18.4 [17.1–21.0] |
-| concurrent | 13.98 [13.14–15.99] | 13.32 [11.63–14.19] |
-| connections | 85.4 [75.5–106.4] | 69.4 [63.6–77.5] |
-
-HTTP in the same session (`results/2026-11-08-final-http.txt`, 5 rounds): 11.9k against 9.8k requests per second on
-`/hello` with one connection, 23.8k against 19.6k on 64; Go 17.2k and 54.0k.
-
-HTTP (`http_bench.py`, 3 rounds, the server pinned to two cores and the load generator to four; requests per second,
-median; `results/2026-11-07-http-nightly.txt`):
-
-| path, connections | Go net/http | before | shared runtime |
-| --- | --- | --- | --- |
-| `/hello`, 1 | 20,474 | 12,212 | 14,506 |
-| `/hello`, 64 | 58,590 | 24,254 | 27,750 |
-| `/items/42`, 1 | 19,788 | 12,538 | 15,197 |
-| `/items/42`, 64 | 57,087 | 25,989 | 28,286 |
-
-The shared runtime serves 9–21% more requests than the build before, at lower latency (p99 at 64 connections 3.6–3.8
-against 4.6–5.0 ms), with no errors; Go is still ahead.
-
-`recv`/`send` on sockets, as the backend before had them, against `read`/`write`, measured on 0.5.12 builds (8 runs,
-`results/2026-11-07-uring-recv.txt`): slower in every scenario (ping-pong 21.2 against 19.4 µs/op), so not used.
+`recv`/`send` on sockets, as the backend before had them, against `read`/`write`: on a busy machine slower in every
+scenario (ping-pong 21.2 against 19.4 µs/op, `results/2026-11-07-uring-recv.txt`); on a quiet one within each other's
+quartiles, 6% faster in `concurrent` and 3% slower in `connections` (`results/2026-11-15-uring-recv.txt`). Not used.
 
 ## Open
 
-- Measuring on a quiet machine, against the build before the move (`bench-builds/iouringdemos`).
+- The spin's cost: what its 20 µs cost a machine busy with other work, and whether the pause added to it (2026-11-18,
+  for the core's other hardware thread) changes a round trip; neither is measured yet.
+- A close waits for the next turn of each worker with an entry on the handle, since only that worker reaps it: a
+  worker kept busy by a long task holds the close up as long.
 - The backend's own exceptions on hot paths (`CancellationException` in a withdrawal, `TimeoutException`,
   `HandleClosedException`) are stackless since 2026-11-08, the first with the core change's `gears.async.cancellation()`:
   this backend depends on it until that is merged.

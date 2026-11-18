@@ -1,10 +1,10 @@
 // from https://github.com/armanbilge/fs2-io_uring/blob/main/uring/src/main/scala/fs2/io/uring/unsafe/uring.scala
 // Modified for gears: moved to package gears.async.io.uring, linked with @link("uring"), shim symbols renamed to
 // gears_*, and fs2's unused bindings removed (close, connect, shutdown and socket preparations, user data, timed waits).
-// Ours, not fs2's: the poll_add, read, write, readv, writev, fsync, openat, sendmsg and recvmsg preparations; the
-// synchronous cancels (cancel_fd, cancel_now); a submit and wait in one call; io_uring_sq_ready, get_events, size,
-// features and cq_overflowing. The struct io_uring mirror only types the pointer: the reactor allocates io_uring_size()
-// bytes for it, so a liburing whose struct grows cannot be written past.
+// Ours, not fs2's: the poll_add, read, write, readv, writev, fsync, sendmsg and recvmsg preparations; the synchronous
+// cancels (cancel_fd, cancel_now); a submit and wait in one call; io_uring_sq_ready, get_events, size, features and
+// cq_overflowing. struct io_uring is opaque here: the ring allocates io_uring_size() bytes for it, so a liburing whose
+// struct grows cannot be written past.
 
 /*
  * Copyright 2022 Arman Bilge
@@ -44,16 +44,8 @@ private[uring] object uring {
   final val IORING_OP_SENDMSG = 9
   final val IORING_OP_RECVMSG = 10
   final val IORING_OP_ACCEPT = 13
-  final val IORING_OP_ASYNC_CANCEL = 14
-  final val IORING_OP_OPENAT = 18
   final val IORING_OP_READ = 22
   final val IORING_OP_WRITE = 23
-  final val IORING_OP_SEND = 26
-  final val IORING_OP_RECV = 27
-
-  /** A send's or a receive's flag (in `ioprio`): wait for readiness before trying, for one just tried without waiting.
-    */
-  final val IORING_RECVSEND_POLL_FIRST = 1
 
   type __u8 = CUnsignedChar
   type __u16 = CUnsignedShort
@@ -69,63 +61,10 @@ private[uring] object uring {
   type iovec = CStruct2[Ptr[Byte], size_t]
   type msghdr = CStruct7[Ptr[Byte], CUnsignedInt, Ptr[iovec], size_t, Ptr[Byte], size_t, CInt]
 
-  type io_uring = CStruct9[
-    io_uring_sq,
-    io_uring_cq,
-    CUnsignedInt,
-    CInt,
-    CUnsignedInt,
-    CInt,
-    __u8,
-    CArray[__u8, Nat._3],
-    CUnsignedInt
-  ]
-
-  type io_uring_cq = CStruct12[
-    Ptr[CUnsignedInt],
-    Ptr[CUnsignedInt],
-    Ptr[CUnsignedInt],
-    Ptr[
-      CUnsignedInt
-    ],
-    Ptr[CUnsignedInt],
-    Ptr[CUnsignedInt],
-    Ptr[io_uring_cqe],
-    size_t,
-    Ptr[
-      Byte
-    ],
-    CUnsignedInt,
-    CUnsignedInt,
-    CArray[CUnsignedInt, Nat._2]
-  ]
+  /** liburing's ring, only ever behind a pointer: `Ring` allocates `io_uring_size()` bytes for it. */
+  type io_uring = CStruct0
 
   type io_uring_cqe = CStruct3[__u64, __s32, __u32]
-
-  type io_uring_sq = CStruct15[
-    Ptr[CUnsignedInt],
-    Ptr[CUnsignedInt],
-    Ptr[CUnsignedInt],
-    Ptr[
-      CUnsignedInt
-    ],
-    Ptr[CUnsignedInt],
-    Ptr[CUnsignedInt],
-    Ptr[CUnsignedInt],
-    Ptr[
-      io_uring_sqe
-    ],
-    CUnsignedInt,
-    CUnsignedInt,
-    size_t,
-    Ptr[Byte],
-    CUnsignedInt,
-    CUnsignedInt,
-    CArray[
-      CUnsignedInt,
-      Nat._2
-    ]
-  ]
 
   type io_uring_sqe =
     CStruct10[__u8, __u8, __u16, __s32, __u64, __u64, __u32, __u32, __u64, CArray[__u64, Nat._3]]

@@ -40,9 +40,10 @@ private[uring] final class UringDeadline(initial: Long) extends AbstractMakeDead
   * reaps it, and keeps its state (`UringScheduler.UringWorker`); the kernel owns its buffers from the submission until
   * its completion has been reaped, or until a cancel has made the kernel let go of it.
   *
-  * A command on a non-blocking descriptor that has nothing to do yet may complete with `EAGAIN`, where the kernel does
-  * not wait for it itself: it then waits for readiness with a poll for `readinessEvents`, and is submitted again once
-  * the descriptor is ready, rather than spinning.
+  * On a descriptor that is not ready, the kernel waits for readiness itself, for a read or a write on a non-blocking
+  * socket or pipe too (seen on Linux 7.3). Should a kernel complete one with `EAGAIN` instead, the command waits for
+  * readiness with a poll for `readinessEvents` and is submitted again once the descriptor is ready, rather than
+  * spinning.
   *
   * Once its completion has been applied (`finish`), its work is done (`committed`): a performer cancelled meanwhile
   * gets its outcome all the same, as `Io.perform` has it.
@@ -864,7 +865,7 @@ private[uring] final class OpenDatagram(
 
 /** Receives one packet into `buf`, cleared first and left flipped, and writes its sender into `from`; on a connected
   * socket, whose sender is its peer, `from` is null. Done once a packet has arrived; the bytes beyond `buf`'s capacity
-  * are dropped (see `IpDatagrams.receive`). Receives on one socket run side by side, each taking its own packet.
+  * are dropped (see `IpDatagrams.receive`). Receives on one socket take turns, in the order they began (`Turns`).
   */
 private[uring] final class ReceiveFrom(val handle: DatagramHandle, buf: ByteBuffer, from: Slot[IpSocketAddress] | Null)
     extends Command {
@@ -919,7 +920,7 @@ private[uring] final class ReceiveFrom(val handle: DatagramHandle, buf: ByteBuff
 
 /** Sends one packet, consuming `bufs`: from a bound socket to `to`, or from a connected one, `to` null, to its peer. An
   * empty packet is refused on a connected socket (see `IpDatagrams.send`). Done once it has gone, whole. Sends on one
-  * socket run side by side.
+  * socket take turns, in the order they began (`Turns`).
   */
 private[uring] final class SendTo(val handle: DatagramHandle, bufs: Array[ByteBuffer], to: IpSocketAddress | Null)
     extends Command {

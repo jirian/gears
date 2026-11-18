@@ -354,9 +354,10 @@ private[http] object Server {
       val response =
         try answer(request, body)
         catch {
-          case e: CancellationException => throw e
-          case e: HttpError             => e.response
-          case e: Exception             =>
+          case e: CancellationException               => throw e
+          case e: HttpError                           => e.response
+          case _: Exception if source.failure != null => bodyFailed(source.failure.nn)
+          case e: Exception                           =>
             config.log(s"The handler of ${h.method} ${url.rawPath} failed: $e")
             Response.text("Internal Server Error\n", Status.InternalServerError)
         }
@@ -383,6 +384,16 @@ private[http] object Server {
           if !carriesOn && !bodyDone && !body.isInstanceOf[Body.Bytes] then linger(stream)
           carriesOn
       }
+    }
+
+    /** The answer to a request whose body could not be read, whatever the handler then threw: the client's fault, not
+      * the handler's.
+      */
+    private def bodyFailed(failure: Throwable): Response = failure match {
+      case e: HttpError        => e.response
+      case e: Wire.Malformed   => Response.text(s"${e.getMessage}\n", e.status)
+      case _: TimeoutException => Response.text("Request Timeout\n", Status.RequestTimeout)
+      case _                   => Response.text("Bad Request\n", Status.BadRequest)
     }
 
     /** Answers `request` with the routes, in the connection's group, which the watch cancels if the client goes away.

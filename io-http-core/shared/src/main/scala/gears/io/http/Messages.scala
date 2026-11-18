@@ -53,14 +53,16 @@ final case class Request(
       }
       .toMap
 
-  /** The body decoded as an `A`: a 400 `HttpError` if a decoder fails on it, as a server answers a body it cannot read.
+  /** The body decoded as an `A`: a 400 `HttpError` if a decoder fails on it. A body that cannot be read, malformed, cut
+    * short or too slow, fails with what reading it did, which a server answers for itself.
     */
   def as[A](using decoder: BodyDecoder[A], async: Async): A =
     try body.as[A]
     catch {
       case e: HttpError => throw e
       case e: Exception
-          if !e.isInstanceOf[java.io.IOException] && !e.isInstanceOf[java.util.concurrent.CancellationException] =>
+          if !e.isInstanceOf[java.io.IOException] && !e.isInstanceOf[java.util.concurrent.CancellationException] &&
+            !e.isInstanceOf[java.util.concurrent.TimeoutException] =>
         throw HttpError(Status.BadRequest, s"Malformed body: ${e.getMessage}")
     }
 

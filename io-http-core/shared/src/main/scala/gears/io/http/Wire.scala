@@ -299,7 +299,20 @@ private[http] object Wire {
     /** Whether all of it has been read, so that the connection may carry another message. */
     def complete: Boolean = done
 
+    /** What a read of it failed with, if one did: a server answers the client for that, not the handler. */
+    def failure: Throwable | Null = failed
+    private var failed: Throwable | Null = null
+
     def read(buf: ByteBuffer)(using Async): Int =
+      try readBody(buf)
+      catch {
+        case e: java.util.concurrent.CancellationException => throw e
+        case e: Throwable                                  =>
+          failed = e
+          throw e
+      }
+
+    private def readBody(buf: ByteBuffer)(using Async): Int =
       if done then -1
       else {
         if !started then {

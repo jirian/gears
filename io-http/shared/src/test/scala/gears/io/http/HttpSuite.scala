@@ -112,6 +112,25 @@ class HttpSuite extends FunSuite {
     }
   }
 
+  test("a body the client sends malformed or too slowly is the client's 400 or 408, not a 500") {
+    val logged = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val routes = Routes(
+      POST("/text") { r => r.text() },
+      POST("/json") { r => r.as[String](using BodyCodec.string) }
+    )
+    val config = quiet.copy(timeouts = ServerTimeouts(read = 300.millis), log = m => logged.add(m): Unit)
+    withServer(routes, config) { server =>
+      for path <- Seq("/text", "/json") do {
+        val chunked = s"POST $path HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+        val malformed = rawExchange(server, chunked + "2;\nxx\r\nhi\r\n0\r\n\r\n")
+        assert(malformed.startsWith("HTTP/1.1 400 "), s"$path: $malformed")
+        val slow = rawExchange(server, s"POST $path HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc")
+        assert(slow.startsWith("HTTP/1.1 408 "), s"$path: $slow")
+      }
+    }
+    assert(logged.isEmpty, s"a client's fault is not logged as the handler's: $logged")
+  }
+
   test("a head too large is a 431, a malformed one a 400, and both close the connection") {
     withServer(Routes(GET("/") { _ => "ok" }), quiet.copy(limits = Limits(head = 2048))) { server =>
       val huge = rawExchange(server, s"GET / HTTP/1.1\r\nHost: x\r\nX-Big: ${"a" * 4096}\r\n\r\n")

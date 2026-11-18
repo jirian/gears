@@ -398,27 +398,9 @@ private[http] object Wire {
 
   /** The head of a message: its first line and `headers`, as bytes, ISO-8859-1, as they go out. */
   def head(firstLine: String, headers: Headers): ByteBuffer = {
-    val b = new java.lang.StringBuilder(firstLine.length + 32 * headers.size + 4)
-    b.append(firstLine).append("\r\n")
-    val it = headers.iterator
-    while it.hasNext do {
-      val (k, v) = it.next()
-      b.append(k).append(": ").append(v).append("\r\n")
-    }
-    b.append("\r\n")
-    val out = new Array[Byte](b.length)
-    var i = 0
-    while i < out.length do {
-      val c = b.charAt(i)
-      // Never truncated: U+010A would go out as LF. Headers are checked as they are built; this guards the first line.
-      if c > '\u00ff' || (i < firstLine.length && (c == '\r' || c == '\n' || c == '\u0000')) then
-        throw new IllegalArgumentException(
-          s"A character that may not go out in a message head: U+${c.toInt.toHexString}"
-        )
-      out(i) = c.toByte
-      i += 1
-    }
-    ByteBuffer.wrap(out)
+    val out = new OutBuffer(firstLine.length + 32 * headers.size + 4)
+    out.putHead(firstLine, headers)
+    out.take().nn
   }
 
   /** A connection's bytes on their way out: a message's head, and with it a body or a chunk small enough to copy, all

@@ -100,13 +100,11 @@ private[uring] object uring {
 
   @name("gears_io_uring_cancel_now")
   @blocking
-  def io_uring_cancel_now(ring: Ptr[io_uring], user_data: __u64, flags: CInt, wait: CInt): CInt = extern
+  def io_uring_cancel_now(ring: Ptr[io_uring], user_data: __u64, wait: CInt): CInt = extern
 
   @name("gears_io_uring_cancel_fd")
   @blocking
   def io_uring_cancel_fd(ring: Ptr[io_uring], fd: CInt): CInt = extern
-
-  final val IORING_ASYNC_CANCEL_ANY = 1 << 2
 
   @name("gears_io_uring_size")
   def io_uring_size(): CSize = extern

@@ -172,7 +172,7 @@ private[uring] final class Ring(entries: Int, completions: Int) {
     * go of it: 0 if it was cancelled, its completion then `ECANCELED`; `-ENOENT` if it had finished, its completion in
     * the ring; else what the kernel said.
     */
-  def cancelNow(id: Long): Int = io_uring_cancel_now(ring, id.toULong, 0, 1)
+  def cancelNow(id: Long): Int = io_uring_cancel_now(ring, id.toULong, 1)
 
   /** Cancels every entry on descriptor `fd` in the kernel, from any thread, without waiting for one a kernel worker is
     * running: each completes with `ECANCELED`, unless it finished first.
@@ -253,7 +253,7 @@ private[uring] object Ring {
     */
   private def unsupported(ring: Ptr[io_uring]): IOException | Null = {
     val features = io_uring_features(ring).toInt
-    val probe = io_uring_cancel_now(ring, InternalId.toULong, 0, 1)
+    val probe = io_uring_cancel_now(ring, InternalId.toULong, 1)
     if probe != -errno.ENOENT || (features & IORING_FEAT_NODROP) == 0 || (features & IORING_FEAT_EXT_ARG) == 0 then
       new IOException(s"The io_uring backend needs Linux 6.0 or later (synchronous cancel: $probe)")
     else null

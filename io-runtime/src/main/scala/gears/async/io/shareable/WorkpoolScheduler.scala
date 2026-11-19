@@ -5,23 +5,17 @@ import gears.async.AsyncOperations
 import gears.async.AsyncSupport
 import gears.async.Cancellable
 import gears.async.CompletionGroup
-import gears.async.Listener
 import gears.async.Scheduler
 import gears.async.io.Backend
 import gears.async.io.Interface
 import gears.async.io.Io
-import gears.async.native.NativeSuspend
 
 import scala.concurrent.duration.FiniteDuration
-import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
 
 import WorkpoolScheduler.{ReentrantOp, AsyncOp, Worker}
 import gears.async.io.shareable.TimerHeap.{TimerOp, TimerSource}
-import gears.async.io.shareable.WorkpoolScheduler.DoAfter
-import gears.async.SuspendSupport
-import gears.async.io.shareable.TimerHeap
 
 abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, I <: Interface { type Op = Op1 }](val backend: Backend { type Interface = I }, val ops: I, workers: Int)
     extends Scheduler
@@ -35,11 +29,6 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, I <: Interface { 
     if worker != null then worker.resumeNext(() => suspension.resume(arg))
     // A pool that has shut down refuses it: like a timer still pending, that waiter is never resumed.
     else nextWorker().submit(() => suspension.resume(arg)): Unit
-
-  /** Schedule a computation with the suspension boundary already created. */
-  // override private[async] def scheduleBoundary(body: Label[Unit] ?=> Unit)(using s: Scheduler): Unit =
-  //   s.execute(() => boundary(body))
-
 
   def makeWorker(id: Int): Worker[Op1, I]
 
@@ -167,8 +156,6 @@ object WorkpoolScheduler {
   }
 
   abstract class Worker[Op1 <: TimerOp & ReentrantOp, I <: Interface { type Op = Op1 }](val id: Int, val ops: I) extends TimerHeap[Op1 | DoAfter] {
-    // private[kqueue] val inbox: java.util.concurrent.ArrayBlockingQueue[Runnable] =
-    //   new java.util.concurrent.ArrayBlockingQueue[Runnable](1024)
     private val inbox: java.util.concurrent.ConcurrentLinkedQueue[Runnable] =
       new java.util.concurrent.ConcurrentLinkedQueue[Runnable]
 

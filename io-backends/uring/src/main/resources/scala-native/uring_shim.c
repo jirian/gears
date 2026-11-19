@@ -87,17 +87,15 @@ static int cancel(struct io_uring *ring, struct io_uring_sync_cancel_reg *reg, i
   return io_uring_register_sync_cancel(ring, reg);
 }
 
-/* Cancels the request with `user_data`, or with IORING_ASYNC_CANCEL_ANY in `flags` every request. One the kernel had
- * not started, or had armed a poll for, is cancelled at once, and one that finished first was already done: either
- * way its completion is in the ring when this returns on the ring's own thread. One running in a kernel worker, such
- * as a read of a regular file, cannot be stopped: with `wait` this waits for it to finish, and otherwise returns
- * -ETIME (or -EALREADY), leaving it running. -ENOENT if none was found. Linux 6.0 or later; earlier kernels fail with
- * -EINVAL. */
-int gears_io_uring_cancel_now(struct io_uring *ring, unsigned long long user_data, int flags, int wait) {
+/* Cancels the request with `user_data`. One the kernel had not started, or had armed a poll for, is cancelled at
+ * once, and one that finished first was already done: either way its completion is in the ring when this returns on
+ * the ring's own thread. One running in a kernel worker, such as a read of a regular file, is interrupted if it waits
+ * and otherwise cannot be stopped: with `wait` this waits for it to let go, and otherwise returns -ETIME (or
+ * -EALREADY), leaving it running. -ENOENT if none was found. Linux 6.0 or later; earlier kernels fail with -EINVAL. */
+int gears_io_uring_cancel_now(struct io_uring *ring, unsigned long long user_data, int wait) {
   struct io_uring_sync_cancel_reg reg;
   memset(&reg, 0, sizeof(reg));
   reg.addr = user_data;
-  reg.flags = flags;
   return cancel(ring, &reg, wait);
 }
 

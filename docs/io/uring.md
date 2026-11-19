@@ -1,8 +1,9 @@
 # The io_uring backend: a design note
 
 `UringBackend` (`io-backends/uring`, package `gears.async.io.uring`) is the backend for Scala Native on Linux 6.0 or
-later, through liburing. It runs on the shared native runtime (`io-runtime`, `gears.async.io.shareable`, from Jamie
-Thompson's `WorkpoolScheduler`): a pool of workers, each with an inbox, a ready queue and a heap of timers, which is the
+later, through liburing. It runs on the shared native runtime (`io-runtime`, `gears.async.io.shareable`, based on Jamie
+Thompson's `WorkpoolScheduler`, `TimerHeap` and `TimerHeapOp` at 44bb0119 of his `async-io-kqueue-basepoint` branch,
+tag `jamie-runtime-base`): a pool of workers, each with an inbox, a ready queue and a heap of timers, which is the
 program's gears scheduler and performs its ops. Each worker owns one ring (`Ring`), which is its poller: it prepares
 its ops' entries and reaps their completions on its own thread. This note records what an op costs, how an op is taken
 back from a kernel that owns its buffers, how a close reaches entries on other rings, and what is open.
@@ -71,7 +72,7 @@ nothing. The runtime's protocol (`WorkpoolScheduler.performWithin`) is: await th
 - **Work already done is delivered.** A completion applied before the cancel reached it (`committed`) is delivered to
   the performer even though it was cancelled, and `perform` returns: the bytes read are in its buffer, and a cancel
   that came too late did not happen first. This is the data-loss race the 2026-10-16 review found, settled on gears'
-  listener lock (see `io-runtime-on-jamie-base` in the docs repository for the runtime's side).
+  listener lock (`AbstractTimerHeapOp.timerWakeup`, `committed`).
 - **A time limit** takes the op back first (`limitReached`): only once the kernel has let go does `perform` throw
   `TimeoutException`; if the op finished first, it completes. One whose completion failed and was applied as its time
   ran out (`Command.applied`) is out of use, and fails with `TimeoutException`; before that check it was never fired
@@ -218,8 +219,8 @@ quartiles, 6% faster in `concurrent` and 3% slower in `connections` (`results/20
 - A close waits for the next turn of each worker with an entry on the handle, since only that worker reaps it: a
   worker kept busy by a long task holds the close up as long.
 - The backend's own exceptions on hot paths (`CancellationException` in a withdrawal, `TimeoutException`,
-  `HandleClosedException`) are stackless since 2026-11-08, the first with the core change's `gears.async.cancellation()`:
-  this backend depends on it until that is merged.
+  `HandleClosedException`) are stackless since 2026-11-08, gears' own cancels through this repository's change to
+  the core (`gears.async.cancellation()`); a cancel's trace, for debugging, cannot be turned back on.
 - A time limit on a file op: the synchronous cancel waits for an io-wq worker's read or write to finish, a slow disk's
   or a network file system's time, and holds the op's worker, and every future on it, meanwhile. Cancelling without
   waiting, the completion then settling the op, would not.

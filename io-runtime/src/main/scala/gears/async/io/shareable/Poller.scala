@@ -1,3 +1,6 @@
+// Jamie Thompson's Poller, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears at commit 44bb0119
+// (2026-11-07), tagged jamie-runtime-base in this repository; unchanged.
+
 package gears.async.io.shareable
 
 abstract class Poller {

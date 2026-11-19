@@ -126,10 +126,9 @@ lazy val ioReferenceDemos =
 // The runtime the native backends share (`gears.async.io.shareable`): a pool of workers, each with an inbox and a heap
 // of timers, that is the program's scheduler and performs its ops, cancelling them safely. A backend gives each worker
 // its poller by overriding `Poller.waitForDeadline` and `wake`. Scala Native only: on the JVM gears' fibers are
-// virtual threads, which do not run on threads of ours. Its four files are Jamie Thompson's, from his branch
-// `async-io-kqueue-basepoint` (44bb011): `Poller` and `TimerHeap` unchanged, `TimerHeapOp` and `WorkpoolScheduler`
-// with small changes for completion-based backends (work already done is delivered, a time limit takes its op back
-// first, atomic entry), to be offered back to him.
+// virtual threads, which do not run on threads of ours. Its four files, and its TimerHeapSuite and TimerHeapOpSuite,
+// are based on Jamie Thompson's, from his branch `async-io-kqueue-basepoint` of github.com/bishabosha/gears at 44bb0119
+// (tag `jamie-runtime-base`), changed since for completion-based backends; each file says how.
 lazy val ioRuntime =
   (project in file("io-runtime"))
     .enablePlugins(ScalaNativePlugin)

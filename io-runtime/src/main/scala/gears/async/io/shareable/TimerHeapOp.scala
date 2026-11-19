@@ -1,3 +1,8 @@
+// Based on Jamie Thompson's TimerHeapOp, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears at
+// commit 44bb0119 (2026-11-07), tagged jamie-runtime-base in this repository. Changed since: work the poller has done
+// already is delivered even to a cancelled performer (`committed`, `succeeded`), a time limit takes its op back from
+// the poller first (`limitReached`), entry is atomic, a time-out has no stack trace, and the time limit takes no lock.
+
 package gears.async.io.shareable
 
 import scala.util.Try

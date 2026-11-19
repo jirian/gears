@@ -1,3 +1,8 @@
+// Based on Jamie Thompson's WorkpoolScheduler, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears
+// at commit 44bb0119 (2026-11-07), tagged jamie-runtime-base in this repository. Changed since: it is the `Io` of
+// main's capability interfaces, a cancelled performer whose op did its work gets it (`succeeded`), and a worker is
+// found from its thread.
+
 package gears.async.io.shareable
 
 import gears.async.Async

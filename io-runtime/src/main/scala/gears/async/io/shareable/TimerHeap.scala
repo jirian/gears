@@ -1,3 +1,7 @@
+// Based on Jamie Thompson's TimerHeap, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears at
+// commit 44bb0119 (2026-11-07), tagged jamie-runtime-base in this repository. Changed since: a timer's key is never
+// negative, and a timer is taken off for good and marked so in one step (`takeOff`, `claimFiring`).
+
 package gears.async.io.shareable
 
 import TimerHeap.{TimerOp, TimerSource}

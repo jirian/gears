@@ -1,3 +1,6 @@
+// Based on Jamie Thompson's TimerHeapOpSuite, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears
+// at commit 44bb0119 (2026-11-07), tagged jamie-runtime-base in this repository..
+
 package gears.async.io
 package shareable
 

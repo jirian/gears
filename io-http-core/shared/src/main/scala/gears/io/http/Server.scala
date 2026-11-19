@@ -123,7 +123,11 @@ private[http] object Server {
   /** What a server's connections share: whether it is stopping, how many there are, and each, so that stopping closes
     * the idle ones.
     */
-  final class State(val async: gears.async.AsyncOperations) {
+  /** Idle connections wait for their next request with pooled reads of these. */
+  inline val PoolBufferSize = 4096
+  inline val PoolBuffers = 256
+
+  final class State(val async: gears.async.AsyncOperations, val pool: gears.async.io.BufferPool) {
     val stopping = new AtomicBoolean(false)
     val connections = new AtomicInteger(0)
     val open = java.util.concurrent.ConcurrentHashMap.newKeySet[Connection]()
@@ -177,7 +181,7 @@ private[http] object Server {
   ): Server = {
     val tlsContext = config.tls.map(Tls.serverContext)
     val listener = Tcp.listen(config.host, config.port)
-    val state = new State(io)
+    val state = new State(io, io.backend.pool(PoolBufferSize, PoolBuffers))
     val done = Future {
       try
         Async.group {
@@ -220,7 +224,11 @@ private[http] object Server {
           state.acceptEnded()
           state.drained.await
         }
-      finally listener.close()
+      finally {
+        listener.close()
+        try state.pool.close()
+        catch case e: IllegalArgumentException => config.log(s"The read pool did not close: ${e.getMessage}")
+      }
     }
     new Server(config, listener, done, state)
   }
@@ -308,7 +316,7 @@ private[http] object Server {
       idle = input.buffered == 0
       if idle && state.stopping.get() then return false
       val head =
-        try Wire.readRequestHead(input, config.limits, t.idle, t.header, () => idle = false)
+        try Wire.readRequestHead(input, config.limits, t.idle, t.header, () => idle = false, state.pool, out.release)
         catch {
           case e: Wire.Malformed =>
             idle = false

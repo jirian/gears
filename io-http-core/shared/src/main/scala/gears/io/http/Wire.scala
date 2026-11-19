@@ -9,6 +9,8 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.Duration
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.duration.FiniteDuration
 
 /** HTTP/1.1's syntax (RFC 9112), as the server and the client read and write it. Parsing is strict where leniency is
   * what request smuggling exploits: whitespace before a header's colon, folded lines, a `Transfer-Encoding` beside a
@@ -41,16 +43,21 @@ private[http] object Wire {
   /** Reads a request's head, within `timeout` from its first byte; null if the stream ended, or `idle` passed, before
     * any byte came.
     */
+  /** How long a kept-alive connection waits for its next request with its own buffers. */
+  val IdleGrace: FiniteDuration = 1.second
+
   def readRequestHead(
       input: BufferedInput,
       limits: Limits,
       idle: Duration,
       timeout: Duration,
-      begun: () => Unit = () => ()
+      begun: () => Unit = () => (),
+      pool: gears.async.io.BufferPool | Null = null,
+      released: () => Unit = () => ()
   )(using Async): RequestHead | Null = {
     if input.buffered == 0 then {
       val more =
-        try input.fill(idle, grow = true)
+        try input.awaitMore(idle, IdleGrace, pool, released)
         catch case _: java.util.concurrent.TimeoutException => false
       if !more then return null
       begun() // the head's first bytes are in: the connection is no longer idle
@@ -419,9 +426,16 @@ private[http] object Wire {
     /** Drops what it holds, unwritten. */
     def reset(): Unit = count = 0
 
+    /** Lets go of its array if empty; the next put allocates one. */
+    def release(): Unit =
+      if count == 0 && bytes.length > 0 then {
+        bytes = new Array[Byte](0)
+        view = ByteBuffer.wrap(bytes)
+      }
+
     private def room(n: Int): Unit =
       if count + n > bytes.length then {
-        bytes = java.util.Arrays.copyOf(bytes, math.max(2 * bytes.length, count + n))
+        bytes = java.util.Arrays.copyOf(bytes, math.max(math.max(2 * bytes.length, initial), count + n))
         view = ByteBuffer.wrap(bytes)
       }
 

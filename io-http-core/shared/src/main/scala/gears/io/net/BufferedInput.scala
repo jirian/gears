@@ -4,8 +4,12 @@ import gears.async.Async
 
 import java.io.EOFException
 import java.io.IOException
+import gears.async.io.BufferPool
+
 import java.nio.ByteBuffer
+import java.util.concurrent.TimeoutException
 import scala.concurrent.duration.Duration
+import scala.concurrent.duration.FiniteDuration
 
 /** Reads `stream` through a buffer of its own, for parsing: lines and delimited heads are found in place, and bytes
   * copied out in bulk. The buffer starts at `initial` bytes and grows, up to `max`, only while a delimited read needs
@@ -34,6 +38,7 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
       if start == end then {
         start = 0
         end = 0
+        if buf.capacity() == 0 then buf = ByteBuffer.allocate(initial)
       } else if end == buf.capacity() then {
         if start > 0 then {
           System.arraycopy(buf.array(), start, buf.array(), 0, end - start)
@@ -54,6 +59,75 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
       } else {
         end += n
         true
+      }
+    }
+
+  /** The bytes of buffer it holds. */
+  def holding: Int = buf.capacity()
+
+  /** Lets go of its buffer if nothing is buffered; the next read allocates one. */
+  def release(): Unit =
+    if start == end then {
+      buf = BufferedInput.Empty
+      start = 0
+      end = 0
+    }
+
+  /** Waits up to `idle` for more, with nothing buffered: false at the end of the stream or if nothing comes.
+    *   - past `grace`: releases its buffer, calls `released`, and waits with a pooled read from `pool`
+    *   - no pool, a stream without pooled reads, or a pool that fails: an ordinary read throughout
+    */
+  def awaitMore(idle: Duration, grace: FiniteDuration, pool: BufferPool | Null, released: () => Unit)(using
+      Async
+  ): Boolean =
+    if atEnd then false
+    else if pool == null || !stream.pooledReads || (idle match {
+        case d: FiniteDuration => d <= grace
+        case _                 => false
+      })
+    then fill(idle, grow = true)
+    else {
+      val deadline = Stream.limit(idle) match {
+        case null => Long.MaxValue
+        case d    => System.nanoTime() + d.nn.toNanos
+      }
+      def left: Duration =
+        if deadline == Long.MaxValue then Duration.Inf
+        else {
+          val nanos = deadline - System.nanoTime()
+          if nanos <= 0 then throw new BufferedInput.TimedOut(s"Nothing in $idle")
+          Duration.fromNanos(nanos)
+        }
+      var quiet = false
+      val early =
+        try fill(grace, grow = true)
+        catch
+          case _: TimeoutException =>
+            quiet = true
+            false
+      if !quiet then early
+      else {
+        release()
+        released()
+        val got =
+          try stream.read(pool.nn, left)
+          catch case _: IOException if pool.nn.available == 0 => null
+        if got == null then fill(left, grow = true)
+        else
+          try {
+            val b = got.buffer
+            val n = b.remaining()
+            if n == 0 then {
+              atEnd = true
+              false
+            } else {
+              buf = ByteBuffer.allocate(math.max(initial, n))
+              b.get(buf.array(), 0, n)
+              start = 0
+              end = n
+              true
+            }
+          } finally got.release()
       }
     }
 
@@ -170,6 +244,7 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
 }
 
 object BufferedInput {
+  private val Empty = ByteBuffer.allocate(0)
 
   /** A delimited read that found no delimiter within its limit. A peer's doing, so with no stack trace. */
   final class TooLong(val limit: Int) extends IOException(s"No delimiter within $limit bytes") {

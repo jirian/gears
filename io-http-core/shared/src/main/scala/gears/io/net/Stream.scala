@@ -2,8 +2,10 @@ package gears.io.net
 
 import gears.async.Async
 import gears.async.CompletionGroup
+import gears.async.io.BufferPool
 import gears.async.io.Io
 import gears.async.io.IpSocketAddress
+import gears.async.io.Received
 import gears.async.io.Slot
 import gears.async.io.StreamSockets
 import gears.async.io.UnixAddress
@@ -28,6 +30,13 @@ trait Stream {
 
   /** Writes all of `buf`, however many writes it takes, each within `timeout`. */
   def write(buf: ByteBuffer, timeout: Duration = Duration.Inf)(using Async): Unit
+
+  /** Whether `read(pool, ...)` is supported. */
+  def pooledReads: Boolean = false
+
+  /** Reads into a buffer of `pool` once a byte has arrived; an empty one at the end of the stream. */
+  def read(pool: BufferPool, timeout: Duration)(using Async): Received =
+    throw new UnsupportedOperationException("No pooled reads on this stream")
 
   /** Writes all of `bufs`, in order, with as few writes as the stream can manage, each within `timeout`. */
   def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
@@ -101,6 +110,9 @@ final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.ops.
   private var writeOp: io.Op | Null = null
   private var writeBuffers: Array[ByteBuffer] | Null = null
   private var writevOp: io.Op | Null = null
+  private var pool: BufferPool | Null = null
+  private var pooledOp: io.Op | Null = null
+  private val received = Slot[Received]()
 
   private def perform(op: io.Op, timeout: Duration)(using Async): Unit = {
     val finite = Stream.limit(timeout)
@@ -117,6 +129,17 @@ final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.ops.
     perform(readOp.nn, timeout)
     val n = buf.position() - before
     if n == 0 then -1 else n
+  }
+
+  override def pooledReads: Boolean = true
+
+  override def read(from: BufferPool, timeout: Duration)(using Async): Received = {
+    if !(pool eq from) then {
+      pooledOp = ops.read(handle, from, received)
+      pool = from
+    }
+    perform(pooledOp.nn, timeout)
+    received.clear()
   }
 
   def write(buf: ByteBuffer, timeout: Duration)(using Async): Unit =

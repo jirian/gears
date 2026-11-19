@@ -324,6 +324,46 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
+  /** A read that the kernel runs in one of its workers (`IOSQE_ASYNC`), which on a blocking descriptor waits there. */
+  private final class ReadInKernelWorker(val handle: UringHandle, buf: ByteBuffer)
+      extends Transfer(Array(buf), copyIn = false) {
+    override protected def direction = Command.Direction.Reading
+    protected def failing: String = s"read from $handle"
+    protected def prepare(sqe: Ptr[uring.io_uring_sqe]): Unit = {
+      import uring.*
+      import uringStructOps.*
+      val b = staging.begin()(0)
+      io_uring_prep_read(sqe, fd, NativeBuffer.atPosition(b), b.remaining().toUInt, Results.currentPosition)
+      sqe.flags = (1 << 4).toUByte // IOSQE_ASYNC
+    }
+  }
+
+  test("a ring that fails has the kernel let go of a read running in its worker before the read's buffer is back") {
+    onPool(1) { io ?=>
+      val fds = stackalloc[CInt](2)
+      assertEquals(unistd.pipe(fds), 0) // blocking, so that the kernel's worker waits in the read
+      val (readEnd, writeEnd) = (fds(0), fds(1))
+      val buf = ByteBuffer.allocate(16)
+      val read = ReadInKernelWorker(new PipeSource(readEnd), buf)
+      val (reader, performed) = performing(read)
+      AsyncOperations.sleep(50) // in the kernel's worker by now
+      io.asInstanceOf[UringScheduler].failRing(new java.io.IOException("failed for the test"))
+      reader.awaitResult: Unit
+      assert(performed.get().nn.failed.toOption.exists(_.isInstanceOf[java.io.IOException]), performed.get())
+      assert(!UringScheduler.kept.contains(read), "the kernel did not say it had let go of the read")
+      val late = "late".getBytes("UTF-8")
+      assertEquals(unistd.write(writeEnd, late.asInstanceOf[ByteArray].at(0), late.length.toUSize).toInt, late.length)
+      Thread.sleep(50) // the worker's ring has failed: nothing else runs on it
+      assertEquals(buf.position(), 0)
+      assert(buf.array().forall(_ == 0), "the kernel wrote into the buffer after it was given back")
+      assertEquals(fcntl.fcntl(readEnd, fcntl.F_SETFL, fcntl.O_NONBLOCK), 0)
+      val left = new Array[Byte](16)
+      assertEquals(unistd.read(readEnd, left.asInstanceOf[ByteArray].at(0), 16.toUSize).toInt, late.length)
+      unistd.close(readEnd)
+      unistd.close(writeEnd)
+    }
+  }
+
   test("an entry counts as pending until a submission takes it, also once the queue's counters wrap") {
     val ring = new Ring(8, 16)
     try {

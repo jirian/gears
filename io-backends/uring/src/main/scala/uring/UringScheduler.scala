@@ -32,6 +32,9 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
 
   private def isWorkerOf(worker: UringWorker): Boolean = worker.isCurrent
 
+  /** Fails the calling worker's ring, as an `io_uring_enter` failing for good would: for tests. Worker thread. */
+  private[uring] def failRing(cause: Throwable): Unit = workerOfCurrentThread().asInstanceOf[UringWorker].fail(cause)
+
   final class UringWorker(id: Int, givenRing: Ring)
       extends WorkpoolScheduler.Worker[UringOp, UringOps.type](id, UringOps) {
 
@@ -201,20 +204,31 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         try own.ring.await(deadlineTask, !isEmpty(), spin = own.inFlight.nonEmpty)(dispatch)
         catch case failure: Throwable => fail(failure)
 
-    /** The ring failed: it is torn down, so that the kernel lets go of every entry, and the ops it had are failed. */
-    private def fail(cause: Throwable): Unit = {
+    /** The ring failed: each entry in the kernel is cancelled, waiting until the kernel has let go of it, since tearing
+      * the ring down does not wait for a kernel worker still reading into an entry's buffers; then the ring is torn down
+      * and the ops it had are failed. An entry the kernel does not say it has let go of keeps what its command staged
+      * for good (`UringScheduler.kept`), so that the memory goes to nothing else; its performer is failed all the same.
+      * Worker thread.
+      */
+    private[uring] def fail(cause: Throwable): Unit = {
       workerThread = Thread.currentThread()
       broken = cause
       System.err.println(s"[gears-io-uring] a worker's ring failed; its ops fail from now on: $cause")
       val o = own
-      o.ring.close()
       val held = o.inFlight.values.toList
+      val letGo = held.map(c =>
+        c.state != Command.Stage.Submitted || o.ring.pending(c.sqe) || {
+          val res = o.ring.cancelNow(c.id)
+          res == 0 || res == -errno.ENOENT
+        }
+      )
+      o.ring.close()
       o.inFlight.clear()
       o.prepared.clear()
       o.submitted.clear()
-      for command <- held do {
+      for (command, free) <- held.zip(letGo) do {
         command.outOfRing()
-        command.discardSubmission()
+        if free then command.discardSubmission() else UringScheduler.kept.add(command)
         try settle(command, Failure(new java.io.IOException("The io_uring worker's ring failed", cause)))
         catch case e: Throwable => e.printStackTrace()
       }
@@ -410,6 +424,9 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
 }
 
 private[uring] object UringScheduler {
+
+  /** The commands of failed rings whose entries the kernel may still use, kept with what they staged for good. */
+  private[uring] val kept = new java.util.concurrent.ConcurrentLinkedQueue[Command]()
 
   /** A runtime of `workers` workers, each with its ring, made here, so that one that cannot be set up, past a limit on
     * locked memory or on rings, fails this call rather than its worker's thread.

@@ -302,6 +302,28 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
+  test("a timed read cancelled from another worker as its data arrives ends, and does not hang") {
+    onPool(2) { io ?=>
+      for _ <- 1 to 2000 do {
+        val (r, w) = pipe()
+        val buf = ByteBuffer.allocate(16)
+        val reader = Future(io.perform(ops.read(r, buf), 5.seconds))
+        AsyncOperations.sleep(1)
+        // The cancel and the completion race: the cancel's withdrawal takes the read's time limit off the heap while
+        // the read's worker may be firing it.
+        val writer = new Thread(() => rawWrite(w, "x"))
+        writer.start()
+        reader.cancel()
+        val until = System.nanoTime() + 10_000_000_000L
+        while reader.poll().isEmpty && System.nanoTime() < until do AsyncOperations.sleep(1)
+        assert(reader.poll().isDefined, "the cancelled read never ended")
+        writer.join()
+        close(r)
+        close(w)
+      }
+    }
+  }
+
   test("a read cancelled while it waits in the kernel takes nothing written after") {
     onPool(2) { io ?=>
       val (r, w) = pipe()

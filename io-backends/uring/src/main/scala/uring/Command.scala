@@ -101,6 +101,9 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   @volatile private[uring] var done = false
   @volatile private[uring] var applied = false
   @volatile private[uring] var offHeap = false
+  // Taking it off the heap and saying so (`offHeap`) is one step against a firing, which looks for either: between
+  // two steps, a firing found neither, and woke no one.
+  private[uring] val offHeapLock = new Object
   @volatile private[uring] var wantOut = false
   // Counts its performances: a withdrawal handed to its worker acts on the one it was made for, not a later one.
   @volatile private[uring] var performance = 0L
@@ -1012,6 +1015,7 @@ private[uring] class BlockingTask[A](
   @volatile private var outcome: Try[Unit] = WorkpoolScheduler.SuccessUnit
   @volatile private[uring] var owner: UringScheduler#UringWorker | Null = null
   @volatile private[uring] var offHeap = false
+  private[uring] val offHeapLock = new Object // as `Command.offHeapLock`
 
   /** Checks made as it is performed: its slots empty. */
   def check(): Unit = Checks.notEmpty(slots*)
@@ -1078,7 +1082,8 @@ private[uring] class BlockingTask[A](
     val o = owner.nn
     // Not once settled: a time limit may have failed it already, with nothing in use.
     val run: Runnable = () =>
-      if !isSettled && (!hasDeadline || offHeap || o.removeTimer(this)) then timerWakeup(System.nanoTime())
+      if !isSettled && (!hasDeadline || offHeapLock.synchronized(offHeap || o.removeTimer(this))) then
+        timerWakeup(System.nanoTime())
     if !o.submit(run) then run.run() // the worker has stopped: nothing waits on its inbox
   }
 

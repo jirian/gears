@@ -90,8 +90,8 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   protected def readinessEvents: Int = 0
 
   // A performance's state, kept by its worker on the worker's thread; `outcome`, `done`, `applied`, `offHeap` (the
-  // heap's) and `wantOut` are read by the firing and by a withdrawal from other threads. `applied`: its outcome is set and nothing
-  // of it is in use, so a time limit reached as it fires has nothing to take back.
+  // heap's) and `wantOut` are read by the firing and by a withdrawal from other threads. `applied`: its outcome is set
+  // and nothing of it is in use, so a time limit reached as it fires has nothing to take back.
   private var stage = Command.Stage.Idle
   private var entryId = 0L
   private var entry: Ptr[io_uring_sqe] = null
@@ -832,42 +832,68 @@ private[uring] final class ShutdownOutput(handle: ConnectionHandle) extends AtOn
 
 // ---- Datagram sockets
 
-/** Opens an IP datagram socket, bound to `local`, and connected to `remote` if given; refused, with nothing open, if
-  * `local` is of another family than `remote`.
+/** Opens a datagram socket, IP or Unix, bound to `local`, and connected to `remote` if given; refused, with nothing
+  * open, if `local` is of another family than `remote`. A Unix one that fails once it has bound its path removes it.
   */
 private[uring] final class OpenDatagram(
-    local: IpSocketAddress | Null,
-    remote: IpSocketAddress | Null,
+    local: IpSocketAddress | UnixAddress | Null,
+    remote: IpSocketAddress | UnixAddress | Null,
     options: SocketOptions,
     into: Slot[? <: DatagramHandle]
 ) extends AtOnce {
   def run(): Unit = {
     Checks.notEmpty(into)
-    val family: IpSocketAddress = if local != null then local else remote.nn
+    val family = if local != null then local.nn else remote.nn
     val fd = Sockets.open(family, socket.SOCK_DGRAM)
-    val kind = if remote == null then SocketOption.Kind.BoundDatagram else SocketOption.Kind.ConnectedDatagram
+    val path = local match {
+      case UnixAddress(p) => p
+      case _              => null
+    }
+    val kind = (family, remote) match {
+      case (_: UnixAddress, null) => SocketOption.Kind.UnixBoundDatagram
+      case (_: UnixAddress, _)    => SocketOption.Kind.UnixConnectedDatagram
+      case (_, null)              => SocketOption.Kind.BoundDatagram
+      case _                      => SocketOption.Kind.ConnectedDatagram
+    }
+    var bound = false
     try {
       SocketOption.opening(options, kind).foreach((o, v) => Sockets.set(fd, o, v))
-      if local != null then Sockets.bind(fd, local)
-      val ipv6 = family.address.protocol == Protocol.IPv6
-      if remote != null then {
-        if !Sockets.startConnect(fd, remote) then throw new IOException(s"Failed to connect to $remote")
-        into.asInstanceOf[Slot[ConnectedDatagramHandle]].set(new ConnectedDatagramHandle(fd, ipv6))
-      } else into.asInstanceOf[Slot[BoundDatagramHandle]].set(new BoundDatagramHandle(fd, ipv6))
+      if local != null then {
+        Sockets.bind(fd, local.nn)
+        bound = true
+      }
+      val ipv6 = family match {
+        case ip: IpSocketAddress => ip.address.protocol == Protocol.IPv6
+        case _                   => false
+      }
+      if remote != null && !Sockets.startConnect(fd, remote.nn) then
+        throw new IOException(s"Failed to connect to $remote")
+      val handle = kind match {
+        case SocketOption.Kind.UnixBoundDatagram     => new UnixBoundDatagramHandle(fd, path.nn)
+        case SocketOption.Kind.UnixConnectedDatagram => new UnixConnectedDatagramHandle(fd, path)
+        case SocketOption.Kind.BoundDatagram         => new BoundDatagramHandle(fd, ipv6)
+        case _                                       => new ConnectedDatagramHandle(fd, ipv6)
+      }
+      into.asInstanceOf[Slot[DatagramHandle]].set(handle)
     } catch {
       case e: Throwable =>
         scala.scalanative.posix.unistd.close(fd)
+        if bound && path != null then Sockets.unlink(path)
         throw e
     }
   }
 }
 
-/** Receives one packet into `buf`, cleared first and left flipped, and writes its sender into `from`; on a connected
-  * socket, whose sender is its peer, `from` is null. Done once a packet has arrived; the bytes beyond `buf`'s capacity
-  * are dropped (see `IpDatagrams.receive`). Receives on one socket take turns, in the order they began (`Turns`).
+/** Receives one packet into `buf`, cleared first and left flipped, and writes its sender into `from`, an IP address or
+  * a Unix path as the socket is, the empty path for an unnamed Unix sender; on a connected socket, whose sender is its
+  * peer, `from` is null. Done once a packet has arrived; the bytes beyond `buf`'s capacity are dropped (see
+  * `IpDatagrams.receive`). Receives on one socket take turns, in the order they began (`Turns`).
   */
-private[uring] final class ReceiveFrom(val handle: DatagramHandle, buf: ByteBuffer, from: Slot[IpSocketAddress] | Null)
-    extends Command {
+private[uring] final class ReceiveFrom(
+    val handle: DatagramHandle,
+    buf: ByteBuffer,
+    from: Slot[IpSocketAddress] | Slot[UnixAddress] | Null
+) extends Command {
   Checks.checkFillable(buf)
   override def check(): Unit = {
     if from != null then Checks.notEmpty(from.nn)
@@ -906,11 +932,16 @@ private[uring] final class ReceiveFrom(val handle: DatagramHandle, buf: ByteBuff
     } else {
       staging.commit(res)
       buf.flip()
-      if from != null then
-        Sockets.read(header.name, header.msg.msg_namelen.toInt) match {
-          case ip: IpSocketAddress => from.nn.set(ip)
-          case other               => throw new IOException(s"Received from $other on an IP socket")
+      if from != null then {
+        val length = header.msg.msg_namelen.toInt
+        // An unnamed Unix sender has no address at all, not even its family.
+        val sender = if handle.unix && length < 2 then UnixAddress("") else Sockets.read(header.name, length)
+        sender match {
+          case ip: IpSocketAddress if !handle.unix => from.asInstanceOf[Slot[IpSocketAddress]].set(ip)
+          case path: UnixAddress if handle.unix    => from.asInstanceOf[Slot[UnixAddress]].set(path)
+          case other                               => throw new IOException(s"Received from $other on $handle")
         }
+      }
       true
     }
 
@@ -921,8 +952,11 @@ private[uring] final class ReceiveFrom(val handle: DatagramHandle, buf: ByteBuff
   * empty packet is refused on a connected socket (see `IpDatagrams.send`). Done once it has gone, whole. Sends on one
   * socket take turns, in the order they began (`Turns`).
   */
-private[uring] final class SendTo(val handle: DatagramHandle, bufs: Array[ByteBuffer], to: IpSocketAddress | Null)
-    extends Command {
+private[uring] final class SendTo(
+    val handle: DatagramHandle,
+    bufs: Array[ByteBuffer],
+    to: IpSocketAddress | UnixAddress | Null
+) extends Command {
   Checks.checkBuffers(bufs)
   override def check(): Unit = {
     if to == null && !Checks.anyRemaining(bufs) then
@@ -940,7 +974,11 @@ private[uring] final class SendTo(val handle: DatagramHandle, bufs: Array[ByteBu
 
   private def setUp(): Unit = {
     size = bufs.foldLeft(0L)(_ + _.remaining())
-    val nameLength = if to == null then 0 else Sockets.write(Sockets.target(handle.ipv6, to.nn), header.name)
+    val nameLength = to match {
+      case null                => 0
+      case ip: IpSocketAddress => Sockets.write(Sockets.target(handle.ipv6, ip), header.name)
+      case path: UnixAddress   => Sockets.write(path, header.name)
+    }
     header.set(header.fill(staging.begin(), room = false), nameLength)
   }
 

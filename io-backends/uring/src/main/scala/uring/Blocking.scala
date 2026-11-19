@@ -99,6 +99,39 @@ private[uring] object Files {
     }
     new FileHandle(fd, path)
   }
+
+  /** Opens the FIFO at `path`, its read end, or its write end if `write`, non-blocking. */
+  def openFifo(path: String, write: Boolean): FifoSource | FifoSink = Zone.acquire { implicit z =>
+    val access = if write then fcntl.O_WRONLY else fcntl.O_RDONLY
+    val fd = fcntl.open(toCString(path), access | fcntl.O_NONBLOCK | Linux.O_CLOEXEC)
+    if fd < 0 then throw Results.failed(s"Failed to open the FIFO $path")
+    try {
+      val info = stackalloc[stat.stat]()
+      if stat.fstat(fd, info) < 0 then throw Results.failed(s"Failed to inspect $path")
+      if stat.S_ISFIFO(info.st_mode) == 0 then throw new IOException(s"Not a FIFO: $path")
+    } catch {
+      case e: Throwable =>
+        unistd.close(fd)
+        throw e
+    }
+    if write then new FifoSink(fd, path) else new FifoSource(fd, path)
+  }
+}
+
+/** Opens a FIFO's read end or write end and writes it into `into` (see `Fifos`), on the blocking pool: it opens without
+  * blocking, so that neither end waits for the other, and keeps the end non-blocking, so that a read or a write tried
+  * at once never blocks the worker. A writer's open fails while the FIFO has no reader; any other kind of file is
+  * refused.
+  */
+private[uring] final class OpenFifo[H <: UringHandle](path: String, write: Boolean, into: Slot[H])
+    extends BlockingTask[H](
+      () => Files.openFifo(path, write).asInstanceOf[H],
+      into.set,
+      List(into),
+      interruptible = false,
+      discard = end => unistd.close(end.fd): Unit
+    ) {
+  override def toString: String = s"open of FIFO $path"
 }
 
 /** Resolves a host name with `getaddrinfo`, on the lookups' pool, which nothing interrupts. */

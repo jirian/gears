@@ -12,9 +12,8 @@ import scala.concurrent.duration.FiniteDuration
   *
   * A program runs on a pool of workers (`UringScheduler`), one for each processor, each with its own ring, inbox and
   * heap of timers. An op is performed on the performer's own worker: tried at once with a non-blocking system call,
-  * else prepared as an entry on that worker's ring, and the performer resumed once the entry's completion arrives. So
-  * far it has IP stream and datagram sockets, Unix stream sockets, regular files, pipes, name resolution and blocking
-  * ops.
+  * else prepared as an entry on that worker's ring, and the performer resumed once the entry's completion arrives. It
+  * has IP and Unix stream and datagram sockets, regular files, pipes, FIFOs, name resolution and blocking ops.
   */
 object UringBackend extends Backend {
   type Interface = UringOps.type
@@ -52,8 +51,10 @@ object UringOps
     extends IpStreams
     with IpDatagrams
     with UnixStreams
+    with UnixDatagrams
     with RegularFiles
     with Pipes
+    with Fifos
     with Resolving
     with Blocking {
   import scala.annotation.targetName
@@ -65,6 +66,8 @@ object UringOps
   type Listener = ListenerHandle
   type BoundDatagram = BoundDatagramHandle
   type ConnectedDatagram = ConnectedDatagramHandle
+  type UnixBoundDatagram = UnixBoundDatagramHandle
+  type UnixConnectedDatagram = UnixConnectedDatagramHandle
   type File = FileHandle
 
   def read(handle: UringReadable, buf: ByteBuffer): UringOp & Repeatable = ReadIntoBuffer(handle, buf)
@@ -201,6 +204,72 @@ object UringOps
   @targetName("datagramPeerAddress")
   def peerAddress(handle: ConnectedDatagramHandle): IpSocketAddress =
     open(handle)(Sockets.peerAddress).asInstanceOf[IpSocketAddress]
+
+  // ---- Unix datagram sockets
+
+  def bindDatagram(local: UnixAddress, options: SocketOptions, into: Slot[UnixBoundDatagramHandle]): UringOp = {
+    Sockets.checkPath(local.path)
+    Sockets.check(options, SocketOption.Kind.UnixBoundDatagram)
+    OpenDatagram(local, null, options, into)
+  }
+
+  def connectDatagram(
+      local: UnixAddress | Null,
+      remote: UnixAddress,
+      options: SocketOptions,
+      into: Slot[UnixConnectedDatagramHandle]
+  ): UringOp = {
+    if local != null then Sockets.checkPath(local.path)
+    Sockets.checkPath(remote.path)
+    Sockets.check(options, SocketOption.Kind.UnixConnectedDatagram)
+    OpenDatagram(local, remote, options, into)
+  }
+
+  @targetName("receiveUnix")
+  def receive(handle: UnixBoundDatagramHandle, buf: ByteBuffer, from: Slot[UnixAddress]): UringOp & Repeatable =
+    ReceiveFrom(handle, buf, from)
+
+  @targetName("receiveUnixConnected")
+  def receive(handle: UnixConnectedDatagramHandle, buf: ByteBuffer): UringOp & Repeatable =
+    ReceiveFrom(handle, buf, null)
+
+  def send(handle: UnixBoundDatagramHandle, buf: ByteBuffer, to: UnixAddress): UringOp & Repeatable = {
+    Sockets.checkPath(to.path)
+    SendTo(handle, Array(buf), to)
+  }
+
+  @targetName("sendUnixConnected")
+  def send(handle: UnixConnectedDatagramHandle, buf: ByteBuffer): UringOp & Repeatable =
+    SendTo(handle, Array(buf), null)
+
+  def send(handle: UnixBoundDatagramHandle, bufs: Array[ByteBuffer], to: UnixAddress): UringOp & Repeatable = {
+    Sockets.checkPath(to.path)
+    SendTo(handle, bufs, to)
+  }
+
+  @targetName("sendUnixConnectedMany")
+  def send(handle: UnixConnectedDatagramHandle, bufs: Array[ByteBuffer]): UringOp & Repeatable =
+    SendTo(handle, bufs, null)
+
+  @targetName("unixDatagramLocalAddress")
+  def localAddress(handle: UnixBoundDatagramHandle | UnixConnectedDatagramHandle): UnixAddress =
+    open(handle)(Sockets.localAddress).asInstanceOf[UnixAddress]
+
+  @targetName("unixDatagramPeerAddress")
+  def peerAddress(handle: UnixConnectedDatagramHandle): UnixAddress =
+    open(handle)(Sockets.peerAddress).asInstanceOf[UnixAddress]
+
+  // ---- FIFOs
+
+  def openFifoForReading(path: String, into: Slot[UringReadable]): UringOp = {
+    Files.checkPath(path)
+    OpenFifo(path, write = false, into)
+  }
+
+  def openFifoForWriting(path: String, into: Slot[UringWritable]): UringOp = {
+    Files.checkPath(path)
+    OpenFifo(path, write = true, into)
+  }
 
   // ---- Files, names and blocking code
 

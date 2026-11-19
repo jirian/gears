@@ -42,6 +42,18 @@ class UringIpDatagramSuite extends IpDatagramContract {
   val backend: Backend { type Interface <: IpDatagrams } = UringBackend
 }
 
+class UringUnixDatagramSuite extends UnixDatagramContract {
+  val backend: Backend { type Interface <: UnixDatagrams } = UringBackend
+}
+
+class UringFifoSuite extends FifoContract {
+  val backend: Backend { type Interface <: Fifos } = UringBackend
+}
+
+class UringFifoFileSuite extends FifoFileContract {
+  val backend: Backend { type Interface <: Fifos & RegularFiles } = UringBackend
+}
+
 class UringFileSuite extends FileContract {
   val backend: Backend { type Interface <: RegularFiles } = UringBackend
 }

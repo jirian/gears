@@ -204,11 +204,11 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         try own.ring.await(deadlineTask, !isEmpty(), spin = own.inFlight.nonEmpty)(dispatch)
         catch case failure: Throwable => fail(failure)
 
-    /** The ring failed: each entry in the kernel is cancelled, waiting until the kernel has let go of it, since tearing
-      * the ring down does not wait for a kernel worker still reading into an entry's buffers; then the ring is torn down
-      * and the ops it had are failed. An entry the kernel does not say it has let go of keeps what its command staged
-      * for good (`UringScheduler.kept`), so that the memory goes to nothing else; its performer is failed all the same.
-      * Worker thread.
+    /** The ring failed: each entry in the kernel is cancelled, waiting until the kernel has let go of it, since
+      * tearing the ring down does not wait for a kernel worker still reading into an entry's buffers; then the ring is
+      * torn down and the ops it had are failed. An entry the kernel does not say it has let go of keeps what its
+      * command staged for good (`UringScheduler.kept`), so that the memory goes to nothing else; its performer is
+      * failed all the same. Worker thread.
       */
     private[uring] def fail(cause: Throwable): Unit = {
       workerThread = Thread.currentThread()

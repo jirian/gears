@@ -212,23 +212,97 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
-  test("every handle is close-on-exec: pipes, listeners, connections, accepted ones, and files") {
-    onPool(2) { io ?=>
-      def cloexec(h: UringHandle) = (fcntl.fcntl(h.fd, fcntl.F_GETFD, 0) & fcntl.FD_CLOEXEC) != 0
-      val (r, w) = pipe()
-      val listener = Slot[ListenerHandle]()
-      io.perform(ops.listen(IpSocketAddress(IpAddress.IPv4Loopback, 0), listener))
-      val l = listener.clear()
-      val accepted = Slot[ConnectionHandle]()
-      val accepting = Future(io.perform(ops.accept(l, accepted)))
-      val client = Slot[ConnectionHandle]()
-      io.perform(ops.connect(ops.localAddress(l).asInstanceOf[IpSocketAddress], client))
-      accepting.await
-      val file = Slot[FileHandle]()
-      io.perform(ops.open("/proc/self/stat", write = false, file))
-      val handles = List(r, w, l, client.clear(), accepted.clear(), file.clear())
-      for h <- handles do assert(cloexec(h), s"$h is not close-on-exec")
-      handles.foreach(close)
+  /** A directory of its own for `body`, removed with what is in it afterwards. */
+  private def withTempDir[T](body: java.nio.file.Path => T): T = {
+    val dir = java.nio.file.Files.createTempDirectory("gears-uring-test")
+    try body(dir)
+    finally {
+      java.nio.file.Files.list(dir).forEach(f => java.nio.file.Files.deleteIfExists(f): Unit)
+      java.nio.file.Files.deleteIfExists(dir): Unit
+    }
+  }
+
+  private def mkfifo(path: java.nio.file.Path): Unit = Zone.acquire { implicit z =>
+    val mode = Integer.parseInt("600", 8).toUInt
+    assertEquals(scala.scalanative.posix.sys.stat.mkfifo(toCString(path.toString), mode), 0)
+  }
+
+  test("every handle is close-on-exec: pipes, listeners, connections, accepted ones, files, FIFOs, datagram sockets") {
+    withTempDir { dir =>
+      onPool(2) { io ?=>
+        def cloexec(h: UringHandle) = (fcntl.fcntl(h.fd, fcntl.F_GETFD, 0) & fcntl.FD_CLOEXEC) != 0
+        val (r, w) = pipe()
+        val listener = Slot[ListenerHandle]()
+        io.perform(ops.listen(IpSocketAddress(IpAddress.IPv4Loopback, 0), listener))
+        val l = listener.clear()
+        val accepted = Slot[ConnectionHandle]()
+        val accepting = Future(io.perform(ops.accept(l, accepted)))
+        val client = Slot[ConnectionHandle]()
+        io.perform(ops.connect(ops.localAddress(l).asInstanceOf[IpSocketAddress], client))
+        accepting.await
+        val file = Slot[FileHandle]()
+        io.perform(ops.open("/proc/self/stat", write = false, file))
+        val fifo = dir.resolve("fifo")
+        mkfifo(fifo)
+        val fifoReader = Slot[UringReadable]()
+        io.perform(ops.openFifoForReading(fifo.toString, fifoReader))
+        val fifoWriter = Slot[UringWritable]()
+        io.perform(ops.openFifoForWriting(fifo.toString, fifoWriter))
+        val bound = Slot[UnixBoundDatagramHandle]()
+        val path = UnixAddress(dir.resolve("bound.sock").toString)
+        io.perform(ops.bindDatagram(path, bound))
+        val connected = Slot[UnixConnectedDatagramHandle]()
+        io.perform(ops.connectDatagram(null, path, connected))
+        val handles = List(r, w, l, client.clear(), accepted.clear(), file.clear()) ++
+          List(fifoReader.clear(), fifoWriter.clear(), bound.clear(), connected.clear())
+        for h <- handles do assert(cloexec(h), s"$h is not close-on-exec")
+        handles.foreach(close)
+      }
+    }
+  }
+
+  test("a Unix datagram socket that fails to connect leaves nothing at the path it bound") {
+    withTempDir { dir =>
+      onPool(1) { io ?=>
+        val local = dir.resolve("client.sock")
+        val into = Slot[UnixConnectedDatagramHandle]()
+        val nowhere = UnixAddress(dir.resolve("none").toString)
+        val failure = Try(io.perform(ops.connectDatagram(UnixAddress(local.toString), nowhere, into)))
+        assert(failure.failed.toOption.exists(_.isInstanceOf[java.io.IOException]), failure)
+        assert(into.isEmpty)
+        assert(!java.nio.file.Files.exists(local), "the bound path was left")
+      }
+    }
+  }
+
+  test("a FIFO's write end fails to open with no reader, and a read waiting on the FIFO, cancelled, takes nothing") {
+    withTempDir { dir =>
+      onPool(2) { io ?=>
+        val fifo = dir.resolve("fifo")
+        mkfifo(fifo)
+        val noReader = Slot[UringWritable]()
+        val failure = Try(io.perform(ops.openFifoForWriting(fifo.toString, noReader)))
+        assert(failure.failed.toOption.exists(_.isInstanceOf[java.io.IOException]), failure)
+        assert(noReader.isEmpty)
+        val reader = Slot[UringReadable]()
+        io.perform(ops.openFifoForReading(fifo.toString, reader))
+        val r = reader.clear()
+        val writer = Slot[UringWritable]()
+        io.perform(ops.openFifoForWriting(fifo.toString, writer))
+        val w = writer.clear()
+        val buf = ByteBuffer.allocate(16)
+        val (reading, performed) = performing(ops.read(r, buf))
+        AsyncOperations.sleep(20)
+        reading.cancel()
+        reading.awaitResult: Unit
+        assert(performed.get().nn.failed.toOption.exists(_.isInstanceOf[CancellationException]), performed.get())
+        rawWrite(w, "later")
+        AsyncOperations.sleep(20)
+        assertEquals(buf.position(), 0)
+        assertEquals(rawRead(r), "later")
+        close(r)
+        close(w)
+      }
     }
   }
 

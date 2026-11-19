@@ -141,6 +141,16 @@ final class PipeSource private[uring] (fd: Int) extends UringHandle(fd, "pipe's 
 /** A pipe's write end. */
 final class PipeSink private[uring] (fd: Int) extends UringHandle(fd, "pipe's write end") with UringWritable
 
+/** A FIFO's read end. */
+final class FifoSource private[uring] (fd: Int, path: String)
+    extends UringHandle(fd, s"read end of FIFO $path")
+    with UringReadable
+
+/** A FIFO's write end. */
+final class FifoSink private[uring] (fd: Int, path: String)
+    extends UringHandle(fd, s"write end of FIFO $path")
+    with UringWritable
+
 /** A connected stream socket, IP or Unix, from a connect or an accept. */
 final class ConnectionHandle private[uring] (fd: Int, val unix: Boolean)
     extends UringHandle(fd, if unix then "Unix connection" else "connection")
@@ -149,12 +159,21 @@ final class ConnectionHandle private[uring] (fd: Int, val unix: Boolean)
   def kind: SocketOption.Kind = if unix then SocketOption.Kind.UnixConnection else SocketOption.Kind.Connection
 }
 
+/** The socket file a Unix socket bound at `path`, as it is now: removed as the socket closes, if it is still that file,
+  * and not one put there since.
+  */
+private[uring] final class SocketFile(path: String) {
+  private val id = Sockets.fileId(path)
+
+  def remove(): Unit = if id != null && Sockets.fileId(path) == id then Sockets.unlink(path)
+}
+
 /** A listening stream socket, IP or Unix, with the options it gives the connections it accepts, and for a Unix one the
   * socket file it bound, which it removes as it closes if the file there is still its own.
   */
 final class ListenerHandle private[uring] (fd: Int, val unix: Boolean, val options: SocketOptions, path: String | Null)
     extends UringHandle(fd, if unix then "Unix listener" else "listener") {
-  private val file = if path == null then null else Sockets.fileId(path)
+  private val file = if path == null then null else SocketFile(path)
   def kind: SocketOption.Kind = if unix then SocketOption.Kind.UnixListener else SocketOption.Kind.Listener
 
   /** Its accepts take turns, in the order they began. */
@@ -162,13 +181,20 @@ final class ListenerHandle private[uring] (fd: Int, val unix: Boolean, val optio
 
   override protected def beginClosing(): Unit = accepts.failWaiting()
 
-  override protected def closed(): Unit =
-    if path != null && file != null && Sockets.fileId(path) == file then Sockets.unlink(path)
+  override protected def closed(): Unit = if file != null then file.remove()
 }
 
-/** An IP datagram socket: bound, or connected to one peer. An IPv6 one is dual stack. */
-sealed abstract class DatagramHandle(fd: Int, kind: String, val ipv6: Boolean) extends UringHandle(fd, kind) {
+/** A datagram socket, IP or Unix: bound, or connected to one peer. An IPv6 one is dual stack. A Unix one that bound a
+  * path removes the socket file as it closes, if the file there is still its own.
+  */
+sealed abstract class DatagramHandle(fd: Int, kind: String, val ipv6: Boolean, path: String | Null = null)
+    extends UringHandle(fd, kind) {
+  private val file = if path == null then null else SocketFile(path)
+
   def optionKind: SocketOption.Kind
+
+  /** Whether it is a Unix domain socket, whose peers are named by paths. */
+  def unix: Boolean = optionKind.unix
 
   /** Its receives, and its sends, each take turns, in the order they began. */
   private[uring] val receives = new Turns
@@ -178,6 +204,8 @@ sealed abstract class DatagramHandle(fd: Int, kind: String, val ipv6: Boolean) e
     receives.failWaiting()
     sends.failWaiting()
   }
+
+  override protected def closed(): Unit = if file != null then file.remove()
 }
 
 final class BoundDatagramHandle private[uring] (fd: Int, ipv6: Boolean)
@@ -188,6 +216,16 @@ final class BoundDatagramHandle private[uring] (fd: Int, ipv6: Boolean)
 final class ConnectedDatagramHandle private[uring] (fd: Int, ipv6: Boolean)
     extends DatagramHandle(fd, "connected datagram socket", ipv6) {
   def optionKind = SocketOption.Kind.ConnectedDatagram
+}
+
+final class UnixBoundDatagramHandle private[uring] (fd: Int, path: String)
+    extends DatagramHandle(fd, "bound Unix datagram socket", ipv6 = false, path) {
+  def optionKind = SocketOption.Kind.UnixBoundDatagram
+}
+
+final class UnixConnectedDatagramHandle private[uring] (fd: Int, path: String | Null)
+    extends DatagramHandle(fd, "connected Unix datagram socket", ipv6 = false, path) {
+  def optionKind = SocketOption.Kind.UnixConnectedDatagram
 }
 
 /** Commands taking turns on a handle, first come first served: only the one at the head is tried or in the kernel, and

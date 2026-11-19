@@ -106,7 +106,7 @@ private[tls] object TlsPlatform {
   * `nativeLock`, and never suspends, so one read and one write may run at once from different futures, as OpenSSL
   * allows an `SSL` only one call at a time; `inbound` and `outbound` keep one read and one write of `underlying` each.
   */
-private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], networkBio: Ptr[BIO]) extends TlsStream {
+private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], networkBio: Ptr[BIO]) extends TlsStream {
   private object nativeLock
   private var freed = false
   @volatile private var notified = false
@@ -118,6 +118,7 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
   private val netIn = new Array[Byte](OpenSslStream.NetBufSize)
   private val netInBuffer = ByteBuffer.wrap(netIn) // the same each time, so that the stream's read op is kept
   private lazy val gathered = new Array[Byte](OpenSslStream.RecordSize) // small buffers, for one record
+  @volatile private[tls] var fills = 0L // written holding `inbound`
   private var failureDetail = ""
 
   def closeNotified: Boolean = notified
@@ -170,15 +171,21 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
     }
   }
 
-  /** Reads from the network into OpenSSL: false at the end of the stream. */
-  private def fillNetworkIn(timeout: Duration)(using Async): Boolean =
+  /** Reads from the network into OpenSSL: false at the end of the stream. True at once if another caller added input
+    * since `seen`, which may be what this one's OpenSSL call wants: a reader and a writer share the input.
+    */
+  private[tls] def fillNetworkIn(timeout: Duration, seen: Long)(using Async): Boolean =
     Stream.holding(inbound) {
-      val n = underlying.read(netInBuffer.clear(), timeout)
-      if n > 0 then {
-        val written = native(BIO_write(networkBio, netIn.asInstanceOf[ByteArray].at(0), n))
-        if written != n then throw new IOException(s"The TLS input overflowed its buffer ($written of $n bytes)")
+      if fills != seen then true
+      else {
+        val n = underlying.read(netInBuffer.clear(), timeout)
+        if n > 0 then {
+          val written = native(BIO_write(networkBio, netIn.asInstanceOf[ByteArray].at(0), n))
+          if written != n then throw new IOException(s"The TLS input overflowed its buffer ($written of $n bytes)")
+          fills += 1
+        }
+        n > 0
       }
-      n > 0
     }
 
   /** Runs `op` until it is done or fails, moving records as OpenSSL asks: each read and write of `underlying` within
@@ -196,13 +203,15 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
         Duration.fromNanos(left)
       }
     def flush(): Unit = if reading then flushIfFree(limit) else flushNetworkOut(limit)
+    var seen = fills
     var (result, error) = call(op)
     flush()
     while result <= 0 && (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) do {
-      if error == SSL_ERROR_WANT_READ && !fillNetworkIn(limit) then {
+      if error == SSL_ERROR_WANT_READ && !fillNetworkIn(limit, seen) then {
         error = OpenSslStream.PeerClosed
         return (result, error)
       }
+      seen = fills
       val (r, e) = call(op)
       result = r
       error = e
@@ -379,7 +388,7 @@ private final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], ne
   def peerAddress = underlying.peerAddress
 }
 
-private object OpenSslStream {
+private[tls] object OpenSslStream {
   inline val PeerClosed = -1
   inline val NetBufSize = 17 * 1024
   inline val RecordSize = 16 * 1024 // the most plaintext a TLS record carries

@@ -526,13 +526,17 @@ private[http] object Wire {
       stream.write(v, timeout)
     }
 
-    /** What it holds, to go out with other buffers, or null if nothing; it is empty then. */
+    /** What it holds, to go out with other buffers, or null if nothing; it is empty then. The same buffer each time,
+      * until it grows, to be written before anything is put in again.
+      */
     def take(): ByteBuffer | Null =
       if count == 0 then null
       else {
-        val b = ByteBuffer.wrap(bytes, 0, count)
+        val v = view
+        v.limit(count)
+        v.position(0)
         count = 0
-        b
+        v
       }
   }
 
@@ -557,7 +561,39 @@ private[http] object Wire {
     /** Whether the head has gone out, or begun to. */
     def committed: Boolean = headOut
 
-    // A vectored write's buffers are an array of their own each time: an op keeps the array it was built with.
+    // A write too large to copy goes out from the caller's array, wrapped, behind what `out` holds: the same buffers,
+    // in the same array, while the caller writes from the same array and `out` keeps its own, so that the stream
+    // performs its op again rather than building one for each write (`SocketStream`). An op keeps the array it was
+    // built with, and a backend may read its buffers as it is built, so the array is never changed, but replaced.
+    private var dataArray: Array[Byte] | Null = null
+    private var data: ByteBuffer | Null = null
+    private var crlf: ByteBuffer | Null = null
+    private var vector: Array[ByteBuffer] | Null = null
+
+    private def dataOf(bytes: Array[Byte], offset: Int, length: Int): ByteBuffer = {
+      if !(dataArray eq bytes) then {
+        dataArray = bytes
+        data = ByteBuffer.wrap(bytes)
+      }
+      val d = data.nn
+      d.clear()
+      d.position(offset)
+      d.limit(offset + length)
+      d
+    }
+
+    private def vectorOf(first: ByteBuffer, second: ByteBuffer, third: ByteBuffer | Null): Array[ByteBuffer] = {
+      val v = vector
+      val size = if third == null then 2 else 3
+      if v != null && v.length == size && (v(0) eq first) && (v(1) eq second) && (third == null || (v(2) eq third))
+      then v
+      else {
+        val made = if third == null then Array(first, second) else Array(first, second, third.nn)
+        vector = made
+        made
+      }
+    }
+
     def write(bytes: Array[Byte], offset: Int, length: Int)(using Async): Unit =
       if suppress || length == 0 then flushHead()
       else {
@@ -574,11 +610,14 @@ private[http] object Wire {
           if chunked then out.putCrlf()
           out.writeTo(stream, timeout)
         } else {
-          val data = ByteBuffer.wrap(bytes, offset, length)
+          val data = dataOf(bytes, offset, length)
           val pending = out.take()
-          if chunked then stream.write(Array(pending.nn, data, ByteBuffer.wrap(Crlf)), timeout)
-          else if pending == null then stream.write(data, timeout)
-          else stream.write(Array(pending.nn, data), timeout)
+          if chunked then {
+            if crlf == null then crlf = ByteBuffer.wrap(Crlf)
+            crlf.nn.clear()
+            stream.write(vectorOf(pending.nn, data, crlf), timeout)
+          } else if pending == null then stream.write(data, timeout)
+          else stream.write(vectorOf(pending.nn, data, null), timeout)
         }
       }
 

@@ -196,4 +196,63 @@ class WireSuite extends FunSuite {
     assertEquals((h ++ Headers("A" -> "b")).iterator.toList.last, "A" -> "b")
     assertEquals(h, Headers("Content-Type" -> "text/plain", "connection" -> "Upgrade ,  Close", "X-Id" -> "1"))
   }
+
+  /** A stream that keeps what is written to it, and each buffer, and each array of buffers, it was given. */
+  private final class Recording extends Stream {
+    val written = new java.io.ByteArrayOutputStream()
+    val buffers = scala.collection.mutable.ArrayBuffer.empty[ByteBuffer]
+    val arrays = scala.collection.mutable.ArrayBuffer.empty[Array[ByteBuffer]]
+    private def drain(buf: ByteBuffer): Unit = {
+      val bytes = new Array[Byte](buf.remaining())
+      buf.get(bytes)
+      written.write(bytes)
+    }
+    def read(buf: ByteBuffer, timeout: Duration)(using Async): Int = -1
+    def write(buf: ByteBuffer, timeout: Duration)(using Async): Unit = {
+      buffers += buf
+      drain(buf)
+    }
+    override def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
+      arrays += bufs
+      bufs.foreach(drain)
+    }
+    def shutdownOutput()(using Async): Unit = ()
+    def close()(using Async): Unit = ()
+    def localAddress = IpSocketAddress(IpAddress.IPv4Loopback, 0)
+    def peerAddress = IpSocketAddress(IpAddress.IPv4Loopback, 0)
+  }
+
+  test("a streamed body's large writes from one array go out in the same buffers each time, framed as before") {
+    Http.run {
+      for chunked <- Seq(true, false) do {
+        val stream = Recording()
+        val out = new Wire.OutBuffer(16 * 1024)
+        out.putLatin1("HEAD\r\n")
+        val chunk = new Array[Byte](40 * 1024)
+        val declared = if chunked then -1L else 3L * chunk.length
+        val body = new Wire.Out(stream, out, chunked, declared, suppress = false, 1.second)
+        val expected = new java.io.ByteArrayOutputStream()
+        expected.write("HEAD\r\n".getBytes(StandardCharsets.ISO_8859_1))
+        for i <- 0 until 3 do {
+          java.util.Arrays.fill(chunk, ('a' + i).toByte)
+          body.write(chunk, 0, chunk.length)
+          val size = s"${Integer.toHexString(chunk.length)}\r\n"
+          if chunked then expected.write(size.getBytes(StandardCharsets.ISO_8859_1))
+          expected.write(chunk)
+          if chunked then expected.write(Wire.Crlf)
+        }
+        body.finish()
+        if chunked then expected.write("0\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1))
+        assert(java.util.Arrays.equals(stream.written.toByteArray, expected.toByteArray), s"chunked: $chunked")
+        if chunked then {
+          assertEquals(stream.arrays.size, 3)
+          assert(stream.arrays.forall(_ eq stream.arrays.head), "a new array for a write")
+        } else {
+          // The head goes with the first write; the others are the caller's array alone.
+          assertEquals((stream.arrays.size, stream.buffers.size), (1, 2))
+          assert(stream.buffers(1) eq stream.buffers(0), "a new buffer for a write")
+        }
+      }
+    }
+  }
 }

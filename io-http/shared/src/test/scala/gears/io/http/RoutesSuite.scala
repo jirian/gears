@@ -215,6 +215,16 @@ class UrlSuite extends FunSuite {
     assertEquals(Url.parse("http://[::1]:8080/").authority, "[::1]:8080")
   }
 
+  test("parse takes a host name with `_`, as a container's often has, which `URI` alone finds no host in") {
+    val u = Url.parse("http://My_Service:8080/a?q=1")
+    assertEquals((u.host, u.port, u.target), ("my_service", 8080, "/a?q=1"))
+    assertEquals(u.resolve("/b").toString, "http://my_service:8080/b")
+    assertEquals(Url.parse("https://my_service/").port, 443)
+    intercept[IllegalArgumentException](Url.parse("http://user@my_service/"))
+    intercept[IllegalArgumentException](Url.parse("http://my_service:0/"))
+    intercept[IllegalArgumentException](Url.parse("http://my!service/"))
+  }
+
   test("resolve follows RFC 3986: protocol-relative, absolute paths with URLs in the query, and dot segments") {
     val base = Url.parse("https://api.example.com/v1/items/7?x=1")
     assertEquals(base.resolve("//cdn.example/x").toString, "https://cdn.example/x")

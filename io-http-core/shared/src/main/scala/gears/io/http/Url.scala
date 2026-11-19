@@ -66,10 +66,17 @@ object Url {
       throw new IllegalArgumentException(s"Not an http, https, ws or wss URL: $uri")
     if uri.getRawUserInfo != null then throw new IllegalArgumentException(s"A URL with user information: $uri")
     val rawHost = uri.getHost
-    if rawHost == null || rawHost.isEmpty then throw new IllegalArgumentException(s"No host in $uri")
-    val host = (if rawHost.startsWith("[") then rawHost.substring(1, rawHost.length - 1) else rawHost).toLowerCase
-    val port = if uri.getPort == -1 then defaultPort(scheme) else uri.getPort
-    if port < 1 || port > 65535 then throw new IllegalArgumentException(s"A port is 1 to 65535, not $port, in $uri")
+    val (host, port) =
+      if rawHost == null || rawHost.isEmpty then {
+        // `URI` takes a host name with `_`, as a container's often has, for a registry's authority, and has no host.
+        val authority = uri.getRawAuthority
+        if authority == null || authority.isEmpty then throw new IllegalArgumentException(s"No host in $uri")
+        splitAuthority(scheme, authority, what => new IllegalArgumentException(s"$what in $uri"))
+      } else {
+        val port = if uri.getPort == -1 then defaultPort(scheme) else uri.getPort
+        if port < 1 || port > 65535 then throw new IllegalArgumentException(s"A port is 1 to 65535, not $port, in $uri")
+        ((if rawHost.startsWith("[") then rawHost.substring(1, rawHost.length - 1) else rawHost).toLowerCase, port)
+      }
     // Characters outside ASCII, which `URI` takes in a path or query as they are, go out percent-encoded as UTF-8.
     val ascii = new URI(uri.toASCIIString)
     val path = Option(ascii.getRawPath).filter(_.nonEmpty).getOrElse("/")
@@ -78,24 +85,34 @@ object Url {
 
   def defaultPort(scheme: String): Int = if scheme == "https" || scheme == "wss" then 443 else 80
 
-  /** A server's request URL, from its `Host` header's `authority` and its origin-form `target` (a path, and a query
-    * after a `?`), checked as strictly as `parse` checks them, without its two parses of a `URI`: a host name of
-    * letters, digits, `-` and `.`, or a bracketed IPv6 literal, and a port of 1 to 65535 if there is one; a target of
-    * RFC 3986's path and query characters and percent-escapes, with no fragment. A `Wire.Malformed` (400) if not.
+  /** A server's request URL, from its `Host` header's `authority` (see `splitAuthority`) and its origin-form `target`
+    * (a path, and a query after a `?`), checked as strictly as `parse` checks them, without its two parses of a `URI`:
+    * a target of RFC 3986's path and query characters and percent-escapes, with no fragment. A `Wire.Malformed` (400)
+    * if not.
     */
   private[http] def ofRequest(scheme: String, authority: String, target: String): Url = {
-    def malformed(what: String) = new Wire.Malformed(Status.BadRequest, what)
-    if !originForm(target) then throw malformed(s"A malformed request target: $target")
+    if !originForm(target) then throw new Wire.Malformed(Status.BadRequest, s"A malformed request target: $target")
+    val (host, port) = splitAuthority(scheme, authority, what => new Wire.Malformed(Status.BadRequest, what))
+    val question = target.indexOf('?')
+    val path = if question < 0 then target else target.substring(0, question)
+    val query = if question < 0 then None else Some(target.substring(question + 1))
+    new Url(scheme, host, port, path, query)
+  }
+
+  /** The host, lower-cased, and the port, the scheme's if there is none, of `authority`: a host name of RFC 3986's
+    * unreserved characters (letters, digits, `-`, `.`, `_` and `~`), or a bracketed IPv6 literal, and a port of 1 to
+    * 65535 if there is one; else what `malformed` makes of it.
+    */
+  private def splitAuthority(scheme: String, authority: String, malformed: String => Exception): (String, Int) = {
+    def refused = malformed(s"A malformed host: $authority")
     var host = authority
     var port = ""
     if authority.startsWith("[") then {
       val close = authority.indexOf(']')
       val after = close + 1
-      if close < 0 || after < authority.length && authority.charAt(after) != ':' then
-        throw malformed(s"A malformed Host header: $authority")
+      if close < 0 || after < authority.length && authority.charAt(after) != ':' then throw refused
       host = authority.substring(1, close)
-      if !host.contains(':') || gears.io.net.IpLiteral.parse(host).isEmpty then
-        throw malformed(s"A malformed Host header: $authority")
+      if !host.contains(':') || gears.io.net.IpLiteral.parse(host).isEmpty then throw refused
       if after < authority.length then port = authority.substring(after + 1)
     } else {
       val colon = authority.lastIndexOf(':')
@@ -103,18 +120,15 @@ object Url {
         host = authority.substring(0, colon)
         port = authority.substring(colon + 1)
       }
-      if host.isEmpty || !Text.forall(host)(c => c < 128 && Character.isLetterOrDigit(c) || c == '-' || c == '.') then
-        throw malformed(s"A malformed Host header: $authority")
+      if host.isEmpty || !Text.forall(host)(c => c < 128 && Character.isLetterOrDigit(c) || "-._~".indexOf(c) >= 0)
+      then throw refused
     }
     val number =
       if port.isEmpty then defaultPort(scheme)
       else if port.length <= 5 && Text.forall(port)(c => c >= '0' && c <= '9') && port.toInt >= 1 && port.toInt <= 65535
       then port.toInt
-      else throw malformed(s"A malformed Host header: $authority")
-    val question = target.indexOf('?')
-    val path = if question < 0 then target else target.substring(0, question)
-    val query = if question < 0 then None else Some(target.substring(question + 1))
-    new Url(scheme, Text.asciiLower(host), number, path, query)
+      else throw refused
+    (Text.asciiLower(host), number)
   }
 
   /** Whether `target` is a path starting with `/`, then a query after a `?` if any, of RFC 3986's characters for them:

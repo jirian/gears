@@ -160,7 +160,9 @@ class HttpSuite extends FunSuite {
           ("/a?x=1&y=%20:@/?", "x:8080", "x 8080 /a?x=1&y=%20:@/?"),
           ("/a?", "x:", "x 80 /a?"),
           ("/a", "[::1]:9", "::1 9 /a"),
-          ("/a", "10.0.0.1", "10.0.0.1 80 /a")
+          ("/a", "10.0.0.1", "10.0.0.1 80 /a"),
+          ("/a", "My_Service:8080", "my_service 8080 /a"), // a container's name, as Docker's often have
+          ("/a", "x~y", "x~y 80 /a")
         )
       do {
         val answer = ask(target, host)
@@ -171,7 +173,8 @@ class HttpSuite extends FunSuite {
           ("/a%zz", "x"),
           ("/a%2", "x"),
           ("/a#f", "x"),
-          ("/a", "ex_ample"),
+          ("/a", "ex!ample"),
+          ("/a", "ex%41mple"),
           ("/a", "x:0"),
           ("/a", "x:65536"),
           ("/a", "x:8a"),

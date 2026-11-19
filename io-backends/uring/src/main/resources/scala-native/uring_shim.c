@@ -17,6 +17,14 @@ int gears_io_uring_spin_check(struct io_uring *ring) {
   return 0;
 }
 
+/* 1 if `sqe` is still in the submission queue, not yet taken by the kernel: a submission refused or cut short (EBUSY,
+ * EAGAIN, ENOMEM) leaves it there. The kernel's head moves only in this thread's io_uring_enter (no SQPOLL). */
+int gears_io_uring_sqe_pending(struct io_uring *ring, struct io_uring_sqe *sqe) {
+  unsigned head = io_uring_smp_load_acquire(ring->sq.khead);
+  unsigned index = (unsigned)(sqe - ring->sq.sqes);
+  return ((index - head) & ring->sq.ring_mask) < ring->sq.sqe_tail - head;
+}
+
 struct io_uring_sqe *gears_io_uring_get_sqe(struct io_uring *ring) {
   return io_uring_get_sqe(ring);
 }

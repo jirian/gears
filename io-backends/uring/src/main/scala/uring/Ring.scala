@@ -85,7 +85,7 @@ private[uring] final class Ring(entries: Int, completions: Int) {
     if signalled.get() || hasWork then res = submitPrepared()
     else {
       val arrived = spin && {
-        res = submitPrepared()
+        checkSubmitted(submitPrepared()) // the wait below may submit again, and its result replaces this one's
         val spinEnd = System.nanoTime() + Ring.SpinNanos
         spinUntil(if deadline < 0 then spinEnd else math.min(deadline, spinEnd))
       }
@@ -104,13 +104,17 @@ private[uring] final class Ring(entries: Int, completions: Int) {
     sleeping.set(false)
     signalled.set(false)
     afterSubmit()
-    // Out of time, interrupted, completions overflowing, which the reap takes in, or the kernel short of memory for
-    // now, which the next wait tries again.
+    checkSubmitted(res)
+    reap(dispatch)
+  }
+
+  /** Fails on a submission's or a wait's result, unless it is out of time, interrupted, completions overflowing, which
+    * the reap takes in, or the kernel short of memory for now, which the next turn tries again.
+    */
+  private def checkSubmitted(res: Int): Unit =
     if res < 0 && res != -Linux.ETIME && res != -errno.EINTR && res != -errno.EBUSY && res != -errno.EAGAIN &&
       res != -errno.ENOMEM
     then throw Ring.failure("Failed to submit to io_uring", res)
-    reap(dispatch)
-  }
 
   private def submitPrepared(): Int = if io_uring_sq_ready(ring).toInt > 0 then io_uring_submit(ring) else 0
 
@@ -152,6 +156,11 @@ private[uring] final class Ring(entries: Int, completions: Int) {
     }
     sqe
   }
+
+  /** Whether `sqe` is still in the submission queue, not taken by the kernel: one a submission refused or cut short
+    * left there, though its command counts it submitted. Worker thread.
+    */
+  def pending(sqe: Ptr[io_uring_sqe]): Boolean = io_uring_sqe_pending(ring, sqe) != 0
 
   /** Turns an entry prepared and not yet submitted into a no-op whose completion is ignored. Worker thread. */
   def nop(sqe: Ptr[io_uring_sqe]): Unit = {

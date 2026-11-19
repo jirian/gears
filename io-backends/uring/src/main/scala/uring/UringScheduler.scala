@@ -82,7 +82,14 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
 
       ring.afterSubmit = () => {
         submitted.foreach(c =>
-          if c.state == Command.Stage.Submitted && c.handle.isClosing then ring.cancelNow(c.id): Unit
+          if c.state == Command.Stage.Submitted && c.handle.isClosing then
+            if ring.pending(c.sqe) then { // a submission refused or cut short: still a no-op to make
+              ring.nop(c.sqe)
+              inFlight.remove(c.id)
+              c.outOfRing()
+              c.discardSubmission()
+              settle(c, Failure(c.handle.closedFailure))
+            } else ring.cancelNow(c.id): Unit
         )
         submitted.clear()
       }
@@ -331,6 +338,10 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
           true
         } else false // started again already: that start fires it
       case Command.Stage.Prepared =>
+        own.ring.nop(command.sqe)
+        withdrawn(command)
+        true
+      case Command.Stage.Submitted if own.ring.pending(command.sqe) => // a submission refused or cut short
         own.ring.nop(command.sqe)
         withdrawn(command)
         true

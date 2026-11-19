@@ -324,6 +324,22 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
+  test("an entry counts as pending until a submission takes it, also once the queue's counters wrap") {
+    val ring = new Ring(8, 16)
+    try {
+      for round <- 1 to 5 do { // 5 rounds of 7 entries: the queue's positions pass its size several times
+        val sqes = Seq.fill(7) {
+          val sqe = ring.nextSqe()
+          ring.nop(sqe)
+          sqe
+        }
+        sqes.foreach(sqe => assert(ring.pending(sqe), s"round $round: prepared, not yet submitted"))
+        ring.await(System.nanoTime(), hasWork = true, spin = false)((_, _) => ())
+        sqes.foreach(sqe => assert(!ring.pending(sqe), s"round $round: submitted"))
+      }
+    } finally ring.close()
+  }
+
   test("a read cancelled while it waits in the kernel takes nothing written after") {
     onPool(2) { io ?=>
       val (r, w) = pipe()

@@ -60,13 +60,14 @@ never written once it may name another file.
 nothing. The runtime's protocol (`WorkpoolScheduler.performWithin`) is: await the op; on a cancel ask the worker to
 `withdraw` it; if that answers that it will still fire, wait, uncancellably, for it to settle. io_uring's side:
 
-- **On the op's worker** (the usual case: a cancel from a future on the same worker, and every time limit, which the
-  worker's heap fires): an entry still prepared becomes a no-op, its use ended, and `withdraw` answers that nothing will
-  fire. One in the kernel is sync-cancelled: `0` means the kernel let go without doing it; `-ENOENT` means it finished
+- **On the op's worker** (a cancel from a future on the same worker, and every time limit, which the worker's heap
+  fires): an entry still prepared becomes a no-op, its use ended, and `withdraw` answers that nothing will fire. One in the kernel is sync-cancelled: `0` means the kernel let go without doing it; `-ENOENT` means it finished
   first, its completion in the ring, and it fires with that.
-- **From another worker** (a performer resumed elsewhere): the withdrawal is handed to the op's worker through its
-  inbox, and `withdraw` answers that it will fire; the op's worker takes it back as above and fires it cancelled, or
-  its completion fires it.
+- **From another worker** (a performer resumed on the canceller's worker, as the HTTP library's watch for a client
+  going away usually makes it): the withdrawal is handed to the op's worker through its inbox, and `withdraw` answers
+  that it will fire; the op's worker takes it back as above and fires it cancelled, or its completion fires it. The op's
+  time limit is taken off the heap first, and marked so in the same step, under the heap's lock (`TimerHeap.takeOff`):
+  a completion that finds the op gone from the heap then knows whether it is to fire it (`claimFiring`).
 - **Work already done is delivered.** A completion applied before the cancel reached it (`committed`) is delivered to
   the performer even though it was cancelled, and `perform` returns: the bytes read are in its buffer, and a cancel
   that came too late did not happen first. This is the data-loss race the 2026-10-16 review found, settled on gears'
@@ -84,6 +85,11 @@ kernel with an `IOException` naming the requirement.
 A command a kernel worker is running (a read or write of a regular file, an `fsync`) cannot be stopped; the sync
 cancel waits for it to finish, so a slow disk holds up the worker for that long. The backend before the move to the
 shared runtime did not wait, at the cost of `RegularFiles`' wording; this one keeps the wording.
+
+A ring that fails for good (`UringWorker.fail`) cancels each entry still in the kernel the same way, waiting, before it
+tears the ring down and fails the ops: tearing it down alone does not wait for a kernel worker still running an entry,
+which could then write into a buffer already given back. An entry the kernel does not say it has let go of keeps what
+its command staged for good.
 
 ## Closing a handle
 

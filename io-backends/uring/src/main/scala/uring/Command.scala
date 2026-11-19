@@ -89,8 +89,8 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   /** The poll events to wait for when a submission completes with `EAGAIN`, or 0 for a command that never does. */
   protected def readinessEvents: Int = 0
 
-  // A performance's state, kept by its worker on the worker's thread; `outcome`, `done`, `applied`, `offHeap` and
-  // `wantOut` are read by the firing and by a withdrawal from other threads. `applied`: its outcome is set and nothing
+  // A performance's state, kept by its worker on the worker's thread; `outcome`, `done`, `applied`, `offHeap` (the
+  // heap's) and `wantOut` are read by the firing and by a withdrawal from other threads. `applied`: its outcome is set and nothing
   // of it is in use, so a time limit reached as it fires has nothing to take back.
   private var stage = Command.Stage.Idle
   private var entryId = 0L
@@ -100,10 +100,6 @@ private[uring] abstract class Command extends RepeatableAbstractTimerHeapOp with
   @volatile private[uring] var outcome: Try[Unit] = WorkpoolScheduler.SuccessUnit
   @volatile private[uring] var done = false
   @volatile private[uring] var applied = false
-  @volatile private[uring] var offHeap = false
-  // Taking it off the heap and saying so (`offHeap`) is one step against a firing, which looks for either: between
-  // two steps, a firing found neither, and woke no one.
-  private[uring] val offHeapLock = new Object
   @volatile private[uring] var wantOut = false
   // Counts its performances: a withdrawal handed to its worker acts on the one it was made for, not a later one.
   @volatile private[uring] var performance = 0L
@@ -1014,8 +1010,6 @@ private[uring] class BlockingTask[A](
   private var runner: Thread | Null = null // guarded by `this`
   @volatile private var outcome: Try[Unit] = WorkpoolScheduler.SuccessUnit
   @volatile private[uring] var owner: UringScheduler#UringWorker | Null = null
-  @volatile private[uring] var offHeap = false
-  private[uring] val offHeapLock = new Object // as `Command.offHeapLock`
 
   /** Checks made as it is performed: its slots empty. */
   def check(): Unit = Checks.notEmpty(slots*)
@@ -1082,7 +1076,7 @@ private[uring] class BlockingTask[A](
     val o = owner.nn
     // Not once settled: a time limit may have failed it already, with nothing in use.
     val run: Runnable = () =>
-      if !isSettled && (!hasDeadline || offHeapLock.synchronized(offHeap || o.removeTimer(this))) then
+      if !isSettled && (!hasDeadline || o.claimFiring(this)) then
         timerWakeup(System.nanoTime())
     if !o.submit(run) then run.run() // the worker has stopped: nothing waits on its inbox
   }

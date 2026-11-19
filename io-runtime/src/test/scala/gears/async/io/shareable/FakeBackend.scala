@@ -85,9 +85,6 @@ sealed abstract class DeviceOp(val withdrawal: Withdrawal) extends RepeatableAbs
   /** What the device finished it with. */
   @volatile private[shareable] var outcome: Try[Unit] = WorkpoolScheduler.SuccessUnit
 
-  /** Set when a withdrawal took it off its worker's heap: its completion still fires it. */
-  @volatile private[shareable] var offHeap = false
-
   /** Set once the device has done the op's work, which can't be undone (a `CompletionOp`'s). */
   @volatile private[shareable] var done = false
 
@@ -216,10 +213,7 @@ final class FakeScheduler(workers: Int)
     /** As `Worker.withdraw`, and takes the op back from the device, which may confirm it only later. */
     override def withdraw(op: FakeOp): Boolean = op match {
       case io: DeviceOp =>
-        if io.hasDeadline then {
-          if !removeTimer(io) then return false // it left the heap to fire
-          io.offHeap = true
-        }
+        if io.hasDeadline && !takeOff(io) then return false // it left the heap to fire
         val device = io.device.nn
         io.withdrawal match {
           case Withdrawal.Sync     => device.cancelNow(io) // if not, its completion is on its way
@@ -242,7 +236,7 @@ final class FakeScheduler(workers: Int)
       while op != null do {
         val io = op.nn
         io.queued = false
-        if !io.hasDeadline || io.offHeap || removeTimer(io) then io.timerWakeup(System.nanoTime())
+        if !io.hasDeadline || claimFiring(io) then io.timerWakeup(System.nanoTime())
         op = device.reap()
       }
     }

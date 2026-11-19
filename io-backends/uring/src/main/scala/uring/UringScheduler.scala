@@ -319,7 +319,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
     }
 
     private def fire(command: Command): Unit =
-      if !command.hasDeadline || command.offHeapLock.synchronized(command.offHeap || removeTimer(command)) then
+      if !command.hasDeadline || claimFiring(command) then
         command.timerWakeup(System.nanoTime())
 
     /** Takes `command` back on this worker's thread: true if it never reached the kernel, or the kernel has let go of
@@ -366,7 +366,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       */
     override def withdraw(op: UringOp): Boolean = op match {
       case command: Command =>
-        if !takeOffHeap(command) then return false // it left the heap to fire
+        if command.hasDeadline && !takeOff(command) then return false // it left the heap to fire
         command.wantOut = true
         if isWorkerOf(this) then withdrawHere(command)
         else {
@@ -387,17 +387,10 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         }
       case _: CloseHandle        => false // it ends once begun
       case task: BlockingTask[?] =>
-        if !takeOffHeap(task) then return false // it left the heap to fire
+        if task.hasDeadline && !takeOff(task) then return false // it left the heap to fire
         task.stop()
       case _ => super.withdraw(op)
     }
-
-    /** Takes `op` off the heap for good, if it has a deadline: false if it has left the heap to fire. */
-    private def takeOffHeap(op: Command | BlockingTask[?]): Boolean =
-      !op.hasDeadline || (op match {
-        case c: Command         => c.offHeapLock.synchronized(removeTimer(c) && { c.offHeap = true; true })
-        case t: BlockingTask[?] => t.offHeapLock.synchronized(removeTimer(t) && { t.offHeap = true; true })
-      })
 
     /** For a command whose time limit has passed, on this worker's thread (`AbstractTimerHeapOp.limitReached`). */
     private[uring] def limitReached(command: Command): Boolean = {

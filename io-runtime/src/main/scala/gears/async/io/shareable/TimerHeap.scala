@@ -31,6 +31,12 @@ object TimerHeap {
     /** Fires the timer. It left the heap for this, under the heap's lock, so `removeTimer` can no longer stop it. */
     def timerWakeup(actAfter: Long): Unit
 
+    /** Set as `takeOff` takes it off the heap for good, under the heap's lock; cleared by whoever performs it again. A
+      * completion that finds it gone from the heap tells by this whether a withdrawal took it, and the completion is to
+      * fire it, or the heap fired it (`claimFiring`).
+      */
+    @volatile private[async] var offHeap = false
+
     /** Where the heap holds this timer, or -1. Guarded by the heap's lock, as is `heapKey`. */
     private[shareable] var heapIndex = -1
 
@@ -161,6 +167,24 @@ abstract class TimerHeap[A <: TimerOp] extends Poller with TimerSource[A] {
     if held then takeAt(timerOp.heapIndex)
     held
   }
+
+  /** As `removeTimer`, and marks it `offHeap` in the same step: between two steps, a completion would find it neither
+    * held nor marked, and take the heap to have fired it, while the withdrawal leaves its firing to the completion.
+    */
+  final def takeOff(timerOp: A): Boolean = timerLock.synchronized {
+    val held = holds(timerOp)
+    if held then {
+      takeAt(timerOp.heapIndex)
+      timerOp.offHeap = true
+    }
+    held
+  }
+
+  /** For a completion of `timerOp`, which has a deadline: true if the completion is to fire it, it being taken off the
+    * heap for good (`takeOff`, or `offHeap` set by its worker) or taken out now; false if the heap fired it, or will.
+    * The mark is read again after the heap's lock, which orders it after a `takeOff`.
+    */
+  final def claimFiring(timerOp: A): Boolean = timerOp.offHeap || removeTimer(timerOp) || timerOp.offHeap
 
   final def notifyDeadlineChange(timerOp: TimerOp): Unit = {
     val isNext = timerLock.synchronized {

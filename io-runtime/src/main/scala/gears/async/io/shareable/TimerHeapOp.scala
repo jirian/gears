@@ -29,7 +29,6 @@ trait TimerHeapOp extends WorkpoolScheduler.AsyncOp, WorkpoolScheduler.Reentrant
 
 sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.Hooks {
   private val state = AtomicReference[Try[Unit]](null)
-  private val timersLock = new Object
 
   /** Guards `state` against `listener`, so that a result can't arrive between `onComplete` seeing none and registering
     * its listener, which would then wait for ever.
@@ -45,13 +44,12 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
 
   @volatile private var worker: TimerHeap.TimerSource[?] | Null = null
 
+  // Each a single volatile field, read and written alone: no lock is needed for them, which every timed op would take.
   @volatile private var timeoutDeadline = -1L
 
-  def minDeadline: Long = timersLock.synchronized(timeoutDeadline)
+  def minDeadline: Long = timeoutDeadline
 
-  final def deadlineNow: Long = timersLock.synchronized {
-    minDeadline
-  }
+  final def deadlineNow: Long = minDeadline
 
   def ownDeadline: Long = -1L
 
@@ -61,13 +59,13 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
   /** Read while the op is being performed, as `clearTimeout` drops the time limit. */
   final override def hasDeadline: Boolean = hasOwnDeadline || timeoutDeadline >= 0
 
-  final def setTimeout(t: Long, source: TimerHeap.TimerSource[?]): Unit = timersLock.synchronized {
+  final def setTimeout(t: Long, source: TimerHeap.TimerSource[?]): Unit = {
     worker = source
     if t < 0 then timeoutDeadline = -1L
     else
       timeoutDeadline = TimerHeap.deadlineAfter(if t > Long.MaxValue / 1000000L then Long.MaxValue else t * 1000000L)
   }
-  final def clearTimeout(): Unit = timersLock.synchronized {
+  final def clearTimeout(): Unit = {
     worker = null
     timeoutDeadline = -1L
   }
@@ -163,7 +161,7 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
   /** Whether the op has settled this performance: a firing that comes after has nothing to do. */
   final def isSettled: Boolean = state.get() != null
 
-  /** Takes no op lock: the heap reads `deadlineNow` under its own lock, so that order is heap, then op. */
+  /** Takes no lock of its own: the heap reads `deadlineNow` under the heap's. */
   final def requestTimersUpdate(): Unit = {
     val w = worker
     if w != null then

@@ -174,7 +174,7 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
       if deadline < 0 then timeout
       else {
         val left = deadline - System.nanoTime()
-        if left <= 0 then throw new java.util.concurrent.TimeoutException("The TLS handshake took too long")
+        if left <= 0 then throw new java.util.concurrent.TimeoutException(s"Not done within $timeout")
         Duration.fromNanos(left)
       }
     def flush(): Unit = if reading then flushIfFree(limit) else flushNetworkOut(limit)
@@ -243,23 +243,31 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
       }
   }
 
-  def write(buf: ByteBuffer, timeout: Duration)(using Async): Unit = {
+  private def deadlineOf(timeout: Duration): Long = Stream.limit(timeout) match {
+    case null => -1L
+    case d    => System.nanoTime() + d.nn.toNanos
+  }
+
+  def write(buf: ByteBuffer, timeout: Duration)(using Async): Unit = writeOne(buf, timeout, deadlineOf(timeout))
+
+  private def writeOne(buf: ByteBuffer, timeout: Duration, deadline: Long)(using Async): Unit = {
     val n = buf.remaining()
     if n > 0 then {
       val direct = buf.hasArray
       val arr = if direct then buf.array() else new Array[Byte](n)
       val start = if direct then buf.arrayOffset() + buf.position() else 0
       if !direct then buf.duplicate().get(arr)
-      writeArray(arr, start, n, timeout)(r => buf.position(buf.position() + r): Unit)
+      writeArray(arr, start, n, timeout, deadline)(r => buf.position(buf.position() + r): Unit)
     }
   }
 
   override def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
+    val deadline = deadlineOf(timeout)
     var i = 0
     while i < bufs.length do {
       if !bufs(i).hasRemaining then i += 1
       else if bufs(i).remaining() >= OpenSslStream.RecordSize then {
-        write(bufs(i), timeout)
+        writeOne(bufs(i), timeout, deadline)
         i += 1
       } else {
         var n = 0
@@ -272,7 +280,7 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
           n += k
           j += 1
         }
-        writeArray(gathered, 0, n, timeout) { r =>
+        writeArray(gathered, 0, n, timeout, deadline) { r =>
           var left = r
           while left > 0 do {
             val b = bufs(i)
@@ -286,9 +294,9 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
     }
   }
 
-  private def writeArray(arr: Array[Byte], start: Int, n: Int, timeout: Duration)(taken: Int => Unit)(using
-      Async
-  ): Unit = {
+  private def writeArray(arr: Array[Byte], start: Int, n: Int, timeout: Duration, deadline: Long)(
+      taken: Int => Unit
+  )(using Async): Unit = {
     var written = 0
     while written < n do {
       val (r, err) = pump(
@@ -301,7 +309,8 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
           r
         },
         timeout,
-        reading = false
+        reading = false,
+        deadline
       )
       if r <= 0 then
         if err == OpenSslStream.PeerClosed then throw new IOException("The peer closed the connection")

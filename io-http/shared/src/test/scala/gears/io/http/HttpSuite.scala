@@ -57,6 +57,70 @@ class HttpSuite extends FunSuite {
     }
   }
 
+  test("a handler that refuses a body the client holds back for 100 Continue gets no Continue, and the connection ends") {
+    withServer(Routes(POST("/up") { _ => Response.text("no\n", Status.Forbidden) })) { server =>
+      val started = System.nanoTime()
+      val answer = rawExchange(
+        server,
+        "POST /up HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 10\r\n\r\n"
+      )
+      assert(answer.startsWith("HTTP/1.1 403 "), answer)
+      assert(!answer.contains("100 Continue"), answer)
+      assert(System.nanoTime() - started < 2_000_000_000L, "the connection was kept, waiting for the body")
+    }
+  }
+
+  test("the client does not reuse a connection whose server sent more than its response") {
+    Http.run {
+      val listener = Tcp.listen("127.0.0.1", 0)
+      val port = Tcp.port(listener.localAddress)
+      val accepted = new java.util.concurrent.atomic.AtomicInteger()
+      val serving = Future {
+        while true do {
+          val stream = listener.accept()
+          val n = accepted.incrementAndGet()
+          Future {
+            val buf = ByteBuffer.allocate(4096)
+            stream.read(buf, 5.seconds)
+            val extra = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nevil"
+            val reply = if n == 1 then s"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok$extra" else
+              "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nfine"
+            stream.write(ByteBuffer.wrap(reply.getBytes(StandardCharsets.ISO_8859_1)))
+          }: Unit
+        }
+      }
+      try {
+        assertEquals(Http.get(s"http://127.0.0.1:$port/a").text(), "ok")
+        assertEquals(Http.get(s"http://127.0.0.1:$port/b").text(), "fine")
+        assertEquals(accepted.get(), 2)
+      } finally {
+        serving.cancel()
+        listener.close()
+      }
+    }
+  }
+
+  test("a response's write time limit holds for all of it, not for each part a slow reader takes") {
+    val body = new Array[Byte](64 * 1024 * 1024)
+    val config = quiet.copy(timeouts = ServerTimeouts(write = 300.millis))
+    withServer(Routes(GET("/big") { _ => Response.ok(body) }), config) { server =>
+      val stream = Tcp.connect("127.0.0.1", server.port)
+      try {
+        stream.write(ByteBuffer.wrap("GET /big HTTP/1.1\r\nHost: x\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1)))
+        val buf = ByteBuffer.allocate(1024 * 1024)
+        var received = 0L
+        var open = true
+        while open do {
+          buf.clear()
+          val n = try stream.read(buf, 5.seconds) catch case _: IOException => -1
+          if n < 0 then open = false else received += n
+          AsyncOperations.sleep(20)
+        }
+        assert(received < body.length, s"all $received bytes came, taking longer than the limit")
+      } finally stream.close()
+    }
+  }
+
   test("a kept-alive connection carries request after request, POST too") {
     withServer(Routes(POST("/echo") { r => Response.ok(r.bytes()) }, GET("/n") { _ => "n" })) { server =>
       val client = new HttpClient()
@@ -462,6 +526,19 @@ class HttpSuite extends FunSuite {
         val message = gears.async.withTimeout(10.seconds)(failed.asFuture.await)
         assert(message.contains("not written within"), message)
       } finally stream.close()
+    }
+  }
+
+  test("a WebSocket handshake with a body is refused, chunked too, as its bytes would be read as frames") {
+    val routes = Routes(GET("/ws") { r => WebSocket.accept(r, pingEvery = None) { _ => () } })
+    withServer(routes) { server =>
+      val handshake = s"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: Upgrade\r\n" +
+        "Upgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+      val chunked = "Transfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"
+      for framing <- Seq(chunked, "Content-Length: 2\r\n\r\nhi") do {
+        val answer = rawExchange(server, handshake + framing)
+        assert(answer.startsWith("HTTP/1.1 400 "), s"$framing -> $answer")
+      }
     }
   }
 

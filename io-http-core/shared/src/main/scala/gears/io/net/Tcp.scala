@@ -133,7 +133,7 @@ private[io] object IpLiteral {
     if text.contains(':') then ipv6(text) else ipv4(text).map(b => IpAddress.fromBytes(Protocol.IPv4, b))
 
   private def ipv4(text: String): Option[Array[Byte]] = {
-    val parts = text.split('.')
+    val parts = text.split("\\.", -1)
     if parts.length == 4 && parts.forall(p => p.nonEmpty && p.length <= 3 && p.forall(isDigit) && p.toInt <= 255)
     then Some(parts.map(_.toInt.toByte))
     else None

@@ -249,7 +249,7 @@ object HttpClient {
       var kept = false
       try {
         val result = use(response)
-        if reusable && source.complete then {
+        if reusable && source.complete && connection.input.buffered == 0 then {
           pool.give(connection)
           kept = true
         }
@@ -266,7 +266,7 @@ object HttpClient {
             connection.close()
             throw e
         }
-      if drained then pool.give(connection) else connection.close()
+      if drained && connection.input.buffered == 0 then pool.give(connection) else connection.close()
     }
   }
 

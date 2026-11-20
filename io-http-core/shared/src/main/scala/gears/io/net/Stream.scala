@@ -50,6 +50,15 @@ object Stream {
     case _                      => null
   }
 
+  // - a write's limit holds for all of it, however many partial writes it takes
+  private[io] def left(started: Long, timeout: Duration): Duration = timeout match {
+    case finite: FiniteDuration =>
+      val nanos = finite.toNanos - (System.nanoTime() - started)
+      if nanos <= 0 then throw new BufferedInput.TimedOut(s"Not written within $timeout")
+      Duration.fromNanos(nanos)
+    case _ => timeout
+  }
+
   private[io] inline def uncancelled[A](inline body: Async ?=> A)(using ac: Async): A =
     body(using ac.withGroup(CompletionGroup.Unlinked))
 
@@ -116,7 +125,9 @@ final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.ops.
         writeBuffer = buf
       }
       val op = writeOp.nn
-      while buf.hasRemaining do perform(op, timeout)
+      val started = System.nanoTime()
+      perform(op, timeout)
+      while buf.hasRemaining do perform(op, Stream.left(started, timeout))
     }
 
   override def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit =
@@ -127,7 +138,9 @@ final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.ops.
         writeBuffers = bufs
       }
       val op = writevOp.nn
-      while bufs.exists(_.hasRemaining) do perform(op, timeout)
+      val started = System.nanoTime()
+      perform(op, timeout)
+      while bufs.exists(_.hasRemaining) do perform(op, Stream.left(started, timeout))
     }
 
   def shutdownOutput()(using Async): Unit = io.perform(ops.shutdownOutput(handle))

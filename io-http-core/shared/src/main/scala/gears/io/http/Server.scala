@@ -307,7 +307,7 @@ private[http] object Server {
             case _                 => true
           }
           val reusable =
-            keepAlive && !state.stopping.get() && (bodyDone || (body match {
+            keepAlive && !state.stopping.get() && (bodyDone || continued && (body match {
               case in: Body.Incoming =>
                 try in.drain(64 * 1024)
                 catch case Stream.Failed() => false

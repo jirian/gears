@@ -66,7 +66,9 @@ class WireSuite extends FunSuite {
           "GET / HTTP/1.1x\r\nHost: x\r\n\r\n" -> 400,
           "GET / HTTP/2.0\r\nHost: x\r\n\r\n" -> 505,
           s"GET / HTTP/1.1\r\n${(1 to 101).map(i => s"X-$i: v\r\n").mkString}\r\n" -> 431,
-          "GET / HTTP/1.1\r\nHost: x\r\n" -> 400
+          "GET / HTTP/1.1\r\nHost: x\r\n" -> 400,
+          "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: \u000bchunked\r\n\r\n" -> 400,
+          "GET / HTTP/1.1\r\nHost: x\u000c\r\n\r\n" -> 400
         )
       do assertEquals(refusal(text), status, text)
     }

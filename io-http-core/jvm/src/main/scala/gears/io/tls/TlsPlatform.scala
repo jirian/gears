@@ -242,6 +242,7 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     Stream.holding(writing)(wrapHeld(Array(src), timeout))
 
   private def wrapHeld(srcs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
+    val started = System.nanoTime()
     if netOut.hasRemaining then underlying.write(netOut, timeout)
     var more = true
     while more do {
@@ -252,7 +253,7 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
           netOut = ByteBuffer.allocate(netOut.capacity() + session.getPacketBufferSize)
         case SSLEngineResult.Status.CLOSED | SSLEngineResult.Status.OK =>
           netOut.flip()
-          if netOut.hasRemaining then underlying.write(netOut, timeout)
+          if netOut.hasRemaining then underlying.write(netOut, Stream.left(started, timeout))
           if r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_TASK then runTasks()
           more = EngineStream.remains(srcs) && r.getStatus == SSLEngineResult.Status.OK ||
             r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP

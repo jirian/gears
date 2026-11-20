@@ -212,8 +212,8 @@ private[http] object Wire {
       if i < colon then throw new Malformed(Status.BadRequest, s"A malformed header name: $name")
       var vs = colon + 1
       var ve = lineTo
-      while vs < ve && (bytes(vs) & 0xff) <= ' ' do vs += 1
-      while ve > vs && (bytes(ve - 1) & 0xff) <= ' ' do ve -= 1
+      while vs < ve && (bytes(vs) == ' ' || bytes(vs) == '\t') do vs += 1
+      while ve > vs && (bytes(ve - 1) == ' ' || bytes(ve - 1) == '\t') do ve -= 1
       i = vs
       while i < ve && { val c = bytes(i) & 0xff; c != 0 && c != 127 && (c >= ' ' || c == '\t') } do i += 1
       if i < ve then throw new Malformed(Status.BadRequest, s"A control character in header $name")
@@ -233,9 +233,8 @@ private[http] object Wire {
       throw new Malformed(Status.BadRequest, "An empty Transfer-Encoding")
     if te.nonEmpty then {
       if lengths.nonEmpty then throw new Malformed(Status.BadRequest, "Both Transfer-Encoding and Content-Length")
-      if !te.last.equalsIgnoreCase("chunked") || te.count(_.equalsIgnoreCase("chunked")) != 1 then
+      if te.length != 1 || !te.head.equalsIgnoreCase("chunked") then
         throw new Malformed(Status.NotImplemented, s"Transfer-Encoding ${te.mkString(", ")} is not supported")
-      if te.length != 1 then throw new Malformed(Status.NotImplemented, s"Transfer-Encoding ${te.mkString(", ")}")
       Framing.Chunked
     } else if lengths.nonEmpty then {
       if lengths.length != 1 then throw new Malformed(Status.BadRequest, "Content-Lengths that disagree")

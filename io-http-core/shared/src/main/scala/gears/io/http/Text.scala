@@ -60,8 +60,8 @@ private[http] object Text {
       if end < 0 then end = value.length
       var s = start
       var e = end
-      while s < e && value.charAt(s) <= ' ' do s += 1
-      while e > s && value.charAt(e - 1) <= ' ' do e -= 1
+      while s < e && (value.charAt(s) == ' ' || value.charAt(s) == '\t') do s += 1
+      while e > s && (value.charAt(e - 1) == ' ' || value.charAt(e - 1) == '\t') do e -= 1
       if e > s && e - s == token.length && regionSame(value, s, token, token.length) then return true
       start = end + 1
     }

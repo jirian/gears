@@ -1,6 +1,5 @@
-// Based on Jamie Thompson's TimerHeap, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears at
-// commit 44bb0119 (2026-11-07), tagged jamie-runtime-base in this repository. Changed since: a timer's key is never
-// negative, and a timer is taken off for good and marked so in one step (`takeOff`, `claimFiring`).
+// Based on Jamie Thompson's TimerHeap, bishabosha/gears@44bb0119, tag jamie-runtime-base.
+// - changed: keys never negative; takeOff/claimFiring
 
 package gears.async.io.shareable
 
@@ -35,10 +34,6 @@ object TimerHeap {
     /** Fires the timer. It left the heap for this, under the heap's lock, so `removeTimer` can no longer stop it. */
     def timerWakeup(actAfter: Long): Unit
 
-    /** Set as `takeOff` takes it off the heap for good, under the heap's lock; cleared by whoever performs it again. A
-      * completion that finds it gone from the heap tells by this whether a withdrawal took it, and the completion is to
-      * fire it, or the heap fired it (`claimFiring`).
-      */
     @volatile private[async] var offHeap = false
 
     /** Where the heap holds this timer, or -1. Guarded by the heap's lock, as is `heapKey`. */
@@ -116,9 +111,6 @@ abstract class TimerHeap[A <: TimerOp] extends Poller with TimerSource[A] {
     index >= 0 && index < size && (heap(index) eq timerOp)
   }
 
-  /** Its deadline, or 0 for one before 0, which has passed too, as `System.nanoTime` on Linux counts from boot: a key
-    * is never negative, which `peekNextDeadline` means as no timer at all, and a worker would wait for ever.
-    */
   private def keyOf(timerOp: TimerOp): Long = math.max(timerOp.deadlineNow, 0L)
 
   private def rekey(timerOp: TimerOp): Unit = {
@@ -172,9 +164,7 @@ abstract class TimerHeap[A <: TimerOp] extends Poller with TimerSource[A] {
     held
   }
 
-  /** As `removeTimer`, and marks it `offHeap` in the same step: between two steps, a completion would find it neither
-    * held nor marked, and take the heap to have fired it, while the withdrawal leaves its firing to the completion.
-    */
+  // - removal and mark in one step: a completion in between would find neither, and wake no one
   final def takeOff(timerOp: A): Boolean = timerLock.synchronized {
     val held = holds(timerOp)
     if held then {
@@ -184,10 +174,7 @@ abstract class TimerHeap[A <: TimerOp] extends Poller with TimerSource[A] {
     held
   }
 
-  /** For a completion of `timerOp`, which has a deadline: true if the completion is to fire it, it being taken off the
-    * heap for good (`takeOff`, or `offHeap` set by its worker) or taken out now; false if the heap fired it, or will.
-    * The mark is read again after the heap's lock, which orders it after a `takeOff`.
-    */
+  // - the mark is read again after the heap's lock, which orders it after a `takeOff`
   final def claimFiring(timerOp: A): Boolean = timerOp.offHeap || removeTimer(timerOp) || timerOp.offHeap
 
   final def notifyDeadlineChange(timerOp: TimerOp): Unit = {

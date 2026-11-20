@@ -13,12 +13,8 @@ import scala.concurrent.duration.DurationInt
 
 import munit.FunSuite
 
-/** The wire format on its own, over a stream in memory: how a request head is parsed and refused, and how a message's
-  * headers frame its body.
-  */
 class WireSuite extends FunSuite {
 
-  /** A stream that reads `text`, ISO-8859-1, then ends, and drops what is written to it. */
   private final class InMemory(text: String) extends Stream {
     private val bytes = ByteBuffer.wrap(text.getBytes(StandardCharsets.ISO_8859_1))
     def read(buf: ByteBuffer, timeout: Duration)(using Async): Int =
@@ -41,7 +37,6 @@ class WireSuite extends FunSuite {
   private def head(text: String)(using Async): Wire.RequestHead | Null =
     Wire.readRequestHead(new BufferedInput(new InMemory(text)), Limits(), 1.second, 1.second)
 
-  /** The status a head is refused with, or 0 if it is not. */
   private def refusal(text: String)(using Async): Int =
     try {
       head(text)
@@ -62,22 +57,21 @@ class WireSuite extends FunSuite {
   test("a malformed request head is refused with its status") {
     Http.run {
       for (text, status) <- Seq(
-          "GET / HTTP/1.1\nHost: x\r\n\r\n" -> 400, // a bare LF
-          "GET / HTTP/1.1\r\nHost: x\rY: z\r\n\r\n" -> 400, // a bare CR
-          "GET / HTTP/1.1\r\nHost : x\r\n\r\n" -> 400, // a space before the colon
-          "GET / HTTP/1.1\r\nHost: x\r\n folded\r\n\r\n" -> 400, // an obsolete line folding
-          "GET /  HTTP/1.1\r\nHost: x\r\n\r\n" -> 400, // three spaces in the request line
-          "G(T / HTTP/1.1\r\nHost: x\r\n\r\n" -> 400, // a method that is not a token
+          "GET / HTTP/1.1\nHost: x\r\n\r\n" -> 400,
+          "GET / HTTP/1.1\r\nHost: x\rY: z\r\n\r\n" -> 400,
+          "GET / HTTP/1.1\r\nHost : x\r\n\r\n" -> 400,
+          "GET / HTTP/1.1\r\nHost: x\r\n folded\r\n\r\n" -> 400,
+          "GET /  HTTP/1.1\r\nHost: x\r\n\r\n" -> 400,
+          "G(T / HTTP/1.1\r\nHost: x\r\n\r\n" -> 400,
           "GET / HTTP/1.1x\r\nHost: x\r\n\r\n" -> 400,
           "GET / HTTP/2.0\r\nHost: x\r\n\r\n" -> 505,
-          s"GET / HTTP/1.1\r\n${(1 to 101).map(i => s"X-$i: v\r\n").mkString}\r\n" -> 431, // over 100 fields
-          "GET / HTTP/1.1\r\nHost: x\r\n" -> 400 // the stream ends within the head
+          s"GET / HTTP/1.1\r\n${(1 to 101).map(i => s"X-$i: v\r\n").mkString}\r\n" -> 431,
+          "GET / HTTP/1.1\r\nHost: x\r\n" -> 400
         )
       do assertEquals(refusal(text), status, text)
     }
   }
 
-  /** A chunked body read to its end: its text, or the status it is refused with. */
   private def chunked(text: String)(using Async): Either[Int, String] = {
     val source = new Wire.Source(
       new BufferedInput(new InMemory(text)),
@@ -108,23 +102,23 @@ class WireSuite extends FunSuite {
   test("a chunk line or trailer that another parser could end elsewhere is refused") {
     Http.run {
       for text <- Seq(
-          "2;\nxx\r\nhi\r\n0\r\n\r\n", // a bare LF in an extension
-          "2;a\rb\r\nhi\r\n0\r\n\r\n", // a bare CR in an extension
-          "2\nhi\r\n0\r\n\r\n", // a size line ended by a bare LF
-          " 2\r\nhi\r\n0\r\n\r\n", // whitespace before the size
-          "2 \r\nhi\r\n0\r\n\r\n", // whitespace after it, with no extension
-          "2;\r\nhi\r\n0\r\n\r\n", // an extension with no name
-          "2;a=\r\nhi\r\n0\r\n\r\n", // or no value after =
-          "2;a=\"x\r\nhi\r\n0\r\n\r\n", // a quoted value not closed
-          "2;a=b c\r\nhi\r\n0\r\n\r\n", // two tokens
+          "2;\nxx\r\nhi\r\n0\r\n\r\n",
+          "2;a\rb\r\nhi\r\n0\r\n\r\n",
+          "2\nhi\r\n0\r\n\r\n",
+          " 2\r\nhi\r\n0\r\n\r\n",
+          "2 \r\nhi\r\n0\r\n\r\n",
+          "2;\r\nhi\r\n0\r\n\r\n",
+          "2;a=\r\nhi\r\n0\r\n\r\n",
+          "2;a=\"x\r\nhi\r\n0\r\n\r\n",
+          "2;a=b c\r\nhi\r\n0\r\n\r\n",
           "+2\r\nhi\r\n0\r\n\r\n",
           "0x2\r\nhi\r\n0\r\n\r\n",
-          "\u00b2\r\nhi\r\n0\r\n\r\n", // a digit outside ASCII
-          "1234567890abcdef\r\n", // too many digits
-          "2\r\nhi\r\n0\r\nX-A: 1\nX-B: 2\r\n\r\n", // a bare LF in a trailer
-          "2\r\nhi\r\n0\r\nno colon\r\n\r\n", // a trailer that is no field
-          "2\r\nhi\r\n0\r\nX-A: 1\r\n folded\r\n\r\n", // a folded one
-          "2\r\nhiX\r\n0\r\n\r\n" // a chunk longer than its size
+          "\u00b2\r\nhi\r\n0\r\n\r\n",
+          "1234567890abcdef\r\n",
+          "2\r\nhi\r\n0\r\nX-A: 1\nX-B: 2\r\n\r\n",
+          "2\r\nhi\r\n0\r\nno colon\r\n\r\n",
+          "2\r\nhi\r\n0\r\nX-A: 1\r\n folded\r\n\r\n",
+          "2\r\nhiX\r\n0\r\n\r\n"
         )
       do assertEquals(chunked(text), Left(400), text)
     }
@@ -156,7 +150,7 @@ class WireSuite extends FunSuite {
   test("a body in memory, or one a function writes, is read from its start by each of its readers") {
     Http.run {
       def all(reader: Body.Reader): String = {
-        val buf = ByteBuffer.allocate(2) // a few bytes at a time
+        val buf = ByteBuffer.allocate(2)
         val out = new StringBuilder
         while reader.read(buf) >= 0 do {
           out ++= new String(buf.array(), 0, buf.position(), StandardCharsets.UTF_8)
@@ -184,7 +178,7 @@ class WireSuite extends FunSuite {
     val h = Headers("Content-Type" -> "text/plain", "connection" -> "Upgrade ,  Close", "X-Id" -> "1")
     assertEquals(h.get("CONTENT-TYPE"), Some("text/plain"))
     assertEquals(h.get("Content-Typf"), None)
-    assertEquals(h.get("Content_Type"), None) // '_' and DEL differ by the bit that folds a letter's case
+    assertEquals(h.get("Content_Type"), None)
     assert(h.hasToken("Connection", "close"))
     assert(h.hasToken("Connection", "UPGRADE"))
     assert(!h.hasToken("Connection", "clos"))
@@ -197,7 +191,6 @@ class WireSuite extends FunSuite {
     assertEquals(h, Headers("Content-Type" -> "text/plain", "connection" -> "Upgrade ,  Close", "X-Id" -> "1"))
   }
 
-  /** A stream that keeps what is written to it, and each buffer, and each array of buffers, it was given. */
   private final class Recording extends Stream {
     val written = new java.io.ByteArrayOutputStream()
     val buffers = scala.collection.mutable.ArrayBuffer.empty[ByteBuffer]
@@ -248,7 +241,6 @@ class WireSuite extends FunSuite {
           assertEquals(stream.arrays.size, 3)
           assert(stream.arrays.forall(_ eq stream.arrays.head), "a new array for a write")
         } else {
-          // The head goes with the first write; the others are the caller's array alone.
           assertEquals((stream.arrays.size, stream.buffers.size), (1, 2))
           assert(stream.buffers(1) eq stream.buffers(0), "a new buffer for a write")
         }

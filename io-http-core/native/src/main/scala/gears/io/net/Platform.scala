@@ -3,10 +3,8 @@ package gears.io.net
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-/** What Scala Native gives the higher level that differs by platform. */
 object Platform {
 
-  /** `n` random bytes from the kernel, for a WebSocket client's masks. */
   def randomBytes(n: Int): Array[Byte] = {
     val out = new Array[Byte](n)
     var got = 0

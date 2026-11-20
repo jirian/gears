@@ -16,7 +16,6 @@ import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
 
-/** An op like a read: it has no deadline of its own, and only a time limit puts it on the heap. */
 private[shareable] final class WaitingOp extends RepeatableAbstractTimerHeapOp {
   def wakeup(resumedAt: Long): Try[Unit] = WorkpoolScheduler.SuccessUnit
 }
@@ -33,7 +32,6 @@ private[shareable] object WaitingBackend extends Backend {
   private[io] def run[T](program: Io[Interface] ?=> Async.Spawn ?=> T): T = ???
 }
 
-/** One worker, so that a task runs until it suspends, and in the order it was submitted. */
 private[shareable] final class WaitingScheduler
     extends WorkpoolScheduler[WaitingOp, WaitingOps.type](WaitingBackend, WaitingOps, 1)
     with NativeSuspend {

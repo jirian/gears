@@ -1,7 +1,5 @@
-// Based on Jamie Thompson's TimerHeapOp, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears at
-// commit 44bb0119 (2026-11-07), tagged jamie-runtime-base in this repository. Changed since: work the poller has done
-// already is delivered even to a cancelled performer (`committed`, `succeeded`), a time limit takes its op back from
-// the poller first (`limitReached`), entry is atomic, a time-out has no stack trace, and the time limit takes no lock.
+// Based on Jamie Thompson's TimerHeapOp, bishabosha/gears@44bb0119, tag jamie-runtime-base.
+// - changed: committed, succeeded, limitReached, atomic entry, stackless time-out, no per-op lock
 
 package gears.async.io.shareable
 
@@ -21,16 +19,12 @@ object TimerHeapOp {
     def onEntry(): Unit = ()
   }
 
-  /** An op's time running out, without a stack trace, which is the cost of a timeout on Scala Native, where the stack
-    * is walked with libunwind; a read given a deadline is how a protocol waits, so it is common.
-    */
   private[async] final class TimedOut extends TimeoutException("operation timed out") {
     override def fillInStackTrace(): Throwable = this
   }
 }
 
 trait TimerHeapOp extends WorkpoolScheduler.AsyncOp, WorkpoolScheduler.ReentrantOp
-
 
 sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.Hooks {
   private val state = AtomicReference[Try[Unit]](null)
@@ -49,7 +43,6 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
 
   @volatile private var worker: TimerHeap.TimerSource[?] | Null = null
 
-  // Each a single volatile field, read and written alone: no lock is needed for them, which every timed op would take.
   @volatile private var timeoutDeadline = -1L
 
   def minDeadline: Long = timeoutDeadline
@@ -123,7 +116,6 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
     // The limit decides only if it has passed and came first: at a tie the op has made its own deadline.
     val timedOut =
       timeoutDeadline0 >= 0 && resumedAt >= timeoutDeadline0 && (ownDeadline0 < 0 || timeoutDeadline0 < ownDeadline0)
-    // Work already done is delivered, limit or not; an op the poller still holds waits for it to let go.
     if timedOut && !committed && !limitReached() then return
     val consumer = listenerLock.synchronized {
       val waiting = listener
@@ -140,33 +132,21 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
       settle(result)
       consumer.complete(result, this)
     else if committed then
-      // Its work can't be undone, so its performer, cancelled meanwhile, gets it all the same (`succeeded`).
       settle(try wakeup(resumedAt) catch case NonFatal(ex) => Failure(ex))
     else
       settle(Failure(gears.async.cancellation()))
 
-  /** Whether the poller has done the op's work already, as io_uring does a read's: its outcome is then delivered even
-    * to a performer cancelled or out of time meanwhile, since the work can't be undone. False for an op whose work is
-    * done as it fires, under its consumer's lock, as a readiness poller's is, and for a timer.
-    */
   protected def committed: Boolean = false
 
-  /** The op's time limit has passed: takes the op back from the poller. True if the poller has let go of it, or never
-    * held it, so that it fails with a `TimeoutException` now; false if the poller lets go only later, and fires the op
-    * again then, when this is asked again.
-    */
   protected def limitReached(): Boolean = true
 
-  /** Whether the op settled with a success: its work done, for a performer that was cancelled meanwhile. */
   final def succeeded: Boolean = state.get() match {
     case null => false
     case outcome => outcome.isSuccess
   }
 
-  /** Whether the op has settled this performance: a firing that comes after has nothing to do. */
   final def isSettled: Boolean = state.get() != null
 
-  /** Takes no lock of its own: the heap reads `deadlineNow` under the heap's. */
   final def requestTimersUpdate(): Unit = {
     val w = worker
     if w != null then
@@ -212,7 +192,6 @@ sealed abstract class AbstractTimerHeapOp extends TimerHeapOp with TimerHeapOp.H
 }
 
 abstract class SingleUseAbstractTimerHeapOp extends AbstractTimerHeapOp {
-  // Atomic: two performers at once must not both get in.
   private val spent = new java.util.concurrent.atomic.AtomicBoolean()
   final def requestEntry(): Unit = {
     if !spent.compareAndSet(false, true) then throw new IllegalStateException("Already consumed")
@@ -224,7 +203,6 @@ abstract class SingleUseAbstractTimerHeapOp extends AbstractTimerHeapOp {
 }
 
 abstract class RepeatableAbstractTimerHeapOp extends AbstractTimerHeapOp with Repeatable {
-  // Atomic: two performers at once must not both get in.
   private val entered = new java.util.concurrent.atomic.AtomicBoolean()
   final def requestEntry(): Unit = {
     if !entered.compareAndSet(false, true) then throw new IllegalStateException("Concurrent entry not allowed")

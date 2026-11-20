@@ -1,26 +1,4 @@
-// from https://github.com/armanbilge/fs2-io_uring/blob/main/uring/src/main/scala/fs2/io/uring/unsafe/uring.scala
-// Modified for gears: moved to package gears.async.io.uring, linked with @link("uring"), shim symbols renamed to
-// gears_*, and fs2's unused bindings removed (close, connect, shutdown and socket preparations, user data, timed waits).
-// Ours, not fs2's: the poll_add, read, write, readv, writev, fsync, sendmsg and recvmsg preparations; the synchronous
-// cancels (cancel_fd, cancel_now); a submit and wait in one call; io_uring_sq_ready, get_events, size, features and
-// cq_overflowing. struct io_uring is opaque here: the ring allocates io_uring_size() bytes for it, so a liburing whose
-// struct grows cannot be written past.
 
-/*
- * Copyright 2022 Arman Bilge
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 
 package gears.async.io
 package uring
@@ -30,9 +8,6 @@ import scala.scalanative.posix.sys.socket._
 import scala.scalanative.unsafe._
 import scala.scalanative.unsigned._
 
-/** liburing's functions and the kernel's io_uring structures. The three helpers liburing only has as `static inline`,
-  * and a synchronous cancel, come from `uring_shim.c` under `gears_` names.
-  */
 @link("uring")
 @extern
 private[uring] object uring {
@@ -61,7 +36,6 @@ private[uring] object uring {
   type iovec = CStruct2[Ptr[Byte], size_t]
   type msghdr = CStruct7[Ptr[Byte], CUnsignedInt, Ptr[iovec], size_t, Ptr[Byte], size_t, CInt]
 
-  /** liburing's ring, only ever behind a pointer: `Ring` allocates `io_uring_size()` bytes for it. */
   type io_uring = CStruct0
 
   type io_uring_cqe = CStruct3[__u64, __s32, __u32]
@@ -126,7 +100,6 @@ private[uring] object uring {
 
 }
 
-/** liburing's `static inline` prep helpers, and field accessors for the `CStruct`s above. */
 private[uring] object uringStructOps {
 
   import uring._
@@ -231,8 +204,6 @@ private[uring] object uringStructOps {
     sqe.msg_flags = flags.toUInt
   }
 
-  // The fields at their offsets in the kernel's ABI, not through the struct's tag: Scala Native works out a field's
-  // offset from the tag on every access, with virtual calls, which made preparing an entry 2% of an HTTP server's time.
   implicit final class io_uring_sqeOps(val io_uring_sqe: Ptr[io_uring_sqe]) extends AnyVal {
     private inline def at[T](offset: Int): Ptr[T] = (io_uring_sqe.asInstanceOf[Ptr[Byte]] + offset).asInstanceOf[Ptr[T]]
 
@@ -257,7 +228,6 @@ private[uring] object uringStructOps {
     inline def len: __u32 = !at[__u32](24)
     inline def len_=(len: __u32): Unit = !at[__u32](24) = len
 
-    // One union in the kernel's struct: the op's flags.
     inline def rw_flags: __kernel_rwf_t = !at[__kernel_rwf_t](28)
     inline def rw_flags_=(rw_flags: __kernel_rwf_t): Unit = !at[__kernel_rwf_t](28) = rw_flags
     inline def msg_flags: __u32 = !at[__u32](28)
@@ -274,7 +244,6 @@ private[uring] object uringStructOps {
     inline def user_data: __u64 = !at[__u64](32)
     inline def user_data_=(user_data: __u64): Unit = !at[__u64](32) = user_data
 
-    /** Zeroes the 24 bytes after `user_data`: the buffer index, personality, splice descriptor and third address. */
     inline def clearTail(): Unit = {
       !at[Long](40) = 0L
       !at[Long](48) = 0L

@@ -1,8 +1,5 @@
 addSbtPlugin("org.portable-scala" % "sbt-scalajs-crossproject" % "1.4.0")
 addSbtPlugin("org.portable-scala" % "sbt-scala-native-crossproject" % "1.4.0")
-// SCALA_NATIVE_NIGHTLY=1 builds against a Scala Native nightly instead, for benchmarking release builds: on 0.5.12 the
-// GC can collect objects referenced only by interior pointers (scala-native#5080), which crashes multithreaded release
-// builds of the gears demos and the HTTP bench server.
 val scalaNativeNightly = sys.env.get("SCALA_NATIVE_NIGHTLY").contains("1")
 resolvers ++= (if (scalaNativeNightly) Seq(Resolver.sonatypeCentralSnapshots) else Nil)
 addSbtPlugin(

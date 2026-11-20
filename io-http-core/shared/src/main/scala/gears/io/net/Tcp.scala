@@ -17,13 +17,8 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 
-/** TCP: connecting by host name or address, and listening. */
 object Tcp {
 
-  /** Connects to `host`, a name or an IPv4 or IPv6 address, on `port`, and returns the stream, with `TCP_NODELAY` on,
-    * as every stream socket of the interface has it. A name is resolved, and its addresses tried in turn, IPv4 ones
-    * first, until one connects, within `timeout` in all; the last one's failure is thrown if none does.
-    */
   def connect(host: String, port: Int, timeout: Duration = 10.seconds)(using
       io: Io[IpStreams & Resolving],
       async: Async
@@ -40,7 +35,6 @@ object Tcp {
     val it = candidates.iterator
     while result == null && it.hasNext do {
       val address = it.next()
-      // Each address has its share of the time left, so that one that never answers leaves time for the next.
       val own =
         if deadline == Long.MaxValue || left == 1 then deadline
         else System.nanoTime() + math.max(deadline - System.nanoTime(), 0L) / left
@@ -58,7 +52,6 @@ object Tcp {
     result.nn
   }
 
-  /** Connects to `address` and returns the stream. */
   def connect(address: IpSocketAddress)(using io: Io[IpStreams], async: Async): SocketStream =
     connectTo(address, Long.MaxValue)
 
@@ -77,7 +70,6 @@ object Tcp {
     new SocketStream(io)(into.clear())
   }
 
-  /** `host`'s addresses on `port`: itself if it is numeric, else what resolving it gives, IPv4 first. */
   private def addresses(host: String, port: Int, deadline: Long)(using
       io: Io[IpStreams & Resolving],
       async: Async
@@ -98,13 +90,9 @@ object Tcp {
     }
   }
 
-  /** `host` as an address on `port`, if it is a numeric IPv4 or IPv6 one. */
   private[io] def numeric(host: String, port: Int): Option[IpSocketAddress] =
     IpLiteral.parse(host).map(IpSocketAddress(_, port))
 
-  /** Listens on `host`, a numeric address, `0.0.0.0` or `::` for every interface, and `port`, 0 for one the system
-    * picks (`Listener.localAddress` says which).
-    */
   def listen(host: String = "0.0.0.0", port: Int)(using io: Io[IpStreams], async: Async): Listener = {
     val address = numeric(host, port).getOrElse(throw new IllegalArgumentException(s"Not a numeric address: $host"))
     listen(address)
@@ -116,14 +104,12 @@ object Tcp {
     new Listener(io)(into.clear())
   }
 
-  /** The port of a listener's or a stream's address. */
   def port(address: IpSocketAddress | UnixAddress): Int = address match {
     case IpSocketAddress(_, p) => p
     case _: UnixAddress        => throw new IllegalArgumentException(s"$address has no port")
   }
 }
 
-/** Unix domain stream sockets. */
 object Unix {
 
   def connect(path: String)(using io: Io[UnixStreams], async: Async): SocketStream = {
@@ -139,12 +125,8 @@ object Unix {
   }
 }
 
-/** Numeric IP addresses written as text: dotted IPv4, and IPv6 with `::` and an optional dotted IPv4 tail and numeric
-  * `%scope`. Nothing is resolved, and anything else, a host name, is `None`.
-  */
 private[io] object IpLiteral {
 
-  /** An ASCII digit: `Char.isDigit` takes other scripts' too. */
   private def isDigit(c: Char): Boolean = c >= '0' && c <= '9'
 
   def parse(text: String): Option[IpAddress] =
@@ -170,9 +152,6 @@ private[io] object IpLiteral {
   private def scopeId(text: String): Option[Int] =
     if text.nonEmpty && text.length <= 9 && text.forall(isDigit) then Some(text.toInt) else None
 
-  /** The 16 bytes of `text`, without its scope: hex groups, at most one `::` for a run of zero groups, and a dotted
-    * IPv4 tail only at the very end.
-    */
   private def groups(text: String): Option[Array[Byte]] = {
     val gap = text.indexOf("::")
     if gap >= 0 && text.indexOf("::", gap + 1) >= 0 then None

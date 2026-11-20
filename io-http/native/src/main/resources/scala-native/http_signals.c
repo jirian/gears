@@ -1,6 +1,3 @@
-// The termination signals `Http.serve` stops gracefully on, SIGTERM and SIGINT, caught in C: a handler may call only
-// async-signal-safe functions, which code compiled by Scala Native, with its collector's safepoints, is not. The
-// handler writes the signal's number to a pipe, which a thread of the program reads (`DefaultPlatform.onTermination`).
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -12,6 +9,7 @@
 
 static int gears_http_signal_write = -1;
 
+// - a handler may only make async-signal-safe calls, which Scala Native code is not: it writes to a pipe
 static void gears_http_on_signal(int sig) {
     int saved = errno;
     unsigned char c = (unsigned char)sig;
@@ -20,8 +18,6 @@ static void gears_http_on_signal(int sig) {
     errno = saved;
 }
 
-// Catches SIGTERM and SIGINT from now on, and returns the read end of the pipe each is written to, or -1 if they could
-// not be caught. The same pipe on every call.
 int gears_http_signal_pipe(void) {
     static int read_end = -1;
     if (read_end >= 0) return read_end;

@@ -5,7 +5,6 @@ import gears.async.io.shareable.DeadlineContract
 import gears.async.io.shareable.SchedulingContract
 import gears.async.io.shareable.StressContract
 
-/** The shared runtime's contracts (from `io-runtime`'s tests) over io_uring's workers. */
 class UringSchedulingSuite extends SchedulingContract {
   type I = UringOps.type
   val backend: UringBackend.type = UringBackend

@@ -7,12 +7,8 @@ import gears.async.Future
 import java.util.concurrent.CancellationException
 import scala.concurrent.duration.*
 
-/** For a backend on the shared runtime (`WorkpoolScheduler`), with timers that complete as soon as they are scheduled,
-  * so that completion races the performer's wait for it, and submissions race each worker going to sleep.
-  */
 abstract class StressContract extends munit.FunSuite {
 
-  /** The backend, and a pool of `workers` workers performing its ops. */
   type I <: Interface
   val backend: Backend { type Interface = I }
   def newPool(workers: Int): WorkpoolScheduler[?, ?] & Io[I]
@@ -49,7 +45,7 @@ abstract class StressContract extends munit.FunSuite {
         workers.add(Thread.currentThread())
         io.perform(io.ops.timer(60_000))
       }
-      io.perform(io.ops.timer(50)) // so that they are waiting
+      io.perform(io.ops.timer(50))
       waiters
     }
     val elapsed = System.nanoTime() - started
@@ -63,7 +59,7 @@ abstract class StressContract extends munit.FunSuite {
   test("a scheduler that has shut down refuses work") {
     val pool = newPool(1)
     pool.shutdown()
-    pool.shutdown() // nothing left to do
+    pool.shutdown()
     intercept[IllegalStateException](pool.execute(() => ()))
     intercept[IllegalStateException](pool.schedule(1.milli, () => ()))
   }
@@ -85,7 +81,7 @@ abstract class StressContract extends munit.FunSuite {
       val timer = io.ops.timer(delay)
       for round <- 1 to 2000 do {
         val waiting = Future(io.perform(timer))
-        val cancelAt = System.nanoTime() + delay.toNanos - 100_000L + (round % 20) * 10_000L // either side of it firing
+        val cancelAt = System.nanoTime() + delay.toNanos - 100_000L + (round % 20) * 10_000L
         while System.nanoTime() < cancelAt do Thread.onSpinWait()
         waiting.cancel()
         waiting.awaitResult: Unit
@@ -101,7 +97,6 @@ abstract class StressContract extends munit.FunSuite {
     Io.run { io ?=>
       for round <- 1 to 200 do {
         val deadline = System.nanoTime() + 5_000_000L
-        // More futures than workers, so that some share a heap: the first resumed cancels the rest of its batch.
         val waiters = new Array[Future[Unit]](4 * Runtime.getRuntime.availableProcessors)
         for i <- waiters.indices do
           waiters(i) = Future {

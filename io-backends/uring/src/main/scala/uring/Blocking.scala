@@ -14,26 +14,15 @@ import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-/** The threads blocking work runs on, off the workers, in two pools with a cap each: one for name lookups, one for the
-  * rest (opens, and `Blocking.blocking`), so that lookups a slow resolver holds up cannot starve an open. A pool starts
-  * threads as work comes, up to its cap, then queues it, first come, first served; a task cancelled or out of time
-  * while it waits is skipped when its turn comes, without taking a thread. Threads are daemons, ended once idle for a
-  * minute. A lookup nothing can interrupt, given up on, keeps its thread until it returns: the cap bounds how many a
-  * resolver that does not answer can hold.
-  */
 private[uring] object BlockingPool {
 
-  /** Threads for name lookups at most, each lookup a `getaddrinfo` call. */
   inline val Lookups = 16
 
-  /** Threads for the rest at most: a body of `Blocking.blocking` that waits for another past this many waits for ever.
-    */
   inline val Others = 64
 
   val lookups: Pool = new Pool("lookup", Lookups)
   val others: Pool = new Pool("blocking", Others)
 
-  /** Up to `cap` threads, then a queue. */
   final class Pool(name: String, cap: Int) {
     private val counter = new java.util.concurrent.atomic.AtomicInteger()
     private val executor = {
@@ -55,16 +44,11 @@ private[uring] object BlockingPool {
 
     def run(task: Runnable): Unit = executor.execute(task)
 
-    /** Its threads now, and the most it has had at once. */
     def threads: Int = executor.getPoolSize()
     def mostThreads: Int = executor.getLargestPoolSize()
   }
 }
 
-/** Opens a regular file and writes its handle into `into` (see `RegularFiles.open`), on the blocking pool: it opens
-  * without blocking, so that a FIFO, which it then refuses, cannot keep it waiting for a writer, and turns blocking off
-  * again for the regular file, so that io_uring reads uncached data from the disk rather than reporting would-block.
-  */
 private[uring] final class OpenFile(path: String, write: Boolean, into: Slot[FileHandle])
     extends BlockingTask[FileHandle](
       () => Files.open(path, write),
@@ -100,7 +84,6 @@ private[uring] object Files {
     new FileHandle(fd, path)
   }
 
-  /** Opens the FIFO at `path`, its read end, or its write end if `write`, non-blocking. */
   def openFifo(path: String, write: Boolean): FifoSource | FifoSink = Zone.acquire { implicit z =>
     val access = if write then fcntl.O_WRONLY else fcntl.O_RDONLY
     val fd = fcntl.open(toCString(path), access | fcntl.O_NONBLOCK | Linux.O_CLOEXEC)
@@ -118,11 +101,6 @@ private[uring] object Files {
   }
 }
 
-/** Opens a FIFO's read end or write end and writes it into `into` (see `Fifos`), on the blocking pool: it opens without
-  * blocking, so that neither end waits for the other, and keeps the end non-blocking, so that a read or a write tried
-  * at once never blocks the worker. A writer's open fails while the FIFO has no reader; any other kind of file is
-  * refused.
-  */
 private[uring] final class OpenFifo[H <: UringHandle](path: String, write: Boolean, into: Slot[H])
     extends BlockingTask[H](
       () => Files.openFifo(path, write).asInstanceOf[H],
@@ -134,7 +112,6 @@ private[uring] final class OpenFifo[H <: UringHandle](path: String, write: Boole
   override def toString: String = s"open of FIFO $path"
 }
 
-/** Resolves a host name with `getaddrinfo`, on the lookups' pool, which nothing interrupts. */
 private[uring] final class Resolve(host: String, into: Slot[List[IpAddress]])
     extends BlockingTask[List[IpAddress]](
       () => Resolve.lookup(host),
@@ -153,11 +130,10 @@ private[uring] object Resolve {
     if host.indexOf('\u0000') >= 0 then throw new IllegalArgumentException(s"A host name has no NUL: $host")
   }
 
-  /** Every IPv4 and IPv6 address of `host`, in the resolver's order, without repeats. Blocks. */
   def lookup(host: String): List[IpAddress] = Zone.acquire { implicit z =>
     val bare = if host.startsWith("[") && host.endsWith("]") then host.substring(1, host.length - 1) else host
     val hints = alloc[netdb.addrinfo]()
-    hints.ai_socktype = socket.SOCK_STREAM // one entry per address rather than one per socket type
+    hints.ai_socktype = socket.SOCK_STREAM
     val results = alloc[Ptr[netdb.addrinfo]]()
     val status = netdb.getaddrinfo(toCString(bare), null, hints, results)
     if status != 0 then throw new IOException(s"Failed to resolve $host: ${fromCString(netdb.gai_strerror(status))}")

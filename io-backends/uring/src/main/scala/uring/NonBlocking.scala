@@ -1,4 +1,3 @@
-// From the old shared native runtime (gears.async.io.internal on async-io, 1d7add2), now the io_uring backend's.
 package gears.async.io
 package uring
 
@@ -8,10 +7,6 @@ import scala.scalanative.posix.sys.uio
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-/** Non-blocking reads, writes, and accepts that report would-block and EOF as values instead of exceptions. The
-  * descriptors must be non-blocking: the calls go through `Unblocked`, which tells the GC nothing, as they return at
-  * once.
-  */
 private[uring] object NonBlocking {
 
   private def wouldBlock: Boolean =
@@ -20,9 +15,6 @@ private[uring] object NonBlocking {
 
   inline val EOF = -1
 
-  /** Fills `buf` from `fd` between position and limit. Returns the number of bytes read, 0 if the read would block, or
-    * -1 at EOF.
-    */
   def read(fd: Int, buf: ByteBuffer): Int =
     NativeBuffer.staged(buf, copyIn = false, copyOut = true)(readAddressable(fd, _))
 
@@ -37,14 +29,8 @@ private[uring] object NonBlocking {
       read.toInt
   }
 
-  /** The most buffers one `readv` or `writev` takes (`IOV_MAX` on macOS and Linux): beyond them, an op takes the rest
-    * on its next submission, as it does what one call did not finish.
-    */
   inline val MaxBuffers = 1024
 
-  /** Fills `bufs` from `fd` in order, as `read` fills one, with one `readv`: the bytes read, 0 if it would block, or -1
-    * at end of stream, which leaves the buffers as they were.
-    */
   def readv(fd: Int, bufs: Array[java.nio.ByteBuffer]): Int =
     NativeBuffer.staged(bufs, copyIn = false, copyOut = true)(readvAddressable(fd, _))
 
@@ -61,9 +47,6 @@ private[uring] object NonBlocking {
       read.toInt
   }
 
-  /** Drains `bufs` into `fd` in order, as `write` drains one, with one `writev`: the bytes written, or -1 if it would
-    * block.
-    */
   def writev(fd: Int, bufs: Array[java.nio.ByteBuffer]): Int =
     NativeBuffer.staged(bufs, copyIn = true, copyOut = false)(writevAddressable(fd, _))
 
@@ -80,7 +63,6 @@ private[uring] object NonBlocking {
     }
   }
 
-  /** Points `vectors` at `bufs`, those with room or bytes remaining, in order, at most `MaxBuffers`: their count. */
   def fill(vectors: Ptr[uio.iovec], bufs: Array[java.nio.ByteBuffer], room: Boolean): Int = {
     var count = 0
     var i = 0
@@ -97,7 +79,6 @@ private[uring] object NonBlocking {
     count
   }
 
-  /** Advances `bufs` in order by `bytes` all told, each to its limit before the next. */
   def advance(bufs: Array[java.nio.ByteBuffer], bytes: Long): Unit = {
     var left = bytes
     var i = 0
@@ -109,9 +90,6 @@ private[uring] object NonBlocking {
     }
   }
 
-  /** Drains `buf` into `fd` between position and limit. Returns the number of bytes written, or -1 if the write would
-    * block.
-    */
   def write(fd: Int, buf: ByteBuffer): Int =
     NativeBuffer.staged(buf, copyIn = true, copyOut = false)(writeAddressable(fd, _))
 

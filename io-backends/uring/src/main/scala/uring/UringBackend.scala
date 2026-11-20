@@ -8,25 +8,14 @@ import gears.async.Future
 import java.nio.ByteBuffer
 import scala.concurrent.duration.FiniteDuration
 
-/** The io_uring backend (Linux 6.0 or later, Scala Native), through liburing.
-  *
-  * A program runs on a pool of workers (`UringScheduler`), one for each processor, each with its own ring, inbox and
-  * heap of timers. An op is performed on the performer's own worker: tried at once with a non-blocking system call,
-  * else prepared as an entry on that worker's ring, and the performer resumed once the entry's completion arrives. It
-  * has IP and Unix stream and datagram sockets, regular files, pipes, FIFOs, name resolution and blocking ops.
-  */
 object UringBackend extends Backend {
   type Interface = UringOps.type
 
   def pool(bufferSize: Int, buffers: Int): BufferPool = new NativePool(bufferSize, buffers)
 
-  /** Runs `program` on a pool of `GEARS_IO_URING_WORKERS` workers, one for each processor if it is not set, shutting it
-    * down afterwards.
-    */
   private[io] def run[T](program: Io[Interface] ?=> Async.Spawn ?=> T): T =
     runOn(defaultWorkers)(program)
 
-  /** The workers of a run: `GEARS_IO_URING_WORKERS`, or one for each processor. */
   def defaultWorkers: Int =
     sys.env
       .get("GEARS_IO_URING_WORKERS")
@@ -34,19 +23,16 @@ object UringBackend extends Backend {
       .filter(_ > 0)
       .getOrElse(Runtime.getRuntime.availableProcessors)
 
-  /** Runs `program` over this backend as `Io.run` does, on a pool of `workers` workers, each with its own ring. */
   def runOn[T](workers: Int)(program: Io[Interface] ?=> Async.Spawn ?=> T): T = {
     require(workers > 0, s"A pool has at least one worker, not $workers")
     val pool = UringScheduler(workers)
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
     given poolScheduler: pool.Scheduler = pool
-    // `Async.blocking` runs its body on the calling thread.
     try Async.blocking(Future(program(using pool)).await)
     finally pool.shutdown()
   }
 }
 
-/** The io_uring backend's ops. */
 object UringOps
     extends IpStreams
     with IpDatagrams
@@ -91,8 +77,6 @@ object UringOps
   def pipe(read: Slot[UringReadable], write: Slot[UringWritable]): UringOp =
     OpenPipe(read.asInstanceOf[Slot[PipeSource]], write.asInstanceOf[Slot[PipeSink]])
 
-  // ---- Stream sockets
-
   def connect(address: IpSocketAddress, options: SocketOptions, into: Slot[ConnectionHandle]): UringOp = {
     Sockets.check(options, SocketOption.Kind.Connection)
     Connect(address, options, into)
@@ -135,8 +119,6 @@ object UringOps
 
   def peerAddress(handle: ConnectionHandle): IpSocketAddress | UnixAddress = open(handle)(Sockets.peerAddress)
 
-  // ---- Socket options
-
   def supports(option: SocketOption[?], kind: SocketOption.Kind): Boolean = Sockets.supports(option, kind)
 
   def canChange(option: SocketOption[?], kind: SocketOption.Kind): Boolean = Sockets.canChange(option, kind)
@@ -162,8 +144,6 @@ object UringOps
     option.check(value)
     open(handle)(Sockets.set(_, option, value))
   }
-
-  // ---- Datagram sockets
 
   def bindDatagram(local: IpSocketAddress, options: SocketOptions, into: Slot[BoundDatagramHandle]): UringOp = {
     Sockets.check(options, SocketOption.Kind.BoundDatagram)
@@ -204,8 +184,6 @@ object UringOps
   @targetName("datagramPeerAddress")
   def peerAddress(handle: ConnectedDatagramHandle): IpSocketAddress =
     open(handle)(Sockets.peerAddress).asInstanceOf[IpSocketAddress]
-
-  // ---- Unix datagram sockets
 
   def bindDatagram(local: UnixAddress, options: SocketOptions, into: Slot[UnixBoundDatagramHandle]): UringOp = {
     Sockets.checkPath(local.path)
@@ -259,8 +237,6 @@ object UringOps
   def peerAddress(handle: UnixConnectedDatagramHandle): UnixAddress =
     open(handle)(Sockets.peerAddress).asInstanceOf[UnixAddress]
 
-  // ---- FIFOs
-
   def openFifoForReading(path: String, into: Slot[UringReadable]): UringOp = {
     Files.checkPath(path)
     OpenFifo(path, write = false, into)
@@ -270,8 +246,6 @@ object UringOps
     Files.checkPath(path)
     OpenFifo(path, write = true, into)
   }
-
-  // ---- Files, names and blocking code
 
   def open(path: String, write: Boolean, into: Slot[FileHandle]): UringOp = {
     Files.checkPath(path)

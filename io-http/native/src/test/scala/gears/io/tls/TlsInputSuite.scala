@@ -19,9 +19,8 @@ import scala.concurrent.duration.FiniteDuration
 import munit.FunSuite
 
 class TlsInputSuite extends FunSuite {
-  // - awaits go outside munit's assert: it holds the suite's lock, which a suspension would take to another thread
+  // - await outside munit's assert: it holds the suite's lock, which a suspension takes to another thread
 
-  // - reads take the next fed chunk, else time out
   private final class Fed(using AsyncOperations) extends Stream {
     val chunks = new ConcurrentLinkedQueue[Array[Byte]]()
     val reads = new AtomicInteger()

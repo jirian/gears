@@ -13,16 +13,11 @@ import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
 
-/** `Io.perform`'s promises, checked over the shared runtime with a scripted device for its poller (`FakeBackend`), for
-  * both kinds of op a poller has and both ways of cancelling: an op that returns did its work once; one cancelled or
-  * timed out did none; and either way, once `perform` has returned or thrown, the device no longer holds the op.
-  */
 class FakePollerSuite extends munit.FunSuite {
   override def munitTimeout: Duration = 60.seconds
 
   private def scheduler(using io: Io[FakeBackend.ops.type]): FakeScheduler = io.asInstanceOf[FakeScheduler]
 
-  /** Waits, on timers, until `condition` holds. */
   private def eventually(condition: => Boolean)(using Io[FakeBackend.ops.type], Async): Unit = {
     val end = System.nanoTime() + 10.seconds.toNanos
     while !condition do {
@@ -36,10 +31,6 @@ class FakePollerSuite extends munit.FunSuite {
     case _                                 => false
   }
 
-  /** A future performing an op, and what `perform` itself did: a cancelled future fails with `CancellationException`
-    * whatever its body did (`Future.checkCancellation`), and `perform` may return for a performer cancelled after its
-    * op's work was done.
-    */
   private final class Performer(
       val future: Future[Unit],
       performed: java.util.concurrent.atomic.AtomicReference[Try[Unit]]
@@ -47,7 +38,6 @@ class FakePollerSuite extends munit.FunSuite {
     def cancel(): Unit = future.cancel()
     def poll() = future.poll()
 
-    /** Waits for the future, and gives what `perform` did. */
     def awaitResult(using Async): Try[Unit] = {
       future.awaitResult: Unit
       performed.get()
@@ -66,14 +56,12 @@ class FakePollerSuite extends munit.FunSuite {
     Performer(future, performed)
   }
 
-  /** Performs `op` in a future on the current worker's device, returning once the device holds it. */
   private def started(op: DeviceOp)(using io: Io[FakeBackend.ops.type], spawn: Async.Spawn): (Performer, FakeDevice) = {
     val performer = performing(op)
     eventually(op.device != null && op.device.nn.holds(op))
     (performer, op.device.nn)
   }
 
-  /** What every outcome must be: done once and returned, or not done and failed. */
   private def consistent(op: DeviceOp, outcome: Try[Unit], device: FakeDevice): Unit = {
     assert(!device.holds(op), s"perform ended ($outcome) while the device still held the op")
     outcome match {
@@ -179,7 +167,6 @@ class FakePollerSuite extends munit.FunSuite {
     FakeBackend.onPool(1) { io ?=>
       val op = CompletionOp()
       val (performer, device) = started(op)
-      // One worker, and this future holds it: the finish and the cancel both wait for it, the finish in the device.
       device.finish(op)
       performer.cancel()
       val outcome = performer.awaitResult
@@ -193,7 +180,7 @@ class FakePollerSuite extends munit.FunSuite {
       val (performer, device) = started(op)
       performer.cancel()
       eventually(device.isCancelling(op))
-      device.finish(op) // the device did the work before it saw the cancel
+      device.finish(op)
       val outcome = performer.awaitResult
       consistent(op, outcome, device)
     }

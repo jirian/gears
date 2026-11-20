@@ -2,7 +2,6 @@ package gears.io.http
 
 import munit.FunSuite
 
-/** Routes as values: matched, decoded and answered with no server and no socket. */
 class RoutesSuite extends FunSuite {
   private def call(routes: Routes, request: Request): Response = Http.run(routes(request))
 

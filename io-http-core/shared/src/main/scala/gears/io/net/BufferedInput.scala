@@ -11,27 +11,18 @@ import java.util.concurrent.TimeoutException
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.FiniteDuration
 
-/** Reads `stream` through a buffer of its own, for parsing: lines and delimited heads are found in place, and bytes
-  * copied out in bulk. The buffer starts at `initial` bytes and grows, up to `max`, only while a delimited read needs
-  * it to (`readUntil`). Not for use from two futures at once.
-  */
 final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64 * 1024) {
   require(initial > 0 && max >= initial, s"A buffer of $initial bytes, growing to at most $max")
 
   private var buf = ByteBuffer.allocate(initial)
-  private var start = 0 // the first byte not yet consumed
-  private var end = 0 // after the last byte read
+  private var start = 0
+  private var end = 0
   private var atEnd = false
 
-  /** The bytes read and not yet consumed. */
   def buffered: Int = end - start
 
-  /** Whether the stream has ended and every byte has been consumed. */
   def exhausted: Boolean = atEnd && start == end
 
-  /** Reads more from the stream, into room made by moving the unconsumed bytes to the front, or by growing the buffer
-    * if there is none and `grow`: false at the end of the stream, or if there is no room.
-    */
   def fill(timeout: Duration = Duration.Inf, grow: Boolean = false)(using Async): Boolean =
     if atEnd then false
     else {
@@ -62,10 +53,8 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
       }
     }
 
-  /** The bytes of buffer it holds. */
   def holding: Int = buf.capacity()
 
-  /** Lets go of its buffer if nothing is buffered; the next read allocates one. */
   def release(): Unit =
     if start == end then {
       buf = BufferedInput.Empty
@@ -73,10 +62,6 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
       end = 0
     }
 
-  /** Waits up to `idle` for more, with nothing buffered: false at the end of the stream or if nothing comes.
-    *   - past `grace`: releases its buffer, calls `released`, and waits with a pooled read from `pool`
-    *   - no pool, a stream without pooled reads, or a pool that fails: an ordinary read throughout
-    */
   def awaitMore(idle: Duration, grace: FiniteDuration, pool: BufferPool | Null, released: () => Unit)(using
       Async
   ): Boolean =
@@ -131,11 +116,6 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
       }
     }
 
-  /** Consumes the bytes up to `delimiter` and returns them with it, reading more as needed: null if the stream ends
-    * first with nothing buffered; an `EOFException` if it ends in the middle; `BufferedInput.TooLong` if `limit` bytes
-    * come without it. Each read is given what is left of `timeout`, measured from the call, so that a peer that sends a
-    * byte at a time cannot keep it going.
-    */
   def readUntil(
       delimiter: Array[Byte],
       limit: Int,
@@ -145,7 +125,7 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
       case null => Long.MaxValue
       case d    => System.nanoTime() + d.nn.toNanos
     }
-    var scanned = start // where the search for the delimiter goes on from
+    var scanned = start
     var found = -1
     while found < 0 do {
       found = indexOf(delimiter, scanned)
@@ -165,7 +145,7 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
           if atEnd then throw new EOFException("The stream ended in the middle of a line")
           throw new BufferedInput.TooLong(limit)
         }
-        scanned -= shift - start // the bytes moved to the front
+        scanned -= shift - start
       }
     }
     val until = found + delimiter.length
@@ -175,7 +155,6 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
     out
   }
 
-  /** The index in the buffer of the first `delimiter` at or after `from`, or -1. */
   private def indexOf(delimiter: Array[Byte], from: Int): Int = {
     val bytes = buf.array()
     val first = delimiter(0)
@@ -192,9 +171,6 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
     -1
   }
 
-  /** Reads into `dst`, at most `max` bytes: what is buffered first, else straight from the stream if `dst` has room for
-    * a buffer's worth, else through the buffer. How many, or -1 at the end of the stream.
-    */
   def read(dst: ByteBuffer, max: Int = Int.MaxValue, timeout: Duration = Duration.Inf)(using Async): Int = {
     val want = math.min(max, dst.remaining())
     if want == 0 then 0
@@ -212,7 +188,6 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
     n
   }
 
-  /** Consumes exactly `n` bytes and returns them; an `EOFException` if the stream ends first. */
   def readExactly(n: Int, timeout: Duration = Duration.Inf)(using Async): Array[Byte] = {
     val out = new Array[Byte](n)
     val into = ByteBuffer.wrap(out)
@@ -222,7 +197,6 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
     out
   }
 
-  /** Consumes and drops up to `n` bytes; how many, fewer only at the end of the stream. */
   def skip(n: Long, timeout: Duration = Duration.Inf)(using Async): Long = {
     var left = n
     while left > 0 && (start < end || fill(timeout)) do {
@@ -233,9 +207,6 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
     n - left
   }
 
-  /** Takes the bytes buffered and not consumed, leaving none: what a protocol switching away from this reader, such as
-    * a WebSocket after its upgrade, has already read.
-    */
   def drainBuffered(): Array[Byte] = {
     val out = java.util.Arrays.copyOfRange(buf.array(), start, end)
     start = end
@@ -246,12 +217,10 @@ final class BufferedInput(val stream: Stream, initial: Int = 4096, max: Int = 64
 object BufferedInput {
   private val Empty = ByteBuffer.allocate(0)
 
-  /** A delimited read that found no delimiter within its limit. A peer's doing, so with no stack trace. */
   final class TooLong(val limit: Int) extends IOException(s"No delimiter within $limit bytes") {
     override def fillInStackTrace(): Throwable = this
   }
 
-  /** A delimited read out of time: an idle peer's doing, so with no stack trace. */
   private[io] final class TimedOut(message: String) extends java.util.concurrent.TimeoutException(message) {
     override def fillInStackTrace(): Throwable = this
   }

@@ -1,7 +1,6 @@
 package gears.async.io
 package shareable
 
-/** The shared runtime's contracts over the fake backend. */
 class FakeSchedulingSuite extends SchedulingContract {
   type I = FakeBackend.ops.type
   val backend: FakeBackend.type = FakeBackend

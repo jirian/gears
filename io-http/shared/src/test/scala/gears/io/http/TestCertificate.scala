@@ -2,7 +2,6 @@ package gears.io.http
 
 import java.nio.file.Files
 
-/** A self-signed certificate for `localhost` and 127.0.0.1, valid for a century, and its key, written to files once. */
 object TestCertificate {
   val certificatePem: String = """-----BEGIN CERTIFICATE-----
 MIIBnDCCAUGgAwIBAgIUYzbV+EV1qNcHIo1Atxg1pEC4IgkwCgYIKoZIzj0EAwIw

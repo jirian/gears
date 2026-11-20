@@ -11,11 +11,6 @@ import gears.io.demos.{BackendChoice, DemoBackends, DemoRunner, Endpoint}
 
 import mainargs.{arg, main}
 
-/** The gears bench's command line, the same for every backend: `bench` and `bench-serve` over the backends a demo
-  * application offers (`DemoBackends`), whose runners start the bench's runs, so that the scenarios, like the demos,
-  * only take an `Io`. Each platform's `Main` extends it with its own commands, and runs it as `<executable> gears
-  * <command>`, which is what bench/compare.sc runs.
-  */
 class BenchCommands(backends: DemoBackends) {
 
   @main(doc = "Stress tests to measure reactor changes against; see bench/compare.sc")
@@ -68,14 +63,12 @@ class BenchCommands(backends: DemoBackends) {
       bench(backends.needing(choice.backend, "IP stream sockets") { case b: IpStreams => b })
     )
 
-  /** A numeric IPv4 address and a port. */
   private def address(host: String, port: Int): IpSocketAddress = {
     val parts = host.split('.').map(_.toInt)
     require(parts.length == 4, s"Not a numeric IPv4 address: $host")
     IpSocketAddress(IpAddress.ipv4(parts(0), parts(1), parts(2), parts(3)), port)
   }
 
-  /** The runner, as the bench's: every backend a bench application offers has one. */
   private def bench[C <: Interface](runner: DemoRunner[C]): BenchRunner[C] = runner match {
     case b: BenchRunner[C] @unchecked => b
     case other                        => throw new IllegalArgumentException(s"$other cannot run the bench on a pool")

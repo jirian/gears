@@ -20,9 +20,6 @@ import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
 
-/** What the io_uring backend promises beyond the contracts: its descriptors, and how its rings meet cancels and closes,
-  * on a pool of a chosen size.
-  */
 class UringSuite extends munit.FunSuite {
   override def munitTimeout: Duration = 60.seconds
 
@@ -46,13 +43,11 @@ class UringSuite extends munit.FunSuite {
   private def close(handle: UringHandle)(using io: Io[UringOps.type], async: Async): Unit =
     io.perform(ops.close(handle))
 
-  /** Writes `text` with a plain system call, not through the backend. */
   private def rawWrite(handle: UringHandle, text: String): Unit = {
     val bytes = text.getBytes("UTF-8")
     assertEquals(unistd.write(handle.fd, bytes.asInstanceOf[ByteArray].at(0), bytes.length.toUSize).toInt, bytes.length)
   }
 
-  /** Reads what is waiting with a plain non-blocking system call: "" if nothing is. */
   private def rawRead(handle: UringHandle): String = {
     val bytes = new Array[Byte](64)
     val n = unistd.read(handle.fd, bytes.asInstanceOf[ByteArray].at(0), 64.toUSize).toInt
@@ -67,7 +62,6 @@ class UringSuite extends munit.FunSuite {
     new String(bytes, "UTF-8")
   }
 
-  /** A future performing `op`, with what `perform` itself did: a cancelled future fails whatever its body did. */
   private def performing(op: UringOp)(using io: Io[UringOps.type], spawn: Async.Spawn) = {
     val performed = new AtomicReference[Try[Unit] | Null](null)
     val future = Future {
@@ -77,9 +71,6 @@ class UringSuite extends munit.FunSuite {
     (future, performed)
   }
 
-  /** Runs `body` on a thread of its own, failing if it has not returned within `limit`: for a check that, broken,
-    * hangs.
-    */
   private def returnsWithin(limit: FiniteDuration)(body: => Unit): Unit = {
     val failure = new AtomicReference[Throwable | Null](null)
     val thread = new Thread(() =>
@@ -102,10 +93,8 @@ class UringSuite extends munit.FunSuite {
           val filler = new Array[Byte](65536)
           while unistd.write(w.fd, filler.asInstanceOf[ByteArray].at(0), filler.length.toUSize).toInt > 0 do ()
           val writer = Future(Try(io.perform(ops.write(w, ByteBuffer.wrap(Array[Byte](1))), 20.millis)))
-          AsyncOperations.sleep(5) // so that it waits in the kernel, for the pipe to have room
-          close(r) // its write then fails with EPIPE
-          // One worker, which this future holds past the write's time limit: the failing completion waits in the
-          // ring, and the limit is reached first.
+          AsyncOperations.sleep(5)
+          close(r)
           val until = System.nanoTime() + 40_000_000L
           while System.nanoTime() < until do ()
           writer.await match {
@@ -212,7 +201,6 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
-  /** A directory of its own for `body`, removed with what is in it afterwards. */
   private def withTempDir[T](body: java.nio.file.Path => T): T = {
     val dir = java.nio.file.Files.createTempDirectory("gears-uring-test")
     try body(dir)
@@ -312,8 +300,7 @@ class UringSuite extends munit.FunSuite {
         val (r, w) = pipe()
         val buf = ByteBuffer.allocate(16)
         val (reader, performed) = performing(ops.read(r, buf))
-        AsyncOperations.sleep(5) // so that it waits in the kernel
-        // One worker, which this future holds: the read's completion, if any, waits for it in the ring.
+        AsyncOperations.sleep(5)
         rawWrite(w, "data")
         reader.cancel()
         reader.awaitResult: Unit
@@ -332,7 +319,7 @@ class UringSuite extends munit.FunSuite {
 
   test("a withdrawal handed to an op's worker leaves alone a later performance of the op") {
     onPool(1) { io ?=>
-      var stale = 0 // rounds in which the withdrawal reached the worker only after the first performance had ended
+      var stale = 0
       for _ <- 1 to 100 do {
         val (r, w) = pipe()
         val buf = ByteBuffer.allocate(16)
@@ -343,19 +330,15 @@ class UringSuite extends munit.FunSuite {
           first.set(Try(io.perform(read)))
           first.get().nn.get
           buf.clear()
-          second.set(Try(io.perform(read))) // nothing cancels this one
+          second.set(Try(io.perform(read)))
         }
-        AsyncOperations.sleep(5) // so that the first waits in the kernel
+        AsyncOperations.sleep(5)
         val command = read.asInstanceOf[Command]
         val handed = new java.util.concurrent.atomic.AtomicBoolean()
         val madeDuringFirst = new java.util.concurrent.atomic.AtomicBoolean()
-        // From a thread of no worker, so that the withdrawal goes to the worker's inbox; the completion the write makes
-        // is reaped first in the worker's turn, and the reader performs the read again before the inbox is drained.
         val foreign = new Thread(() => {
           rawWrite(w, "data")
           command.owner.nn.withdraw(command): Unit
-          // Only the first performance's performer ever withdraws it; a round where the second had already begun
-          // is not the case under test.
           madeDuringFirst.set(command.performance == 1)
           handed.set(true)
         })
@@ -383,8 +366,6 @@ class UringSuite extends munit.FunSuite {
         val buf = ByteBuffer.allocate(16)
         val reader = Future(io.perform(ops.read(r, buf), 5.seconds))
         AsyncOperations.sleep(1)
-        // The cancel and the completion race: the cancel's withdrawal takes the read's time limit off the heap while
-        // the read's worker may be firing it.
         val writer = new Thread(() => rawWrite(w, "x"))
         writer.start()
         reader.cancel()
@@ -398,7 +379,6 @@ class UringSuite extends munit.FunSuite {
     }
   }
 
-  /** A read that the kernel runs in one of its workers (`IOSQE_ASYNC`), which on a blocking descriptor waits there. */
   private final class ReadInKernelWorker(val handle: UringHandle, buf: ByteBuffer)
       extends Transfer(Array(buf), copyIn = false) {
     override protected def direction = Command.Direction.Reading
@@ -408,26 +388,27 @@ class UringSuite extends munit.FunSuite {
       import uringStructOps.*
       val b = staging.begin()(0)
       io_uring_prep_read(sqe, fd, NativeBuffer.atPosition(b), b.remaining().toUInt, Results.currentPosition)
-      sqe.flags = (1 << 4).toUByte // IOSQE_ASYNC
+      val IoSqeAsync = 1 << 4
+      sqe.flags = IoSqeAsync.toUByte
     }
   }
 
   test("a ring that fails has the kernel let go of a read running in its worker before the read's buffer is back") {
     onPool(1) { io ?=>
       val fds = stackalloc[CInt](2)
-      assertEquals(unistd.pipe(fds), 0) // blocking, so that the kernel's worker waits in the read
+      assertEquals(unistd.pipe(fds), 0)
       val (readEnd, writeEnd) = (fds(0), fds(1))
       val buf = ByteBuffer.allocate(16)
       val read = ReadInKernelWorker(new PipeSource(readEnd), buf)
       val (reader, performed) = performing(read)
-      AsyncOperations.sleep(50) // in the kernel's worker by now
+      AsyncOperations.sleep(50)
       io.asInstanceOf[UringScheduler].failRing(new java.io.IOException("failed for the test"))
       reader.awaitResult: Unit
       assert(performed.get().nn.failed.toOption.exists(_.isInstanceOf[java.io.IOException]), performed.get())
       assert(!UringScheduler.kept.contains(read), "the kernel did not say it had let go of the read")
       val late = "late".getBytes("UTF-8")
       assertEquals(unistd.write(writeEnd, late.asInstanceOf[ByteArray].at(0), late.length.toUSize).toInt, late.length)
-      Thread.sleep(50) // the worker's ring has failed: nothing else runs on it
+      Thread.sleep(50)
       assertEquals(buf.position(), 0)
       assert(buf.array().forall(_ == 0), "the kernel wrote into the buffer after it was given back")
       assertEquals(fcntl.fcntl(readEnd, fcntl.F_SETFL, fcntl.O_NONBLOCK), 0)
@@ -441,7 +422,7 @@ class UringSuite extends munit.FunSuite {
   test("an entry counts as pending until a submission takes it, also once the queue's counters wrap") {
     val ring = new Ring(8, 16)
     try {
-      for round <- 1 to 5 do { // 5 rounds of 7 entries: the queue's positions pass its size several times
+      for round <- 1 to 5 do {
         val sqes = Seq.fill(7) {
           val sqe = ring.nextSqe()
           ring.nop(sqe)
@@ -476,7 +457,6 @@ class UringSuite extends munit.FunSuite {
     onPool(1) { io ?=>
       for _ <- 1 to 50 do {
         val (r, w) = pipe()
-        // One worker: the reader prepares its entry and suspends, then the closer runs, before the ring is entered.
         val (reader, performed) = performing(ops.read(r, ByteBuffer.allocate(16)))
         val closer = Future(close(r))
         closer.await
@@ -498,7 +478,7 @@ class UringSuite extends munit.FunSuite {
         AsyncOperations.sleep(5)
         close(l)
         val again = Slot[ListenerHandle]()
-        io.perform(ops.listen(address, again)) // fails if the port is still held
+        io.perform(ops.listen(address, again))
         close(again.clear())
         for (f, performed) <- accepts do {
           f.awaitResult: Unit
@@ -517,10 +497,9 @@ class UringSuite extends munit.FunSuite {
       val slots = List.fill(4)(Slot[ConnectionHandle]())
       val accepts = slots.map { slot =>
         val f = Future(io.perform(ops.accept(l, slot)))
-        AsyncOperations.sleep(20) // each is waiting before the next begins
+        AsyncOperations.sleep(20)
         f
       }
-      // All at once, so that every accept waiting could take any of them.
       val clients = List.fill(4) {
         val client = Slot[ConnectionHandle]()
         io.perform(ops.connect(address, client))
@@ -553,7 +532,7 @@ class UringSuite extends munit.FunSuite {
         AsyncOperations.sleep(5)
         close(a)
         val end = ByteBuffer.allocate(16)
-        io.perform(ops.read(b, end), 5.seconds) // the end of the stream, at once
+        io.perform(ops.read(b, end), 5.seconds)
         assertEquals(end.position(), 0)
         reader.awaitResult: Unit
         close(b)
@@ -568,11 +547,9 @@ class UringSuite extends munit.FunSuite {
       val pipes = List.fill(12)(pipe())
       val slots = pipes.map(_ => Slot[Received]())
       val reads = pipes.zip(slots).map { case ((r, _), into) => performing(ops.read(r, pool, into)) }
-      // Once every read waits: one still trying at once holds a buffer for a moment, on a loaded machine for a while.
       val until = System.nanoTime() + 1_000_000_000L
       while pool.available < 4 && System.nanoTime() < until do AsyncOperations.sleep(5)
       assert(pool.available >= 4, s"${pool.available} of 8 free")
-      // One at a time, each buffer given back before the next stream has bytes, so that none finds the pool empty.
       for (((_, w), into), (f, performed)) <- pipes.zip(slots).zip(reads) do {
         rawWrite(w, "x")
         f.awaitResult: Unit
@@ -605,7 +582,6 @@ class UringSuite extends munit.FunSuite {
         rawWrite(w, "b")
       }
       held.release()
-      // Each as the one before gives its buffer back: a release starts every read waiting, and one takes it.
       var served = 0
       val until = System.nanoTime() + 5_000_000_000L
       while served < reads.length && System.nanoTime() < until do {
@@ -639,15 +615,15 @@ class UringSuite extends munit.FunSuite {
         io.perform(ops.read(r, pool, into))
         into.clear()
       }
-      val one = take() // half the pool free: the read below waits for readiness, holding no buffer
+      val one = take()
       val (r, w) = pipe()
       val into = Slot[Received]()
       val (reader, performed) = performing(ops.read(r, pool, into))
       AsyncOperations.sleep(20)
-      val two = take() // the pool empty
-      rawWrite(w, "x") // readable, and no buffer to read into: it parks on the pool
+      val two = take()
+      rawWrite(w, "x")
       AsyncOperations.sleep(20)
-      assertEquals(rawRead(r), "x") // so that, started again, it finds nothing and goes back to the ring
+      assertEquals(rawRead(r), "x")
       one.release()
       AsyncOperations.sleep(20)
       assert(performed.get() == null, s"it should wait, not ${performed.get()}")

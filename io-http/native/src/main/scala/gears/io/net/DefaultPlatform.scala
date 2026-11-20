@@ -3,16 +3,9 @@ package gears.io.net
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-/** Scala Native's default backend, io_uring, on Linux 6.0 or later, and how a process here learns it is asked to end.
-  */
 private[gears] object DefaultPlatform {
   val backend: gears.async.io.uring.UringBackend.type = gears.async.io.uring.UringBackend
 
-  /** Runs `stop` on a thread of its own once the process is sent SIGTERM or SIGINT, which no longer end it, and returns
-    * what to call once the process may end; a second signal ends it at once, as the signal would have, and so does one
-    * that comes when no `stop` is waiting, before or after. For `Http.serve`: one `stop` waits at a time, the latest.
-    * If the signals cannot be caught, `stop` never runs and they end the process as before.
-    */
   def onTermination(stop: () => Unit): () => Unit =
     if !signals then () => ()
     else {
@@ -22,7 +15,6 @@ private[gears] object DefaultPlatform {
 
   private val waiting = new java.util.concurrent.atomic.AtomicReference[(() => Unit) | Null](null)
 
-  /** Whether the signals are caught, by one reader for the process, which hands each to the `stop` waiting. */
   private lazy val signals: Boolean = {
     val fd = sys.gears_http_signal_pipe()
     if fd >= 0 then {

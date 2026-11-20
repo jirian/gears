@@ -12,7 +12,7 @@ import scala.concurrent.duration.DurationInt
 import munit.FunSuite
 
 class IdleReadSuite extends FunSuite {
-  // - awaits go outside munit's assert: it holds the suite's lock, which a suspension would take to another thread
+  // - await outside munit's assert: it holds the suite's lock, which a suspension takes to another thread
 
   test("an idle reader lets go of its buffers past the grace, then reads through the pool, and sees the end") {
     Http.run {

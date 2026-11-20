@@ -12,55 +12,35 @@ import scala.util.Failure
 import uring.*
 import uringStructOps.*
 
-/** The io_uring backend's runtime: the shared native runtime (`WorkpoolScheduler`) with a ring for each worker, which
-  * is the worker's poller. An op is performed on the performer's own worker, which tries it at once, else prepares its
-  * entry on its own ring; it waits on the ring, until its next timer at the latest, once it has nothing else to run,
-  * one `io_uring_enter` submitting what it prepared and waiting; and it applies each completion and fires the op.
-  *
-  * Taking an op back (`withdraw`, on a cancel; `limitReached`, on a time limit) is done on the op's worker, whose ring
-  * alone holds its entry: an entry not yet submitted becomes a no-op, and one in the kernel is cancelled synchronously,
-  * which returns once the kernel has let go of it (Linux 6.0). A performer that resumed on another worker hands the
-  * withdrawal to the op's, and waits for the op to settle.
-  */
 private[uring] final class UringScheduler private (rings: Array[Ring])
     extends WorkpoolScheduler[UringOp, UringOps.type](UringBackend, UringOps, rings.length)
     with NativeSuspend {
   override protected def selectWorker() = workerOfCurrentThread()
 
-  // A class parameter is set before the superclass's constructor runs, which makes the workers.
   override def makeWorker(id: Int): UringWorker = new UringWorker(id, rings(id))
 
   private def isWorkerOf(worker: UringWorker): Boolean = worker.isCurrent
 
-  /** Fails the calling worker's ring, as an `io_uring_enter` failing for good would: for tests. Worker thread. */
   private[uring] def failRing(cause: Throwable): Unit = workerOfCurrentThread().asInstanceOf[UringWorker].fail(cause)
 
   final class UringWorker(id: Int, givenRing: Ring)
       extends WorkpoolScheduler.Worker[UringOp, UringOps.type](id, UringOps) {
 
-    // Lazy: `Worker` starts its thread in its constructor, which uses these before this class's fields are set.
     private lazy val own = new Own
 
-    /** What only the worker's thread touches, but for `ring.wake` and `ring.cancelFd`. */
     private final class Own {
       val ring = givenRing
 
-      /** The commands in the kernel or prepared, by the user data of their entry. */
       val inFlight = scala.collection.mutable.LongMap.empty[Command]
 
-      /** The commands whose entries are prepared and not yet submitted. */
       val prepared = scala.collection.mutable.ArrayBuffer.empty[Command]
 
       var nextId = Ring.InternalId + 1
 
-      /** The commands whose entries went to the kernel in the last submission. */
       val submitted = scala.collection.mutable.ArrayBuffer.empty[Command]
 
-      // A close on another thread cancels the entries in the kernel on its descriptor, then wakes this ring. An entry
-      // still prepared as the close begins is turned into a no-op here and its command failed; one submitted as the
-      // close begins, which the close's cancel may have missed, is cancelled after the submission, once woken.
       ring.onSubmit = () => {
-        var closed: scala.collection.mutable.ArrayBuffer[Command] | Null = null // rarely any
+        var closed: scala.collection.mutable.ArrayBuffer[Command] | Null = null
         prepared.foreach { c =>
           if c.state == Command.Stage.Prepared then {
             if c.handle.isClosing then {
@@ -86,7 +66,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       ring.afterSubmit = () => {
         submitted.foreach(c =>
           if c.state == Command.Stage.Submitted && c.handle.isClosing then
-            if ring.pending(c.sqe) then { // a submission refused or cut short: still a no-op to make
+            if ring.pending(c.sqe) then {
               ring.nop(c.sqe)
               inFlight.remove(c.id)
               c.outOfRing()
@@ -115,7 +95,6 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       case command: Command => perform(command)
     }
 
-    /** Tries `command` at once, else prepares its entry, in a use of its handle that its completion ends. */
     private def perform(command: Command): Boolean = {
       command.check()
       command.begin()
@@ -128,7 +107,6 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       command.owner = this
       val turns = command.turns
       if turns != null && !turns.enter(command) then {
-        // Started by the command before it as that one ends (`startTurn`).
         if command.hasDeadline then addTimer(command)
         return false
       }
@@ -144,7 +122,6 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         endUse(command)
         true
       } else if parked then {
-        // Started again by what it parked on (`startTurn`).
         if command.hasDeadline then addTimer(command)
         false
       } else {
@@ -152,7 +129,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         try submit(command)
         catch {
           case failure: Throwable =>
-            command.discardSubmission() // what it staged, and a connecting socket
+            command.discardSubmission()
             endUse(command)
             throw failure
         }
@@ -161,7 +138,6 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       }
     }
 
-    /** Prepares an entry for `command`, which the next wait submits. */
     private def submit(command: Command): Unit = {
       val b = broken
       if b != null then throw new java.io.IOException("The io_uring worker's ring failed", b)
@@ -181,14 +157,8 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       o.prepared += command
     }
 
-    /** Set once the ring has failed for good: the worker then runs its timers and inbox without it, parking between
-      * them, and fails every op that would use it.
-      */
     @volatile private var broken: Throwable | Null = null
 
-    /** From the worker's own thread, nothing: it looks for work and at its next deadline before it waits again, so a
-      * timer or a task it adds itself needs no wake-up, which would cost it a turn of its loop.
-      */
     override protected def wake(): Unit =
       if !isCurrent then
         if broken == null then own.ring.wake() else java.util.concurrent.locks.LockSupport.unpark(workerThread)
@@ -204,12 +174,6 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         try own.ring.await(deadlineTask, !isEmpty(), spin = own.inFlight.nonEmpty)(dispatch)
         catch case failure: Throwable => fail(failure)
 
-    /** The ring failed: each entry in the kernel is cancelled, waiting until the kernel has let go of it, since
-      * tearing the ring down does not wait for a kernel worker still reading into an entry's buffers; then the ring is
-      * torn down and the ops it had are failed. An entry the kernel does not say it has let go of keeps what its
-      * command staged for good (`UringScheduler.kept`), so that the memory goes to nothing else; its performer is
-      * failed all the same. Worker thread.
-      */
     private[uring] def fail(cause: Throwable): Unit = {
       workerThread = Thread.currentThread()
       broken = cause
@@ -234,19 +198,12 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       }
     }
 
-    /** Applies the completion of the entry with user data `id`, unless the entry was withdrawn, and fires its op, or
-      * submits it again.
-      */
     private val dispatch: (Long, Int) => Unit = (id, res) => {
       val command = own.inFlight.getOrNull(id)
       if command != null then {
         own.inFlight -= id
         command.outOfRing()
         val handle = command.handle
-        // The outcome, or null if it was submitted again; settled outside the `try`, so that a settle that throws is
-        // not settled a second time. None succeeds once a close has begun, as `Ops.close` has it, even having
-        // finished: its buffer and a file's offset are left as they were, and what it made, an accepted connection,
-        // is let go of.
         val outcome: scala.util.Try[Unit] | Null =
           if handle.isClosing then {
             command.dropCompletion(res)
@@ -268,7 +225,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
                 Failure(gears.async.cancellation())
               } else
                 try {
-                  if command.readyToSubmit() then submit(command) // else it parked, to be started again
+                  if command.readyToSubmit() then submit(command)
                   null
                 } catch {
                   case failure: Throwable =>
@@ -276,15 +233,13 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
                     Failure(failure)
                 }
             catch
-              case failure: Throwable => Failure(failure) // the command let go of what it held as it failed
-        // What a settle throws, a turn that cannot be passed on, is the next command's, not the ring's.
+              case failure: Throwable => Failure(failure)
         if outcome != null then
           try settle(command, outcome)
           catch case e: Throwable => e.printStackTrace()
       }
     }
 
-    /** Ends `command`'s use of its handle, and fires it with `outcome`, unless its time limit fired it already. */
     private def settle(command: Command, outcome: scala.util.Try[Unit]): Unit = {
       command.outcome = outcome
       endUse(command)
@@ -292,14 +247,12 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       fire(command)
     }
 
-    /** Ends `command`'s use of its handle, and its turn on it, if it takes turns. */
     private def endUse(command: Command): Unit = {
       command.release()
       command.handle.leave()
       passTurn(command)
     }
 
-    /** Ends `command`'s turn on its handle, if it takes turns, starting the next command's on that one's worker. */
     private def passTurn(command: Command): Unit = {
       val turns = command.turns
       if turns != null then {
@@ -308,9 +261,6 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       }
     }
 
-    /** Starts `command`, whose turn it is now, which was parked, or which a close ended the wait of, on this worker:
-      * from any thread, through the inbox. One withdrawn meanwhile, or whose handle is closing, is fired as such.
-      */
     private[uring] def startTurn(command: Command): Unit = {
       val run: Runnable = () => {
         command.resume()
@@ -336,9 +286,6 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       if !command.hasDeadline || claimFiring(command) then
         command.timerWakeup(System.nanoTime())
 
-    /** Takes `command` back on this worker's thread: true if it never reached the kernel, or the kernel has let go of
-      * it without doing it, its use of its handle then ended; false if it finished first, its completion in the ring.
-      */
     private def withdrawHere(command: Command): Boolean = command.state match {
       case _ if command.turns != null && command.turns.nn.leaveWaiting(command) =>
         command.release()
@@ -347,15 +294,15 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       case Command.Stage.Parked =>
         if command.leaveParking() then {
           command.resume()
-          command.discardSubmission() // a file's buffer, taken before it parked
+          command.discardSubmission()
           endUse(command)
           true
-        } else false // started again already: that start fires it
+        } else false
       case Command.Stage.Prepared =>
         own.ring.nop(command.sqe)
         withdrawn(command)
         true
-      case Command.Stage.Submitted if own.ring.pending(command.sqe) => // a submission refused or cut short
+      case Command.Stage.Submitted if own.ring.pending(command.sqe) =>
         own.ring.nop(command.sqe)
         withdrawn(command)
         true
@@ -375,18 +322,13 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       endUse(command)
     }
 
-    /** As `Worker.withdraw`, and takes a command back from the ring: here, if this is its worker's thread, else by its
-      * worker, which then fires it as cancelled (false: the performer waits for that).
-      */
     override def withdraw(op: UringOp): Boolean = op match {
       case command: Command =>
-        if command.hasDeadline && !takeOff(command) then return false // it left the heap to fire
+        if command.hasDeadline && !takeOff(command) then return false
         command.wantOut = true
         if isWorkerOf(this) then withdrawHere(command)
         else {
-          // By the time this worker runs it, that performance may have ended and the op been performed again, here or
-          // on another worker: it then has nothing to take back. Everything that settles a command does so on its
-          // worker's thread, so a performance found unsettled here stays so until this returns.
+          // - by the time the op's worker runs this, the op may have been performed again: act only on this performance
           val performance = command.performance
           val handedOver = submit(() =>
             if command.performance == performance && (command.owner eq this) && !command.isSettled &&
@@ -399,20 +341,18 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
           if !handedOver then throw new IllegalStateException("The io_uring worker has stopped")
           false
         }
-      case _: CloseHandle        => false // it ends once begun
+      case _: CloseHandle        => false
       case task: BlockingTask[?] =>
-        if task.hasDeadline && !takeOff(task) then return false // it left the heap to fire
+        if task.hasDeadline && !takeOff(task) then return false
         task.stop()
       case _ => super.withdraw(op)
     }
 
-    /** For a command whose time limit has passed, on this worker's thread (`AbstractTimerHeapOp.limitReached`). */
     private[uring] def limitReached(command: Command): Boolean = {
       command.wantOut = true
-      // One whose outcome was set as its time ran out, with a failure, is out of use: it fails with `TimeoutException`.
       if command.applied || withdrawHere(command) then true
       else {
-        command.offHeap = true // its completion, in the ring, fires it
+        command.offHeap = true
         false
       }
     }
@@ -425,12 +365,8 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
 
 private[uring] object UringScheduler {
 
-  /** The commands of failed rings whose entries the kernel may still use, kept with what they staged for good. */
   private[uring] val kept = new java.util.concurrent.ConcurrentLinkedQueue[Command]()
 
-  /** A runtime of `workers` workers, each with its ring, made here, so that one that cannot be set up, past a limit on
-    * locked memory or on rings, fails this call rather than its worker's thread.
-    */
   def apply(workers: Int): UringScheduler = {
     val rings = new Array[Ring](workers)
     var made = 0
@@ -447,13 +383,8 @@ private[uring] object UringScheduler {
     new UringScheduler(rings)
   }
 
-  /** Submission queue entries of each worker's ring. */
   inline val Entries = 256
 
-  /** Completion queue entries of each worker's ring: room for a completion of every connection it may have waiting at
-    * once, such as kept-alive ones each with a read pending (io-http's 10,000 spread over the workers), so that a burst
-    * of them does not go to the kernel's overflow list. Rings are locked memory, 8 MiB in all by default, and the
-    * kernel frees a closed one later, so a much larger queue fails to set up once a few runtimes have come and gone.
-    */
+  // - rings are locked memory (8 MiB by default), and the kernel frees a closed one late
   inline val Completions = 2048
 }

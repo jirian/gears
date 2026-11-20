@@ -1,19 +1,12 @@
 package gears.io.http
 
-/** An immutable list of header fields, in order. Names compare case-insensitively, and a name may repeat. Every way of
-  * building one checks each field (RFC 9110, 5.1 and 5.5): a name is a token, and a value has no CR, LF or NUL, so that
-  * a header cannot smuggle a line into a request or a response.
-  */
 final class Headers private (private val fields: Array[String]) {
-  // Names at even indices, each one's value after it; never changed once built.
 
-  /** The first value of `name`. */
   def get(name: String): Option[String] = {
     val i = indexOf(name, 0)
     if i < 0 then None else Some(fields(i + 1))
   }
 
-  /** Every value of `name`, in order. */
   def getAll(name: String): Seq[String] = {
     var i = indexOf(name, 0)
     if i < 0 then Nil
@@ -27,11 +20,9 @@ final class Headers private (private val fields: Array[String]) {
     }
   }
 
-  /** The comma-separated elements of every value of `name`, trimmed, such as `Connection`'s options. */
   def tokens(name: String): Seq[String] =
     getAll(name).flatMap(Text.split(_, ',').iterator.map(_.trim).filter(_.nonEmpty))
 
-  /** Whether `name` has `token` among its elements, compared case-insensitively. */
   def hasToken(name: String, token: String): Boolean = {
     var i = indexOf(name, 0)
     while i >= 0 do {
@@ -43,7 +34,6 @@ final class Headers private (private val fields: Array[String]) {
 
   def contains(name: String): Boolean = indexOf(name, 0) >= 0
 
-  /** These headers and one more, after any others of the same name. */
   def add(name: String, value: String): Headers = {
     Headers.check(name, value)
     val more = java.util.Arrays.copyOf(fields, fields.length + 2)
@@ -52,18 +42,15 @@ final class Headers private (private val fields: Array[String]) {
     new Headers(more)
   }
 
-  /** These headers with every `name` replaced by this one value. */
   def set(name: String, value: String): Headers = {
     Headers.check(name, value)
     without(name).add(name, value)
   }
 
-  /** These headers with `name` set to `value` unless it has a value already. */
   def setIfAbsent(name: String, value: String): Headers = if contains(name) then this else set(name, value)
 
   def remove(name: String): Headers = if contains(name) then without(name) else this
 
-  /** These headers, then `other`'s. */
   def ++(other: Headers): Headers =
     if other.fields.length == 0 then this
     else if fields.length == 0 then other
@@ -77,11 +64,9 @@ final class Headers private (private val fields: Array[String]) {
   def size: Int = fields.length / 2
   def isEmpty: Boolean = fields.length == 0
 
-  /** The `i`th field's name and value, for the writer, which needs no pair. */
   private[http] def name(i: Int): String = fields(2 * i)
   private[http] def value(i: Int): String = fields(2 * i + 1)
 
-  /** The index in `fields` of the first `name` at or after `from`, or -1. */
   private def indexOf(name: String, from: Int): Int = {
     var i = from
     while i < fields.length do {
@@ -131,7 +116,6 @@ object Headers {
 
   private val plainText = new Headers(Array("Content-Type", Body.PlainText))
 
-  /** A `Content-Type` of `value` alone, the most common headers, built with no check of the name, a token. */
   private[http] def contentType(value: String): Headers =
     if value eq Body.PlainText then plainText
     else {
@@ -142,20 +126,14 @@ object Headers {
       new Headers(Array("Content-Type", value))
     }
 
-  /** Headers already checked, as the parser builds them. */
   private[http] def trusted(fields: Array[String]): Headers = new Headers(fields)
 
-  /** Whether `s` is a token: one or more printable ASCII characters, none a separator. */
   def isToken(s: String): Boolean = {
     var i = 0
     while i < s.length && Text.isTokenChar(s.charAt(i)) do i += 1
     s.nonEmpty && i == s.length
   }
 
-  /** Whether `value` may be a field's value (RFC 9110, 5.5): visible ASCII, spaces, tabs and the bytes 0x80 to 0xFF,
-    * each one byte on the wire. No other control character, CR, LF and NUL among them, and no character above 0xFF,
-    * which would not fit in a byte: U+010A would otherwise go out as LF.
-    */
   def isValue(value: String): Boolean = {
     var i = 0
     while i < value.length && { val c = value.charAt(i); c == '\t' || (c >= ' ' && c != '\u007f' && c <= '\u00ff') } do
@@ -163,7 +141,6 @@ object Headers {
     i == value.length
   }
 
-  /** Throws an `IllegalArgumentException` unless `name` and `value` make a field. */
   def check(name: String, value: String): Unit = {
     if !isToken(name) then throw new IllegalArgumentException(s"Not a header name: '$name'")
     if !isValue(value) then

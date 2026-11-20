@@ -4,42 +4,28 @@ import java.net.URI
 import java.net.URISyntaxException
 import java.nio.charset.StandardCharsets
 
-/** An absolute `http`, `https`, `ws` or `wss` URL, as a client sends a request to: its host lower-cased, its port
-  * explicit or the scheme's, its path and query still percent-encoded, as they go on the request line, with no
-  * fragment. `Url.parse` checks it (RFC 3986), and `resolve` follows a reference from it, as a redirect's `Location`.
-  */
 final case class Url private (scheme: String, host: String, port: Int, rawPath: String, rawQuery: Option[String]) {
 
-  /** Whether it is `https` or `wss`. */
   def secure: Boolean = scheme == "https" || scheme == "wss"
 
-  /** The request target: the path, and the query after a `?` if there is one. */
   def target: String = rawQuery.fold(rawPath)(q => s"$rawPath?$q")
 
-  /** The `Host` header's value: the host, and the port unless it is the scheme's. */
   def authority: String = {
     val h = if host.contains(':') then s"[$host]" else host
     if port == Url.defaultPort(scheme) then h else s"$h:$port"
   }
 
-  /** The scheme, host and port: whether two URLs are the same origin, for credentials and pooled connections. */
   def origin: Url.Origin = Url.Origin(scheme, host, port)
 
-  /** The path, percent-decoded. */
   def path: String = Url.decode(rawPath, plusIsSpace = false)
 
-  /** The query's parameters, decoded, in order. */
   def query: Seq[(String, String)] = rawQuery.fold(Seq.empty)(Url.parseQuery)
 
-  /** This URL with `name` and `value` appended to its query, encoded. */
   def withQueryParam(name: String, value: String): Url = {
     val pair = s"${Url.encodeQueryPart(name)}=${Url.encodeQueryPart(value)}"
     copy(rawQuery = Some(rawQuery.fold(pair)(q => if q.isEmpty then pair else s"$q&$pair")))
   }
 
-  /** The URL `reference` names, relative to this one (RFC 3986, 5.2), as a redirect's `Location` is: absolute, with
-    * another scheme or host (`//cdn.example/x`), or a path or query on this one.
-    */
   def resolve(reference: String): Url =
     try Url.fromUri(new URI(toString).resolve(new URI(reference.trim)).normalize())
     catch case e: URISyntaxException => throw new IllegalArgumentException(s"Not a URL reference: $reference", e)
@@ -49,12 +35,8 @@ final case class Url private (scheme: String, host: String, port: Int, rawPath: 
 
 object Url {
 
-  /** A URL's scheme, host and port (RFC 6454). */
   final case class Origin(scheme: String, host: String, port: Int)
 
-  /** `text` as a URL; an `IllegalArgumentException` if it is not an absolute `http`, `https`, `ws` or `wss` one with a
-    * host, or if it has user information, which a URL must not carry (RFC 9110, 4.2.4): credentials go in a header.
-    */
   def parse(text: String): Url =
     try fromUri(new URI(text.trim))
     catch case e: URISyntaxException => throw new IllegalArgumentException(s"Not a URL: $text", e)
@@ -68,7 +50,6 @@ object Url {
     val rawHost = uri.getHost
     val (host, port) =
       if rawHost == null || rawHost.isEmpty then {
-        // `URI` takes a host name with `_`, as a container's often has, for a registry's authority, and has no host.
         val authority = uri.getRawAuthority
         if authority == null || authority.isEmpty then throw new IllegalArgumentException(s"No host in $uri")
         splitAuthority(scheme, authority, what => new IllegalArgumentException(s"$what in $uri"))
@@ -77,7 +58,6 @@ object Url {
         if port < 1 || port > 65535 then throw new IllegalArgumentException(s"A port is 1 to 65535, not $port, in $uri")
         ((if rawHost.startsWith("[") then rawHost.substring(1, rawHost.length - 1) else rawHost).toLowerCase, port)
       }
-    // Characters outside ASCII, which `URI` takes in a path or query as they are, go out percent-encoded as UTF-8.
     val ascii = new URI(uri.toASCIIString)
     val path = Option(ascii.getRawPath).filter(_.nonEmpty).getOrElse("/")
     new Url(scheme, host, port, path, Option(ascii.getRawQuery))
@@ -85,11 +65,6 @@ object Url {
 
   def defaultPort(scheme: String): Int = if scheme == "https" || scheme == "wss" then 443 else 80
 
-  /** A server's request URL, from its `Host` header's `authority` (see `splitAuthority`) and its origin-form `target`
-    * (a path, and a query after a `?`), checked as strictly as `parse` checks them, without its two parses of a `URI`:
-    * a target of RFC 3986's path and query characters and percent-escapes, with no fragment. A `Wire.Malformed` (400)
-    * if not.
-    */
   private[http] def ofRequest(scheme: String, authority: String, target: String): Url = {
     if !originForm(target) then throw new Wire.Malformed(Status.BadRequest, s"A malformed request target: $target")
     val (host, port) = splitAuthority(scheme, authority, what => new Wire.Malformed(Status.BadRequest, what))
@@ -99,10 +74,6 @@ object Url {
     new Url(scheme, host, port, path, query)
   }
 
-  /** The host, lower-cased, and the port, the scheme's if there is none, of `authority`: a host name of RFC 3986's
-    * unreserved characters (letters, digits, `-`, `.`, `_` and `~`), or a bracketed IPv6 literal, and a port of 1 to
-    * 65535 if there is one; else what `malformed` makes of it.
-    */
   private def splitAuthority(scheme: String, authority: String, malformed: String => Exception): (String, Int) = {
     def refused = malformed(s"A malformed host: $authority")
     var host = authority
@@ -131,9 +102,6 @@ object Url {
     (Text.asciiLower(host), number)
   }
 
-  /** Whether `target` is a path starting with `/`, then a query after a `?` if any, of RFC 3986's characters for them:
-    * unreserved ones, sub-delimiters, `:`, `@`, `/`, `?` in the query, and `%` with two hex digits.
-    */
   private def originForm(target: String): Boolean = {
     if target.isEmpty || target.charAt(0) != '/' then return false
     var i = 0
@@ -157,9 +125,6 @@ object Url {
     ok
   }
 
-  /** The parameters of a raw query, `+` and percent-escapes decoded; an `IllegalArgumentException` if an escape is
-    * malformed.
-    */
   def parseQuery(raw: String): Seq[(String, String)] =
     if raw.isEmpty then Seq.empty
     else
@@ -174,9 +139,6 @@ object Url {
         }
         .toSeq
 
-  /** `s` with its percent-escapes decoded as UTF-8, and `+` as a space if `plusIsSpace`; an `IllegalArgumentException`
-    * if an escape is malformed or the bytes are not UTF-8.
-    */
   def decode(s: String, plusIsSpace: Boolean): String =
     if s.indexOf('%') < 0 && (!plusIsSpace || s.indexOf('+') < 0) then s
     else {
@@ -206,7 +168,6 @@ object Url {
       catch case e: java.nio.charset.CharacterCodingException => throw new IllegalArgumentException(s"Not UTF-8: $s", e)
     }
 
-  /** An ASCII hex digit's value, or -1: `Character.digit` takes other scripts' digits too. */
   private def hexDigit(c: Char): Int =
     if c >= '0' && c <= '9' then c - '0'
     else if (c | 0x20) >= 'a' && (c | 0x20) <= 'f' then (c | 0x20) - 'a' + 10
@@ -214,7 +175,6 @@ object Url {
 
   private val hex = "0123456789ABCDEF"
 
-  /** `s` percent-encoded as UTF-8, every byte but the unreserved ones (RFC 3986, 2.3) and those in `keep`. */
   def encode(s: String, keep: String = ""): String = {
     val bytes = s.getBytes(StandardCharsets.UTF_8)
     val out = new StringBuilder(bytes.length)
@@ -228,14 +188,10 @@ object Url {
     out.toString
   }
 
-  /** A path segment or a query's name or value, encoded to go between delimiters. */
   def encodeSegment(s: String): String = encode(s)
   private[http] def encodeQueryPart(s: String): String = encode(s)
 }
 
-/** The `url"..."` interpolator: an absolute URL whose interpolated values are percent-encoded, so that a value cannot
-  * change the URL's shape: `url"https://api.example.com/users/$name?q=$query"` names one user, whatever `name` holds.
-  */
 extension (sc: StringContext) {
   def url(args: Any*): Url = {
     val parts = sc.parts.iterator

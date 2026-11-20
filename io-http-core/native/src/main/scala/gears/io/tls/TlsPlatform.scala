@@ -16,15 +16,12 @@ import scala.scalanative.unsigned.*
 
 import openssl.*
 
-/** TLS on Scala Native: OpenSSL, its records moved over the stream through a BIO pair by the code here. */
 private[tls] object TlsPlatform {
 
-  /** An `SSL_CTX`, freed by nobody: contexts live as long as the process, one per configuration (`Tls`). */
   final class Context(val ctx: Ptr[SSL_CTX], val verify: Boolean)
   type ClientContext = Context
   type ServerContext = Context
 
-  /** TLS 1.2 at least, as `TlsStream` promises, whatever the system's OpenSSL configuration allows. */
   private def atLeastTls12(ctx: Ptr[SSL_CTX]): Unit =
     if SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, TLS1_2_VERSION.toSize, null) != 1 then
       fail(ctx, "Failed to require TLS 1.2 or later")
@@ -89,7 +86,6 @@ private[tls] object TlsPlatform {
     }
   }
 
-  /** The text of the calling thread's oldest OpenSSL error. */
   private[tls] def lastError(): String = {
     val code = ERR_get_error()
     if code == 0.toULong then "no OpenSSL error recorded"
@@ -101,11 +97,6 @@ private[tls] object TlsPlatform {
   }
 }
 
-/** A TLS stream over `underlying`, through `ssl`, whose records go through a BIO pair: `networkBio` is the network
-  * side, which takes what `underlying` reads and gives what is to be written. Every OpenSSL call is made under
-  * `nativeLock`, and never suspends, so one read and one write may run at once from different futures, as OpenSSL
-  * allows an `SSL` only one call at a time; `inbound` and `outbound` keep one read and one write of `underlying` each.
-  */
 private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL], networkBio: Ptr[BIO]) extends TlsStream {
   private object nativeLock
   private var freed = false
@@ -114,11 +105,11 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
   private val outbound = Semaphore(1)
   private val inbound = Semaphore(1)
   private val netOut = new Array[Byte](OpenSslStream.NetBufSize)
-  private val outPending = ByteBuffer.wrap(netOut).limit(0) // taken from the BIO, not yet written
+  private val outPending = ByteBuffer.wrap(netOut).limit(0)
   private val netIn = new Array[Byte](OpenSslStream.NetBufSize)
-  private val netInBuffer = ByteBuffer.wrap(netIn) // the same each time, so that the stream's read op is kept
-  private lazy val gathered = new Array[Byte](OpenSslStream.RecordSize) // small buffers, for one record
-  @volatile private[tls] var fills = 0L // written holding `inbound`
+  private val netInBuffer = ByteBuffer.wrap(netIn)
+  private lazy val gathered = new Array[Byte](OpenSslStream.RecordSize)
+  @volatile private[tls] var fills = 0L
   private var failureDetail = ""
 
   def closeNotified: Boolean = notified
@@ -128,9 +119,6 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
     body
   }
 
-  /** Calls OpenSSL, returning its result and `SSL_get_error`'s: the error queue is the thread's, and a future moves
-    * between threads, so it is cleared first, and a failure's text read before the lock is let go.
-    */
   private def call(op: () => Int): (Int, Int) = native {
     ERR_clear_error()
     val r = op()
@@ -139,14 +127,8 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
     (r, e)
   }
 
-  /** Writes what OpenSSL has for the network. What a write that timed out or was cancelled had not written stays in
-    * `outPending`, to go first next time, so that no record is cut or lost.
-    */
   private def flushNetworkOut(timeout: Duration)(using Async): Unit = Stream.holding(outbound)(flushHeld(timeout))
 
-  /** As `flushNetworkOut`, from a read: only if there is something to write, and only if no write holds the write side,
-    * so that a read never waits behind a write stuck on a peer that does not read. That write flushes what is left.
-    */
   private def flushIfFree(timeout: Duration)(using Async): Unit =
     if outPending.hasRemaining || native(BIO_ctrl(networkBio, BIO_CTRL_PENDING, 0.toSize, null).toInt) > 0 then
       outbound.poll() match {
@@ -156,7 +138,6 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
         case None => ()
       }
 
-  /** `flushNetworkOut`'s work, the write side held. */
   private def flushHeld(timeout: Duration)(using Async): Unit = {
     var done = false
     while !done do {
@@ -171,9 +152,7 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
     }
   }
 
-  /** Reads from the network into OpenSSL: false at the end of the stream. True at once if another caller added input
-    * since `seen`, which may be what this one's OpenSSL call wants: a reader and a writer share the input.
-    */
+  // - input another caller added since `seen` may be the record this caller's OpenSSL call wants: retry first
   private[tls] def fillNetworkIn(timeout: Duration, seen: Long)(using Async): Boolean =
     Stream.holding(inbound) {
       if fills != seen then true
@@ -188,10 +167,6 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
       }
     }
 
-  /** Runs `op` until it is done or fails, moving records as OpenSSL asks: each read and write of `underlying` within
-    * `timeout`, or, if `deadline` is not negative, all of them by then, on `System.nanoTime`'s clock. A read's
-    * (`reading`) flushes only what it can without waiting for the write side.
-    */
   private def pump(op: () => Int, timeout: Duration, reading: Boolean, deadline: Long = -1)(using
       Async
   ): (Int, Int) = {
@@ -220,7 +195,6 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
     (result, error)
   }
 
-  /** The handshake, all of it within `timeout`: a peer that sends a byte at a time cannot make it last longer. */
   def handshake(timeout: Duration)(using Async): Unit = {
     val deadline = Stream.limit(timeout) match {
       case null              => -1L
@@ -255,7 +229,6 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
           reading = true
         )
       catch {
-        // The bytes are read; what OpenSSL had to send with them, such as a key update's answer, goes next time.
         case _: java.util.concurrent.TimeoutException if got > 0 => (got, SSL_ERROR_NONE)
       }
     if n > 0 then n
@@ -264,7 +237,7 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
         case SSL_ERROR_ZERO_RETURN =>
           notified = true
           -1
-        case OpenSslStream.PeerClosed    => -1 // without a close notification: `closeNotified` stays false
+        case OpenSslStream.PeerClosed    => -1
         case SSL_ERROR_SYSCALL if n == 0 => -1
         case _ => throw new IOException(s"TLS read failed (SSL_get_error=$err): $failureDetail")
       }
@@ -277,16 +250,10 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
       val arr = if direct then buf.array() else new Array[Byte](n)
       val start = if direct then buf.arrayOffset() + buf.position() else 0
       if !direct then buf.duplicate().get(arr)
-      // `buf` is advanced as OpenSSL takes its bytes, before they are flushed: a write that times out or is cancelled
-      // has taken what its position says, and the records go out first on the next write.
       writeArray(arr, start, n, timeout)(r => buf.position(buf.position() + r): Unit)
     }
   }
 
-  /** Small buffers, such as a response's head and body, go out together, as one record and one write of `underlying`:
-    * up to a record's worth is copied into `gathered`, and each buffer is advanced as OpenSSL takes its bytes. A buffer
-    * of a record or more, met first, is written from where it is.
-    */
   override def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
     var i = 0
     while i < bufs.length do {
@@ -319,7 +286,6 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
     }
   }
 
-  /** Writes `n` bytes of `arr` from `start` through OpenSSL, calling `taken` with each count it takes. */
   private def writeArray(arr: Array[Byte], start: Int, n: Int, timeout: Duration)(taken: Int => Unit)(using
       Async
   ): Unit = {
@@ -343,7 +309,6 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
     }
   }
 
-  /** Sends the close notification. */
   private def notifyClose(timeout: Duration)(using Async): Unit = {
     val (result, error) = call(() => SSL_shutdown(ssl))
     if result < 0 && error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE then
@@ -360,8 +325,6 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
     val first = nativeLock.synchronized(!freed)
     if first then
       Stream.uncancelled {
-        // Best effort, so that the peer can tell the end from a truncation; not behind a write under way, which may be
-        // stuck on a peer that does not read: closing the stream fails it.
         outbound.poll() match {
           case Some(guard) =>
             try {
@@ -391,7 +354,7 @@ private[tls] final class OpenSslStream private (underlying: Stream, ssl: Ptr[SSL
 private[tls] object OpenSslStream {
   inline val PeerClosed = -1
   inline val NetBufSize = 17 * 1024
-  inline val RecordSize = 16 * 1024 // the most plaintext a TLS record carries
+  inline val RecordSize = 16 * 1024
 
   def open(underlying: Stream, ctx: Ptr[SSL_CTX], host: String | Null, verify: Boolean): OpenSslStream = {
     val ssl = SSL_new(ctx)
@@ -403,7 +366,6 @@ private[tls] object OpenSslStream {
       throw new IOException(s"BIO_new_bio_pair failed: ${TlsPlatform.lastError()}")
     }
     SSL_set_bio(ssl, !internal, !internal)
-    // A write that timed out is taken up again with what is left of its buffer, maybe in another array.
     SSL_ctrl(
       ssl,
       SSL_CTRL_MODE,
@@ -423,7 +385,6 @@ private[tls] object OpenSslStream {
           !verify || SSL_set1_host(ssl, c) == 1
         }
       }
-      // Without a target, a verifying context would accept any trusted certificate.
       if !targetSet then {
         val error = new IOException(s"Failed to set the TLS verification target $host: ${TlsPlatform.lastError()}")
         SSL_free(ssl)

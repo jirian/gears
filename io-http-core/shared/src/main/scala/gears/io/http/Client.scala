@@ -17,12 +17,6 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 
-/** How long a client waits: `connect`, for a connection and its TLS handshake; `responseHead`, from sending a request
-  * to its response's head; `read`, for each read of a response's body; `write`, for each write of a request, and of a
-  * WebSocket's frame; `total`, for all of a request, unless the request sets its own (`Request.withTimeout`). Each but
-  * `total` is finite by default, so that a host that stops answering cannot hang its caller; `total` is not, so that a
-  * long download is not cut off.
-  */
 final case class ClientTimeouts(
     connect: Duration = 10.seconds,
     responseHead: Duration = 30.seconds,
@@ -31,18 +25,13 @@ final case class ClientTimeouts(
     write: Duration = 30.seconds
 )
 
-/** Whether a client follows redirects: `Follow` up to `max` of them, never from `https` to `http` unless
-  * `allowDowngrade`, and taking a request's `Authorization` and `Cookie` headers only to the origin it was made for.
-  */
 enum Redirects {
   case None
   case Follow(max: Int = 10, allowDowngrade: Boolean = false)
 }
 
-/** A client's kept-alive connections: at most `maxIdlePerHost` kept per origin, each for at most `idle`. */
 final case class PoolConfig(maxIdlePerHost: Int = 16, idle: FiniteDuration = 60.seconds)
 
-/** A client's configuration. `maxResponseBody` bounds the body `send` reads whole; `stream` reads it as it comes. */
 final case class ClientConfig(
     timeouts: ClientTimeouts = ClientTimeouts(),
     redirects: Redirects = Redirects.Follow(),
@@ -53,31 +42,15 @@ final case class ClientConfig(
     headers: Headers = Headers.empty
 )
 
-/** An HTTP/1.1 client over `io`'s backend: cheap to share, from any future, and kept for many requests, since it keeps
-  * their connections alive for the next to the same origin. `close` closes the idle ones.
-  *
-  * A request reuses a kept connection whatever its method. If the connection turns out to have been closed by the
-  * server, which a connection kept idle may be, before any of the response has arrived, the request is sent again on a
-  * fresh one if that is safe: its method is idempotent, or it has an `Idempotency-Key`, and its body is in memory.
-  */
 final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[IpStreams & Resolving]) {
   private val pool = new HttpClient.Pool(config.pool)
 
-  /** Sends `request` and returns its response with the body read whole, at most `config.maxResponseBody` bytes. A
-    * status that is not a success is a response like any other: `ensureSuccess` turns it into an exception.
-    */
   def send(request: Request)(using Async): Response = stream(request) { response =>
     val body = response.body.bytes()
     response.copy(body = Body(body, response.body.contentType.getOrElse("application/octet-stream")))
   }
 
-  /** Sends `request` and runs `use` with its response, whose body arrives as `use` reads it: for a large download, or
-    * one read as it comes. The connection goes back to the pool once `use` returns having read the body, and is closed
-    * otherwise, however `use` ends, so that nothing is left holding it.
-    */
   def stream[A](request: Request)(use: Response => Async ?=> A)(using Async): A = {
-    // The configured headers go on the request itself, so that a redirect to another origin drops their credentials
-    // as it drops the request's own.
     val withDefaults = request.copy(headers = config.headers ++ request.headers)
     val limit = request.timeout.orElse(Stream.limit(config.timeouts.total) match {
       case null              => scala.None
@@ -105,7 +78,7 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
           throw new IOException(s"A redirect from https to http, refused: $target")
         val code = response.status.code
         val keepsBody = code == 307 || code == 308
-        if keepsBody && !request.body.replayable then null // its body is gone: the caller gets the redirect
+        if keepsBody && !request.body.replayable then null
         else {
           val sameOrigin = target.origin == request.url.origin
           var headers = request.headers
@@ -126,14 +99,13 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
     }
   }
 
-  /** Sends `request` on a kept connection to its origin, or a new one, and reads its response's head. */
   private def open(request: Request)(using Async): HttpClient.Exchange = {
     val origin = request.url.origin
     val kept = pool.take(origin)
     if kept != null then
       try return exchange(kept.nn, request, reused = true)
       catch {
-        case _: HttpClient.Stale if safeToRetry(request) => () // sent again below, on a fresh connection
+        case _: HttpClient.Stale if safeToRetry(request) => ()
         case e: HttpClient.Stale                         => throw e.getCause
       }
     val fresh = connect(request.url)
@@ -160,16 +132,12 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
     new HttpClient.Connection(stream, new BufferedInput(stream, 8192, 64 * 1024), url.origin)
   }
 
-  /** Writes `request` on `connection` and reads the response's head. A failure before any of it arrived on a reused
-    * connection is `Stale`, which `open` may retry.
-    */
   private def exchange(connection: HttpClient.Connection, request: Request, reused: Boolean)(using
       Async
   ): HttpClient.Exchange = {
     val t = config.timeouts
     var headed = false
     try {
-      // A server may answer before taking the whole body, as with a 413, and close: its answer is read all the same.
       val written =
         try {
           writeRequest(connection.stream, request)
@@ -232,10 +200,8 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
     out.finish()
   }
 
-  /** Closes the kept connections. Requests under way go on, and a later one opens a new connection. */
   def close()(using Async): Unit = pool.closeAll()
 
-  /** Runs `body` with this client, and closes it afterwards. */
   def use[A](body: HttpClient => A)(using Async): A =
     try body(this)
     finally close()
@@ -248,8 +214,6 @@ final class HttpClient(val config: ClientConfig = ClientConfig())(using io: Io[I
 
 object HttpClient {
 
-  /** What is left of `limit`, begun at `began` on `System.nanoTime`'s clock: a connection and its handshake share it.
-    */
   private[http] def leftOf(limit: Duration, began: Long): Duration = limit match {
     case d: FiniteDuration =>
       val left = d.toNanos - (System.nanoTime() - began)
@@ -258,7 +222,6 @@ object HttpClient {
     case other => other
   }
 
-  /** A connection to `origin`, with its reader. */
   private[http] final class Connection(
       val stream: Stream,
       val input: BufferedInput,
@@ -270,12 +233,10 @@ object HttpClient {
       catch case _: IOException => ()
   }
 
-  /** A failure of a request on a reused connection before any of its response came. */
   private final class Stale(cause: IOException) extends IOException(cause.getMessage, cause) {
     override def getCause: IOException = cause
   }
 
-  /** A response's head read, its body still on the connection. */
   private final class Exchange(
       connection: Connection,
       val response: Response,
@@ -284,8 +245,6 @@ object HttpClient {
       pool: Pool
   ) {
 
-    /** Runs `use`, then gives the connection back if the body was read and it may carry another request, or closes it.
-      */
     def finish[A](use: Response => Async ?=> A)(using Async): A = {
       var kept = false
       try {
@@ -298,7 +257,6 @@ object HttpClient {
       } finally if !kept then connection.close()
     }
 
-    /** Drops the response: its body, if small, is drained so that the connection is kept. */
     def discard()(using Async): Unit = {
       val drained =
         try reusable && source.drain(64 * 1024)
@@ -312,7 +270,6 @@ object HttpClient {
     }
   }
 
-  /** Idle connections by origin, the most recently used first. */
   private final class Pool(config: PoolConfig) {
     private val idle = scala.collection.mutable.HashMap.empty[Url.Origin, List[Connection]]
 

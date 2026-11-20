@@ -4,7 +4,6 @@ import sbtcrossproject.CrossPlugin.autoImport.{CrossType, crossProject}
 
 scalaVersion := "3.9.0"
 
-// The Scala Native nightly selected in project/plugins.sbt brings its libraries from the snapshot repository.
 ThisBuild / resolvers ++= (if (sys.env.get("SCALA_NATIVE_NIGHTLY").contains("1")) Seq(Resolver.sonatypeCentralSnapshots)
                            else Nil)
 
@@ -123,12 +122,6 @@ lazy val ioReferenceDemos =
     )
     .dependsOn(ioReference, ioTestkit.jvm)
 
-// The runtime the native backends share (`gears.async.io.shareable`): a pool of workers, each with an inbox and a heap
-// of timers, that is the program's scheduler and performs its ops, cancelling them safely. A backend gives each worker
-// its poller by overriding `Poller.waitForDeadline` and `wake`. Scala Native only: on the JVM gears' fibers are
-// virtual threads, which do not run on threads of ours. Its four files, and its TimerHeapSuite and TimerHeapOpSuite,
-// are based on Jamie Thompson's, from his branch `async-io-kqueue-basepoint` of github.com/bishabosha/gears at 44bb0119
-// (tag `jamie-runtime-base`), changed since for completion-based backends; each file says how.
 lazy val ioRuntime =
   (project in file("io-runtime"))
     .enablePlugins(ScalaNativePlugin)
@@ -142,9 +135,6 @@ lazy val ioRuntime =
     )
     .dependsOn(root.native, ioTestkit.native % Test)
 
-// The io_uring backend (Linux 6.0 or later, Scala Native) on the shared runtime, through liburing, whose `static
-// inline` helpers, and a synchronous cancel, are in a C shim among its native resources. Every program that links it
-// needs liburing.
 lazy val ioUring =
   (project in file("io-backends/uring"))
     .enablePlugins(ScalaNativePlugin)
@@ -158,9 +148,6 @@ lazy val ioUring =
     )
     .dependsOn(ioRuntime % "compile->compile;test->test", ioTestkit.native % Test)
 
-// The higher level's core: byte streams over connections, TLS, and an HTTP/1.1 server and client with WebSockets
-// (`gears.io.net`, `gears.io.tls`, `gears.io.http`), written against `gears.async.io` alone, for a program or a library
-// that brings the backend it runs on. On Scala Native it needs OpenSSL, for TLS.
 lazy val ioHttpCore =
   crossProject(JVMPlatform, NativePlatform)
     .crossType(CrossType.Full)
@@ -176,9 +163,6 @@ lazy val ioHttpCore =
     .nativeSettings(nativeConfig ~= { _.withMultithreading(true) })
     .dependsOn(root)
 
-// The higher level for programs: its core, and the shortest ways in, on each platform's default backend, which this
-// module chooses: `Http` (`run`, `serve`, `testServer`, `server`, and the client functions) and `Defaults.run`, with the
-// reference backend on the JVM and io_uring on Scala Native. Its tests are the higher level's, run on these backends.
 lazy val ioHttp =
   crossProject(JVMPlatform, NativePlatform)
     .crossType(CrossType.Full)
@@ -199,8 +183,6 @@ lazy val ioHttp =
     .jvmConfigure(_.dependsOn(ioReference))
     .nativeConfigure(_.dependsOn(ioUring))
 
-// io_uring's demo application: the testkit's gears demos over io_uring, as `ioUringDemos/run <command>`, and the gears
-// bench (`GearsBench`, from bench/io-bench) over it, as `ioUringDemos/run bench`.
 lazy val ioUringDemos =
   (project in file("io-backends/uring/demos"))
     .enablePlugins(ScalaNativePlugin)
@@ -212,8 +194,6 @@ lazy val ioUringDemos =
     )
     .dependsOn(ioUring, ioTestkit.native)
 
-// The gears bench (bench/io-bench) over the reference backend, the JVM's column beside io_uring's, as
-// `ioReferenceBench/run bench`.
 lazy val ioReferenceBench =
   (project in file("bench/io-bench/jvm"))
     .settings(
@@ -225,8 +205,6 @@ lazy val ioReferenceBench =
     )
     .dependsOn(ioReference, ioTestkit.jvm)
 
-// The HTTP bench's server: gears-io-http serving the routes its Go counterpart serves, for a load generator to measure
-// against both (`ioHttpBenchNative/nativeLink`, `ioHttpBenchJVM/run <port>`).
 lazy val ioHttpBench =
   crossProject(JVMPlatform, NativePlatform)
     .crossType(CrossType.Full)

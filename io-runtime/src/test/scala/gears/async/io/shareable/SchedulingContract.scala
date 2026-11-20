@@ -13,13 +13,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration.*
 import scala.util.Success
 
-/** For a backend on the shared runtime (`WorkpoolScheduler`): what a resume may rely on: it happens promptly, but only
-  * once the listener resuming it has returned, as sources complete their listeners while holding locks and partway
-  * through changing their state.
-  */
 abstract class SchedulingContract extends munit.FunSuite {
 
-  /** The backend, and a pool of `workers` workers performing its ops. */
   type I <: Interface
   val backend: Backend { type Interface = I }
   def newPool(workers: Int): WorkpoolScheduler[?, ?] & Io[I]
@@ -31,7 +26,6 @@ abstract class SchedulingContract extends munit.FunSuite {
     while System.nanoTime() < end do Thread.onSpinWait()
   }
 
-  /** `Io.run` on a pool of the given size. */
   private def onPool[T](workers: Int)(program: Io[I] ?=> Async.Spawn ?=> T): T = {
     val pool = newPool(workers)
     given poolSupport: (AsyncSupport { type Scheduler = pool.Scheduler }) = pool
@@ -70,7 +64,7 @@ abstract class SchedulingContract extends munit.FunSuite {
         val previous = last
         last = Future(previous.await + 1)
       }
-      AsyncOperations.sleep(500) // so that they are waiting
+      AsyncOperations.sleep(500)
       start.complete(Success(0))
       assertEquals(last.await, 20_000)
     }
@@ -133,7 +127,7 @@ abstract class SchedulingContract extends munit.FunSuite {
         second.moveTo(moved.get())
       }
       io.perform(io.ops.timer(1))
-      spin(40_000_000L) // past both deadlines before the only worker next looks at its heap
+      spin(40_000_000L)
       val returned = waiter.await
       mover.await
       assert(returned >= moved.get(), s"${(moved.get() - returned) / 1000000}ms early")
@@ -146,7 +140,7 @@ abstract class SchedulingContract extends munit.FunSuite {
       val target = System.nanoTime() + 60_000_000L
       val waitingLater = Future { io.perform(later); System.nanoTime() }
       later.moveTo(target)
-      val returnedLater = waitingLater.await // not within `assert`, which holds a monitor as it evaluates its condition
+      val returnedLater = waitingLater.await
       assert(returnedLater >= target, "it returned at the old deadline")
 
       val earlier = io.ops.deadlineTimer(System.nanoTime() + 60_000_000_000L)

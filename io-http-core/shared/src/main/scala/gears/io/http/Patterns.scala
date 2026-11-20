@@ -2,21 +2,12 @@ package gears.io.http
 
 import scala.quoted.*
 
-/** Route patterns read when compiling (see `GET`): a pattern's `{name}` and `{name:Type}` segments become the names and
-  * types of the named tuple its handler is given, so that a misspelt name, or a type no decoder reads, is an error
-  * where the route is written rather than a failure when a request comes.
-  */
 private[http] object Patterns {
 
-  /** The types a segment may name, each a `ParamDecoder`'s; `{name}` alone is a `String`. */
   val typeNames: List[String] = List("String", "Int", "Long", "Double", "Boolean", "BigDecimal", "UUID")
 
-  /** A `{name}` or `{name:Type}` segment, or `{name...}`, which is always a `String`. */
   final case class Param(name: String, tpe: String)
 
-  /** `pattern` as the route tree takes it, each type removed, and its segments' parameters in order; or what is wrong
-    * with it.
-    */
   def parse(pattern: String): Either[String, (String, List[Param])] =
     if !pattern.startsWith("/") then Left(s"A pattern starts with /: $pattern")
     else {
@@ -51,7 +42,6 @@ private[http] object Patterns {
       }
     }
 
-  /** An `Endpoint` for `method` on the literal `pattern`, or, if it has parameters, an `EndpointWith` typed by them. */
   def endpoint(method: Expr[Method], pattern: Expr[String])(using Quotes): Expr[Any] = {
     import quotes.reflect.*
     val text = pattern.value.getOrElse(

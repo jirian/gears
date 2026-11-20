@@ -12,14 +12,8 @@ import scala.scalanative.runtime.ByteArray
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-/** Sockets on Linux, for the io_uring backend: opened non-blocking and close-on-exec, their addresses written into and
-  * read out of `sockaddr`s byte by byte, as Linux lays them out (the family in host order, the port and address in
-  * network order, an IPv6 scope in host order), and their options. An IPv6 socket is dual stack, and an IPv4 peer of it
-  * is reported by its IPv4 address, as the interface has it.
-  */
 private[uring] object Sockets {
 
-  /** Room for any socket address. */
   inline val StorageSize = 128
 
   private inline val AF_UNIX = 1
@@ -43,7 +37,6 @@ private[uring] object Sockets {
   inline val SO_REUSEADDR = 2
   inline val Backlog = 4096
 
-  /** A socket address's room, for a call to fill or read: an array, which Scala Native never moves. */
   final class Storage {
     val bytes = new Array[Byte](StorageSize)
     def at: Ptr[socket.sockaddr] = bytes.asInstanceOf[ByteArray].at(0).asInstanceOf[Ptr[socket.sockaddr]]
@@ -53,7 +46,6 @@ private[uring] object Sockets {
     def length_=(n: Int): Unit = !lengthAt = n.toUInt
   }
 
-  /** Opens a socket of `transport` (`SOCK_STREAM`, `SOCK_DGRAM`) for `address`'s family: an IPv6 one dual stack. */
   def open(address: IpSocketAddress | UnixAddress, transport: Int): Int = {
     val family = address match {
       case ip: IpSocketAddress => if ip.address.protocol == Protocol.IPv4 then AF_INET else AF_INET6
@@ -68,14 +60,12 @@ private[uring] object Sockets {
           unistd.close(fd)
           throw e
       }
-    SigPipe.ignored: Unit // a send once the peer has gone fails with EPIPE, not the signal
+    SigPipe.ignored: Unit
     fd
   }
 
-  /** Writes `address` into `into`, setting its length. */
   def write(address: IpSocketAddress | UnixAddress, into: Storage): Unit = into.length = write(address, into.bytes)
 
-  /** Writes `address` into `b`, at least `StorageSize` bytes, and returns its length. */
   def write(address: IpSocketAddress | UnixAddress, b: Array[Byte]): Int = {
     java.util.Arrays.fill(b, 0.toByte)
     address match {
@@ -108,7 +98,6 @@ private[uring] object Sockets {
     }
   }
 
-  /** Refuses a Unix path an op cannot use, as it is built: empty, with a NUL, or too long for a socket address. */
   def checkPath(path: String, bytes: Array[Byte] = null): Unit = {
     if path.isEmpty then throw new IllegalArgumentException("A Unix socket address is not the empty path")
     if path.indexOf('\u0000') >= 0 then throw new IllegalArgumentException(s"A path has no NUL: $path")
@@ -122,12 +111,8 @@ private[uring] object Sockets {
     b(1) = (f >>> 8).toByte
   }
 
-  /** The address in `from`, `length` bytes of it. */
   def read(from: Storage): IpSocketAddress | UnixAddress = read(from.bytes, from.length)
 
-  /** The address in `b`, `length` bytes of it: an IPv4-mapped IPv6 one as IPv4 if `unmap`, as a dual-stack socket's
-    * peer is reported.
-    */
   def read(b: Array[Byte], length: Int, unmap: Boolean = true): IpSocketAddress | UnixAddress = {
     val f = (b(0) & 0xff) | ((b(1) & 0xff) << 8)
     def port = ((b(2) & 0xff) << 8) | (b(3) & 0xff)
@@ -150,9 +135,6 @@ private[uring] object Sockets {
     }
   }
 
-  /** `to` as a socket of `fd`'s family sends to it: an IPv4 address as its IPv4-mapped one from a dual-stack IPv6
-    * socket.
-    */
   def target(ipv6Socket: Boolean, to: IpSocketAddress): IpSocketAddress =
     if !ipv6Socket || to.address.protocol == Protocol.IPv6 then to
     else {
@@ -165,7 +147,6 @@ private[uring] object Sockets {
       IpSocketAddress(IpAddress.fromBytes(Protocol.IPv6, mapped), to.port)
     }
 
-  /** The address `fd` is bound to (`getsockname`), or its peer's (`getpeername`). */
   def localAddress(fd: Int): IpSocketAddress | UnixAddress = name(fd, peer = false)
   def peerAddress(fd: Int): IpSocketAddress | UnixAddress = name(fd, peer = true)
 
@@ -186,9 +167,6 @@ private[uring] object Sockets {
   def listen(fd: Int): Unit =
     if socket.listen(fd, Backlog) != 0 then throw Results.failed(s"Failed to listen")
 
-  /** Starts connecting `fd` to `address`: true if it connected at once, false if it is connecting. `EAGAIN` is a
-    * failure: for a Unix socket it means the listener's backlog is full, and nothing was started.
-    */
   def startConnect(fd: Int, address: IpSocketAddress | UnixAddress): Boolean = {
     val s = new Storage
     write(address, s)
@@ -197,9 +175,6 @@ private[uring] object Sockets {
     else throw Results.failed(s"Failed to connect to $address")
   }
 
-  /** Fails unless a connection under way on `fd` was made: its error (`SO_ERROR`) is none, and it has a peer, since a
-    * socket that never connected also polls writable with no error.
-    */
   def checkConnected(fd: Int, address: AnyRef): Unit = {
     val error = getInt(fd, socket.SOL_SOCKET, socket.SO_ERROR, "SO_ERROR")
     if error != 0 then throw Results.failure(s"Failed to connect to $address", -error)
@@ -212,7 +187,6 @@ private[uring] object Sockets {
     if socket.shutdown(fd, socket.SHUT_WR) != 0 && errno.errno != errno.ENOTCONN then
       throw Results.failed(s"Failed to shut down a connection's output")
 
-  /** Removes the socket file at `path`, as a restarted server's would be; fails, leaving it, on any other file. */
   def replaceSocketFile(path: String): Unit = Zone.acquire { implicit z =>
     val c = toCString(path)
     val info = stackalloc[stat.stat]()
@@ -222,7 +196,6 @@ private[uring] object Sockets {
     }
   }
 
-  /** The device and inode of the file at `path`, to tell later whether it is still the one bound, or null. */
   def fileId(path: String): (Long, Long) | Null = Zone.acquire { implicit z =>
     val info = stackalloc[stat.stat]()
     if stat.lstat(toCString(path), info) != 0 then null
@@ -247,15 +220,11 @@ private[uring] object Sockets {
     !v
   }
 
-  // ---- Options
-
-  /** Whether this backend has `option` for a socket of `kind`: every option on Linux, where it applies. */
   def supports(option: SocketOption[?], kind: SocketOption.Kind): Boolean = option.appliesTo(kind)
 
   def canChange(option: SocketOption[?], kind: SocketOption.Kind): Boolean =
     option != SocketOption.ReusePort && SocketOption.onSocket(option, kind)
 
-  /** Refuses options that do not apply to a socket of `kind`, as an op opening one is built. */
   def check(options: SocketOptions, kind: SocketOption.Kind): Unit =
     for option <- options.options do
       if !option.appliesTo(kind) then
@@ -305,7 +274,6 @@ private[uring] object Sockets {
     case SocketOption.ReusePort => getInt(fd, socket.SOL_SOCKET, SO_REUSEPORT, "SO_REUSEPORT") != 0
   }
 
-  /** Sets each of `values` on `fd`, closing it and rethrowing if one fails. */
   def apply(fd: Int, values: List[(SocketOption[?], Any)]): Unit =
     try values.foreach((o, v) => set(fd, o, v))
     catch {

@@ -14,31 +14,17 @@ import java.nio.ByteBuffer
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.FiniteDuration
 
-/** A connected byte stream: a TCP or Unix socket, or TLS over one. Reads and writes suspend the calling future, and
-  * each takes a time limit, after which it throws `java.util.concurrent.TimeoutException`: a read having moved no
-  * bytes, so that a timed-out read is a wait that gave up, not a connection lost; a write having written what its
-  * buffer's position says, so that it may be taken up again where it stopped. Failures are `IOException`s; a cancelled
-  * caller's op stops and throws `CancellationException`, as a timed-out one does. One read and one write may be under
-  * way at once, from different futures; not two of either.
-  */
 trait Stream {
 
-  /** Reads into `buf`, between its position and limit, once at least one byte has arrived: how many, or -1 at the end
-    * of the stream, which leaves `buf` as it was. `buf` must have room.
-    */
   def read(buf: ByteBuffer, timeout: Duration = Duration.Inf)(using Async): Int
 
-  /** Writes all of `buf`, however many writes it takes, each within `timeout`. */
   def write(buf: ByteBuffer, timeout: Duration = Duration.Inf)(using Async): Unit
 
-  /** Whether `read(pool, ...)` is supported. */
   def pooledReads: Boolean = false
 
-  /** Reads into a buffer of `pool` once a byte has arrived; an empty one at the end of the stream. */
   def read(pool: BufferPool, timeout: Duration)(using Async): Received =
     throw new UnsupportedOperationException("No pooled reads on this stream")
 
-  /** Writes all of `bufs`, in order, with as few writes as the stream can manage, each within `timeout`. */
   def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
     var i = 0
     while i < bufs.length do {
@@ -47,47 +33,31 @@ trait Stream {
     }
   }
 
-  /** Ends the stream for writing: the peer reads what was written, then the end of the stream, and this side may still
-    * read.
-    */
   def shutdownOutput()(using Async): Unit
 
-  /** Closes the stream, once; later calls do nothing. It runs whether or not the caller has been cancelled, so that it
-    * may be called from a `finally` as a future is cancelled.
-    */
   def close()(using Async): Unit
 
-  /** Whether the stream is TLS, whose end is authenticated: a peer's end without one is a truncation (see `Tls`). */
   def secure: Boolean = false
 
-  /** The local and the peer's address. */
   def localAddress: IpSocketAddress | UnixAddress
   def peerAddress: IpSocketAddress | UnixAddress
 }
 
 object Stream {
 
-  /** `timeout` as `Io.perform` takes it: none if infinite. */
   private[io] def limit(timeout: Duration): FiniteDuration | Null = timeout match {
     case finite: FiniteDuration => finite
     case _                      => null
   }
 
-  /** `body` in an `Async` that is not cancelled with the caller, for an op that must run however the caller ends, such
-    * as a close: it is at once in meaning, so it cannot keep a cancelled future waiting.
-    */
   private[io] inline def uncancelled[A](inline body: Async ?=> A)(using ac: Async): A =
     body(using ac.withGroup(CompletionGroup.Unlinked))
 
-  /** A failure to recover from: not fatal, and not the caller's cancellation, which gears' `CancellationException`, a
-    * `RuntimeException`, would otherwise be taken for.
-    */
   private[io] object Failed {
     def unapply(e: Throwable): Boolean =
       !e.isInstanceOf[java.util.concurrent.CancellationException] && scala.util.control.NonFatal(e)
   }
 
-  /** `body`, holding one of `semaphore`'s permits. */
   private[io] inline def holding[A](semaphore: gears.async.Semaphore)(inline body: A)(using Async): A = {
     val guard = semaphore.acquire()
     try body
@@ -95,15 +65,12 @@ object Stream {
   }
 }
 
-/** A stream over a connected socket of `io`'s backend: what `Tcp` and `Unix` connect and accept. The ops of the last
-  * buffer read into and written from are kept, so that reading and writing the same buffer again, as a buffered reader
-  * does, allocates nothing.
-  */
 final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.ops.Connection) extends Stream {
   private val ops: io.ops.type = io.ops
 
   private val closed = new java.util.concurrent.atomic.AtomicBoolean(false)
 
+  // - ops kept per buffer: reading or writing the same buffer again allocates nothing
   private var readBuffer: ByteBuffer | Null = null
   private var readOp: io.Op | Null = null
   private var writeBuffer: ByteBuffer | Null = null
@@ -174,28 +141,20 @@ final class SocketStream private[io] (val io: Io[StreamSockets])(handle: io.ops.
   override def toString: String = s"SocketStream($handle)"
 }
 
-/** A listening socket of `io`'s backend, accepting `SocketStream`s. */
 final class Listener private[io] (val io: Io[StreamSockets])(handle: io.ops.Listener) {
   private val into = Slot[io.ops.Connection]()
   private val acceptOp = io.ops.accept(handle, into)
   private val isClosed = new java.util.concurrent.atomic.AtomicBoolean(false)
 
-  /** Whether `close` has been called. */
   def closed: Boolean = isClosed.get()
 
-  /** Waits for the next connection and returns it. Throws a closed channel's `IOException` once the listener is closed,
-    * from any future. One future accepts at a time: the op is the listener's, made once, and a second `accept` while
-    * one waits fails, as performing an op twice at once does.
-    */
   def accept()(using Async): SocketStream = {
     io.perform(acceptOp)
     new SocketStream(io)(into.clear())
   }
 
-  /** The address it listens on, with the port the system chose if it was asked for port 0. */
   def localAddress: IpSocketAddress | UnixAddress = io.ops.localAddress(handle)
 
-  /** Stops listening, once: a pending `accept` fails, and the port is free again as this returns. */
   def close()(using Async): Unit =
     if isClosed.compareAndSet(false, true) then Stream.uncancelled(io.perform(io.ops.close(handle)))
 }

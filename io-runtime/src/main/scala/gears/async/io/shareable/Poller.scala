@@ -1,5 +1,4 @@
-// Jamie Thompson's Poller, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears at commit 44bb0119
-// (2026-11-07), tagged jamie-runtime-base in this repository; unchanged.
+// Jamie Thompson's Poller, bishabosha/gears@44bb0119, tag jamie-runtime-base.
 
 package gears.async.io.shareable
 

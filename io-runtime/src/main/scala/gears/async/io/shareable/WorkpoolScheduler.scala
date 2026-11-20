@@ -1,7 +1,5 @@
-// Based on Jamie Thompson's WorkpoolScheduler, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears
-// at commit 44bb0119 (2026-11-07), tagged jamie-runtime-base in this repository. Changed since: it is the `Io` of
-// main's capability interfaces, a cancelled performer whose op did its work gets it (`succeeded`), and a worker is
-// found from its thread.
+// Based on Jamie Thompson's WorkpoolScheduler, bishabosha/gears@44bb0119, tag jamie-runtime-base.
+// - changed: main's Io interface, succeeded, worker found from its thread
 
 package gears.async.io.shareable
 
@@ -39,9 +37,6 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, I <: Interface { 
 
   private val workerTicker = new java.util.concurrent.atomic.AtomicInteger(0)
   private val workerGroup: Array[Worker[Op1, I]] = Array.tabulate(workers)(makeWorker)
-  /** This pool's worker whose thread this is, or null: read from the thread, as a map's lookup allocates on Scala
-    * Native, and this runs for every op.
-    */
   private def currentWorker(): Worker[Op1, I] | Null = Thread.currentThread() match {
     case t: WorkpoolScheduler.WorkerThread =>
       val w = t.worker
@@ -79,7 +74,6 @@ abstract class WorkpoolScheduler[Op1 <: AsyncOp & ReentrantOp, I <: Interface { 
               // Cancelled asynchronously: a firing still under way must finish before the op can be performed again.
               if !op.settled && !worker.withdraw(op) then
                 summon[Async].withGroup(CompletionGroup.Unlinked).await(op.settling)
-              // Unless the op was not cancelled first: its work was done, and it settled with success (`committed`).
               if !(e.isInstanceOf[java.util.concurrent.CancellationException] && op.succeeded) then throw e
           }
       } finally {
@@ -155,7 +149,6 @@ object WorkpoolScheduler {
     }
   }
 
-  /** A worker's thread, which knows its worker. */
   final class WorkerThread(val worker: Worker[?, ?]) extends Thread {
     override def run(): Unit = worker.loop()
   }
@@ -196,7 +189,6 @@ object WorkpoolScheduler {
       t
     }
 
-    /** Whether this is the worker's own thread. */
     final def isCurrent: Boolean = Thread.currentThread() eq thread
 
     /**

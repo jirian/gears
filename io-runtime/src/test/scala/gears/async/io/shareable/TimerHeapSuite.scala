@@ -1,5 +1,5 @@
-// Based on Jamie Thompson's TimerHeapSuite, from his branch async-io-kqueue-basepoint of github.com/bishabosha/gears at
-// commit 44bb0119 (2026-11-07), tagged jamie-runtime-base in this repository. Tests added since.
+// Based on Jamie Thompson's TimerHeapSuite, bishabosha/gears@44bb0119, tag jamie-runtime-base.
+// - changed: tests added
 
 package gears.async.io
 package shareable
@@ -156,7 +156,6 @@ class TimerHeapSuite extends munit.FunSuite {
     for i <- 0 until rounds do {
       heap.addTimer(timers(i))
       start.await()
-      // Neither takes it to have fired: the heap never fires it here, so a false claim would wake no one.
       if !heap.claimFiring(timers(i)) then lost += 1
     }
     withdrawer.join()

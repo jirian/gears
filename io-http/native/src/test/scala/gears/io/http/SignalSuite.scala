@@ -10,7 +10,6 @@ import scala.concurrent.duration.DurationInt
 
 import munit.FunSuite
 
-/** `Http.serve` stops gracefully on SIGTERM. Native only: on the JVM the signal would end the test's own process. */
 class SignalSuite extends FunSuite {
   override val munitTimeout = scala.concurrent.duration.Duration(60, "s")
 
@@ -19,7 +18,7 @@ class SignalSuite extends FunSuite {
   }
 
   test("a second Http.serve in the process is stopped by its own SIGTERM, which the first's reader does not take") {
-    serveUntilSigterm() // before, the second signal reached the first serve's reader, which ended the process
+    serveUntilSigterm()
   }
 
   private def serveUntilSigterm(): Unit = {

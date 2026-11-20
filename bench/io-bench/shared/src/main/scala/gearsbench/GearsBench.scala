@@ -13,10 +13,6 @@ import gears.async.io.UnixAddress
 import gears.async.io.testkit.BufferArena
 import gears.io.demos.{DemoRunner, Endpoint, Sockets}
 
-/** A backend's runner for the bench: a demo runner that can also run on a pool of a given number of workers, for a
-  * backend whose runtime has a pool of its own (io_uring's); one whose futures are virtual threads (NIO's) ignores it.
-  * Its `ops` are what its runs' `Io`s have, which the scenarios check for what they need.
-  */
 trait BenchRunner[+I <: Interface] extends DemoRunner[I] {
   def ops: I
   def onPool[T](workers: Int)(program: Io[I] ?=> Async.Spawn ?=> T): T
@@ -28,27 +24,12 @@ import java.nio.file.Paths
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 
-/** Stress tests for a backend and its gears integration, to measure each change against. An echo server runs on one
-  * worker and the clients on another, so both sides go through the backend; each scenario is timed on its own and
-  * stresses a different cost, which its `Scenario` names. Every line it prints for a scenario starts with `bench:`, so
-  * that a harness (`bench_runner.py` in jirian/gears-bench) can collect the results.
-  *
-  * Like the demos, the scenarios take the `Io` they run with and name no backend: the server's runs and the clients'
-  * are started by the `DemoRunner` of the backend chosen, which a platform's demo application provides, on pools of the
-  * workers asked for.
-  */
 object GearsBench {
 
-  /** The size of each message a client sends and the server echoes back. */
   inline val MessageSize = 64
 
-  /** The size of the `large` scenarios' messages: 128 KB, or `GEARS_BENCH_LARGE` in the environment, in bytes. */
   val LargeMessage: Int = sys.env.get("GEARS_BENCH_LARGE").map(_.toInt).getOrElse(128 * 1024)
 
-  /** A scenario: its name, what it stresses, how many operations it performs at scale 1, and the client code that
-    * performs `count` of them against the echo server, on connections `connect` opens; and whether a backend has what
-    * it needs, beyond stream sockets. A backend without it skips the scenario.
-    */
   final case class Scenario(
       name: String,
       stresses: String,
@@ -57,7 +38,6 @@ object GearsBench {
       runsOn: Interface => Boolean = _ => true
   )
 
-  /** Opens a connection to the echo server. */
   trait Connect[H] {
     def apply()(using Async): H
   }
@@ -323,21 +303,13 @@ object GearsBench {
     )
   )
 
-  /** `io`'s ops as ones with blocking ops, which a scenario that runs only on one needs: still `io`'s, so `io` performs
-    * them.
-    */
   private def blocking(io: Io[Interface]): Blocking & io.ops.type = io.ops match {
     case blocking: (Blocking & io.ops.type) => blocking
     case _                                  => throw new IllegalArgumentException(s"$io has no blocking ops")
   }
 
-  /** How many timers the `timers` scenario has pending at once. */
   inline val TimerBatch = 1000
 
-  /** Arms timers `TimerBatch` at a time, each by a future performing it: half for 0 ms, which fire, and half for a
-    * minute, whose futures are cancelled once the others' have finished. Each timer, armed and then fired or cancelled,
-    * is one operation.
-    */
   private def timerStress(io: Io[Interface], count: Int)(using Async.Spawn): Unit = {
     var done = 0
     while done < count do {
@@ -357,17 +329,14 @@ object GearsBench {
     }
   }
 
-  /** Re-arms one timer `count` times by cancelling the future performing it and performing a new timer in a new future:
-    * each one pending when the next replaces it, as the previous's cancel waits for it to stop.
-    */
   private def rearmByCancel(io: Io[Interface], count: Int)(using Async.Spawn): Unit = {
     var pending = Future(io.perform(io.ops.timer(60_000)))
-    io.perform(io.ops.timer(0)) // so that it is waiting on its timer
+    io.perform(io.ops.timer(0))
     var i = 0
     while i < count do {
       val next = Future(io.perform(io.ops.timer(60_000)))
       pending.cancel()
-      pending.awaitResult // the next one starts and waits meanwhile
+      pending.awaitResult
       pending = next
       i += 1
     }
@@ -375,14 +344,11 @@ object GearsBench {
     pending.awaitResult: Unit
   }
 
-  /** Re-arms one deadline timer `count` times by moving its deadline, later or earlier each time, while one future
-    * performs it; then moves it to now, so that it completes.
-    */
   private def rearmByMove(io: Io[Interface], count: Int, later: Boolean)(using Async.Spawn): Unit = {
     val base = System.nanoTime() + 60_000_000_000L
     val timer = io.ops.deadlineTimer(if later then base else base + count)
     val waiting = Future(io.perform(timer))
-    io.perform(io.ops.timer(0)) // so that it is waiting on its timer
+    io.perform(io.ops.timer(0))
     var i = 0
     while i < count do {
       timer.moveTo(if later then base + i else base + count - i - 1)
@@ -392,14 +358,11 @@ object GearsBench {
     waiting.await
   }
 
-  /** Prints one result line, in the format the harness reads. */
   def report(name: String, count: Long, seconds: Double): Unit =
     println(f"bench: $name%-18s $count%10d $seconds%9.3f ${count / seconds}%12.0f ${seconds * 1e6 / count}%8.2f")
 
-  // Where compute slices leave their results, so that the work cannot be optimised away.
   @volatile private var computeSink = 0L
 
-  /** About ten thousand steps of arithmetic, by default: a slice of CPU-bound work. */
   private def computeSlice(seed: Long, steps: Int = 10_000): Long = {
     var x = seed | 1L
     var i = 0
@@ -412,13 +375,9 @@ object GearsBench {
     x
   }
 
-  /** Ping-pongs `count` messages while a compute future on the same worker runs slices of work until they are done.
-    * Between slices it yields to the scheduler with `io.yield`, so that the ping-pong continuations run in between.
-    * Reports the compute side as `mixed-compute`: the time per slice over the same period.
-    */
   private def mixed(io: Io[StreamSockets], connect: Connect[io.ops.Connection], count: Int)(using Async.Spawn): Unit = {
     val pingPongDone =
-      new java.util.concurrent.atomic.AtomicBoolean // read by the other future, maybe on another worker
+      new java.util.concurrent.atomic.AtomicBoolean
     var slices = 0L
     val start = System.nanoTime()
     val compute = Future {
@@ -437,20 +396,12 @@ object GearsBench {
     report("mixed-compute", slices, seconds)
   }
 
-  /** How long the `starvation` checker sleeps each time: cats-effect's checker sleeps a second, too long for a bench.
-    */
   inline val StarvationCheckMillis = 1
 
-  /** Runs `concurrent`'s round trips while a compute future per core works in slices, yielding between them, and a
-    * checker future sleeps `StarvationCheckMillis` over and over, recording how late it wakes, as cats-effect's CPU
-    * starvation check does (`CpuStarvationCheck`): a new event waits for a thread as the checker's wake-up does, so its
-    * lateness is how long the program takes to respond, whatever else it is doing. Reports the median, 99th percentile
-    * and worst lateness, in µs, as `starvation-p50`, `-p99` and `-max`.
-    */
   private def starvation(io: Io[StreamSockets], connect: Connect[io.ops.Connection], count: Int, connections: Int)(using
       Async.Spawn
   ): Unit = {
-    val done = new java.util.concurrent.atomic.AtomicBoolean // read by the other futures, maybe on other threads
+    val done = new java.util.concurrent.atomic.AtomicBoolean
     val interval = StarvationCheckMillis * 1_000_000L
     val late = scala.collection.mutable.ArrayBuffer.empty[Long]
     val checker = Future {
@@ -470,7 +421,7 @@ object GearsBench {
           io.`yield`()
           slice += 1
         }
-        if result == 1L then computeSink = result // only so that the work cannot be optimised away
+        if result == 1L then computeSink = result
       }
     }
     val each = math.max(1, count / connections)
@@ -480,13 +431,11 @@ object GearsBench {
     computes.awaitAll
     val sorted = late.sorted
     def at(fraction: Double): Long = if sorted.isEmpty then 0L else sorted(((sorted.length - 1) * fraction).toInt)
-    // As one op taking the lateness, so that the harness shows it in µs.
     report("starvation-p50", 1, at(0.5) / 1e9)
     report("starvation-p99", 1, at(0.99) / 1e9)
     report("starvation-max", 1, at(1.0) / 1e9)
   }
 
-  /** Opens a connection with `connect`, runs `body` on it, and closes it. */
   private def withConnection(io: Io[StreamSockets], connect: Connect[io.ops.Connection])(
       body: io.ops.Connection => Unit
   )(using
@@ -498,16 +447,10 @@ object GearsBench {
     } finally io.perform(io.ops.close(fd))
   }
 
-  /** Computation done after each round trip by the compute variants of `concurrent`. */
   enum Work { case NoWork, Inline, Offload }
 
-  /** Steps of `computeSlice` done after each round trip by the compute variants of `concurrent`: a few microseconds. */
   inline val WorkSteps = 2_000
 
-  /** Sends `count` messages one at a time, waiting for each echo before sending the next. With `deadline`, every op of
-    * a round trip has a time limit, as a request with a timeout has; with `blockingFirst`, a trivial blocking task runs
-    * before each round trip; `work` says whether a slice of computation follows each, and where.
-    */
   private def pingPong(
       io: Io[StreamSockets],
       connect: Connect[io.ops.Connection],
@@ -519,8 +462,6 @@ object GearsBench {
       pooled: Boolean = false,
       messageSize: Int = MessageSize
   )(using Async.Spawn): Unit = {
-    // The pool outlives the connection: a receive into one of its buffers may be outstanding until the close op is
-    // done, which gives the buffer back.
     val pool = if pooled then io.backend.pool(messageSize, 2) else null
     try
       withConnection(io, connect) { fd =>
@@ -531,7 +472,6 @@ object GearsBench {
           val read = io.ops.read(fd, buf)
           val into = Slot[Received]()
           val pooledRead = if pooled then io.ops.read(fd, pool.nn, into) else null
-          // The time limit, where the scenario has one: long enough never to be reached, so it costs only its arming.
           def limited(op: io.Op): Unit =
             if deadline then io.perform(op, scala.concurrent.duration.FiniteDuration(60, "s")) else io.perform(op)
           val blocker: Option[Blocking & io.ops.type] = if blockingFirst then Some(blocking(io)) else None
@@ -569,15 +509,12 @@ object GearsBench {
             }
             i += 1
           }
-          if worked == 1L then computeSink = worked // only so that the work cannot be optimised away
+          if worked == 1L then computeSink = worked
         } finally arena.close()
       }
     finally if pool != null then pool.close()
   }
 
-  /** Writes `count` messages of `messageSize` bytes, each as its own write, from one future while reading the echoes in
-    * another, into a buffer of 8 KB, or, with `pooled`, into the backend's pool of buffers the size of a message.
-    */
   private def pipelined(
       io: Io[StreamSockets],
       connect: Connect[io.ops.Connection],
@@ -585,7 +522,7 @@ object GearsBench {
       messageSize: Int = MessageSize,
       pooled: Boolean = false
   )(using Async.Spawn): Unit = {
-    val pool = if pooled then io.backend.pool(messageSize, 2) else null // outlives the connection: see `pingPong`
+    val pool = if pooled then io.backend.pool(messageSize, 2) else null
     try
       withConnection(io, connect) { fd =>
         val arena = BufferArena.open()
@@ -629,14 +566,10 @@ object GearsBench {
     finally if pool != null then pool.close()
   }
 
-  /** Runs `pipelined` while a ticker future on the same worker performs zero-length timers one after another, and
-    * reports the ticker as `fairness-tick`: the time between ticks over the same period. Futures whose operations
-    * rarely wait must still let it run.
-    */
   private def fairness(io: Io[StreamSockets], connect: Connect[io.ops.Connection], count: Int)(using
       Async.Spawn
   ): Unit = {
-    val trafficDone = new java.util.concurrent.atomic.AtomicBoolean // read by the ticker, maybe on another worker
+    val trafficDone = new java.util.concurrent.atomic.AtomicBoolean
     var ticks = 0L
     val start = System.nanoTime()
     val ticker = Future {
@@ -652,7 +585,6 @@ object GearsBench {
     report("fairness-tick", math.max(ticks, 1L), seconds)
   }
 
-  /** Echoes everything a connection sends until it closes. */
   private def echo(io: Io[StreamSockets], client: io.ops.Connection)(using Async): Unit = {
     val arena = BufferArena.open()
     try {
@@ -663,20 +595,19 @@ object GearsBench {
       while open do {
         buf.clear()
         io.perform(read)
-        if buf.position() == 0 then open = false // end of stream
+        if buf.position() == 0 then open = false
         else {
           buf.flip()
           while buf.hasRemaining() do io.perform(write)
         }
       }
-    } catch case _: IOException => () // a client that goes away mid-write ends only its own connection
+    } catch case _: IOException => ()
     finally {
       arena.close()
       io.perform(io.ops.close(client))
     }
   }
 
-  /** Starts the echo server on a pool of `workers` workers of its own and returns once it is listening. */
   private def startServer[B <: StreamSockets](
       endpoint: Endpoint[B],
       workers: Int
@@ -684,16 +615,13 @@ object GearsBench {
     val listening = new CountDownLatch(1)
     val failure = new AtomicReference[Throwable | Null](null)
     val thread = new Thread(() => serve(endpoint, listening, failure, workers), "bench-server")
-    thread.setDaemon(true) // it serves until the process exits
+    thread.setDaemon(true)
     thread.start()
     listening.await()
     val failed = failure.get()
     if failed != null then throw failed
   }
 
-  /** Listens on `endpoint`, counts down `listening`, then echoes every connection until the process exits. A failure to
-    * listen is recorded in `failure`.
-    */
   private def serve[B <: StreamSockets](
       endpoint: Endpoint[B],
       listening: CountDownLatch,
@@ -713,9 +641,6 @@ object GearsBench {
         listening.countDown()
     }
 
-  /** Runs the echo server alone, on a pool of `workers` workers, until the process ends: for a bench on another
-    * machine, which connects to it over the network (`run` with `server = false`).
-    */
   def serveForever[B <: StreamSockets](endpoint: Endpoint[B], workers: Int = 1)(using
       BenchRunner[B]
   ): Unit = {
@@ -726,11 +651,6 @@ object GearsBench {
     if failed != null then throw failed
   }
 
-  /** Runs the named scenarios, or all of them, each with its base count times `scale`, the clients on a pool of
-    * `workers` workers, and the echo server on another of the same size; with `warmup`, each runs first at a fifth of
-    * its count, for the JVM's JIT. Without `server`, the echo server is expected to be listening at `endpoint` already,
-    * such as `serveForever` on another machine.
-    */
   def run[B <: StreamSockets](
       names: Seq[String],
       scale: Double,
@@ -763,8 +683,6 @@ object GearsBench {
         val connect = new Connect[io.ops.Connection] {
           def apply()(using Async): io.ops.Connection = endpoint.connect()
         }
-        // On the JVM, a first pass at a fifth of each count, so the JIT has compiled what is measured; its results,
-        // the few a scenario prints itself, come before the measured ones, which the harness keeps.
         if warmup then
           for scenario <- runnable do
             scenario.body(io, connect, math.max(1, (scenario.baseCount * scale / 5).toInt), connections)

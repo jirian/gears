@@ -1,10 +1,8 @@
 package gears.io.http
 
-/** A response status, by its code, 100 to 599. */
 final case class Status(code: Int) {
   require(code >= 100 && code <= 599, s"A status code is 100 to 599, not $code")
 
-  /** The reason phrase sent with it: the standard one, or `Status <code>` for a code without one. */
   def reason: String = Status.reasons.getOrElse(code, s"Status $code")
 
   def isInformational: Boolean = code < 200
@@ -13,7 +11,6 @@ final case class Status(code: Int) {
   def isClientError: Boolean = code >= 400 && code < 500
   def isServerError: Boolean = code >= 500
 
-  /** Whether a response with it has no body, whatever its headers say (RFC 9110, 6.4.1). */
   def forbidsBody: Boolean = code < 200 || code == 204 || code == 304
 
   override def toString: String = s"$code $reason"

@@ -19,9 +19,6 @@ import scala.util.Success
 
 import munit.FunSuite
 
-/** A handler whose client went away is cancelled (`ServerConfig.cancelAbandoned`), and one whose client is still there
-  * is not.
-  */
 class AbandonedRequestSuite extends FunSuite {
   override val munitTimeout = scala.concurrent.duration.Duration(60, "s")
 
@@ -31,7 +28,6 @@ class AbandonedRequestSuite extends FunSuite {
       body: Server => (Io[DefaultCapabilities], Async.Spawn, HttpClient) ?=> A
   ): A = Http.testServer(routes, config)(body)
 
-  /** Sends `raw` on a new connection and closes it `after` later, without reading. */
   private def sendAndLeave(server: Server, raw: String, after: Int = 50)(using Io[DefaultCapabilities], Async): Unit = {
     val stream = Tcp.connect("127.0.0.1", server.port)
     try {
@@ -40,15 +36,11 @@ class AbandonedRequestSuite extends FunSuite {
     } finally stream.close()
   }
 
-  /** What `promise` completes with, within `limit`. */
   private def within[A](limit: scala.concurrent.duration.FiniteDuration)(
       promise: Promise[A]
   )(using AsyncOperations, Async): A =
     gears.async.withTimeout(limit)(promise.asFuture.await)
 
-  /** A handler that waits `millis`, telling `outcome` whether it was cancelled first, and starts a future that tells
-    * `inner` the same.
-    */
   private def slow(
       millis: Int,
       outcome: Promise[String],
@@ -113,7 +105,7 @@ class AbandonedRequestSuite extends FunSuite {
       val stream = Tcp.connect("127.0.0.1", server.port)
       try {
         stream.write(ByteBuffer.wrap("GET /slow HTTP/1.1\r\nHost: x\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1)))
-        AsyncOperations.sleep(150) // the watch has begun, and reads the next request as it arrives
+        AsyncOperations.sleep(150)
         stream.write(
           ByteBuffer.wrap(
             "GET /n HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1)

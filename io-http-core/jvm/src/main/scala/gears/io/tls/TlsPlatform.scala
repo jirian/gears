@@ -27,7 +27,6 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 
-/** TLS on the JVM: the JDK's `SSLEngine`, its records moved over the stream by the code here. */
 private[tls] object TlsPlatform {
   final case class ClientContext(context: SSLContext, verify: Boolean)
   type ServerContext = SSLContext
@@ -69,7 +68,7 @@ private[tls] object TlsPlatform {
     val engine = ssl.createSSLEngine(host, 443)
     engine.setUseClientMode(true)
     val params = engine.getSSLParameters
-    if verify then params.setEndpointIdentificationAlgorithm("HTTPS") // the certificate must name `host`
+    if verify then params.setEndpointIdentificationAlgorithm("HTTPS")
     if !gears.io.net.Tcp.numeric(host, 0).isDefined then params.setServerNames(java.util.List.of(new SNIHostName(host)))
     engine.setSSLParameters(params)
     open(stream, engine, timeout)
@@ -134,7 +133,6 @@ private[tls] object TlsPlatform {
     factory.getTrustManagers.collectFirst { case t: X509TrustManager => t }.get
   }
 
-  /** Trusts a server either trusts. */
   private final class EitherTrust(first: X509TrustManager, second: X509TrustManager) extends X509TrustManager {
     def checkClientTrusted(chain: Array[X509Certificate], authType: String): Unit =
       first.checkClientTrusted(chain, authType)
@@ -151,15 +149,11 @@ private[tls] object TlsPlatform {
   }
 }
 
-/** A TLS stream over `underlying`, through `engine`: records read from it are unwrapped into `appIn`, whose bytes reads
-  * take, and writes are wrapped into `netOut` and written. One read and one write may run at once, as `SSLEngine`
-  * allows: a read that has the engine send something, such as a key update's answer, takes the write side's turn.
-  */
 private final class EngineStream(underlying: Stream, engine: SSLEngine) extends TlsStream {
   private val session = engine.getSession
-  private var netIn = ByteBuffer.allocate(session.getPacketBufferSize) // records read, not yet unwrapped; write mode
-  private var appIn = ByteBuffer.allocate(session.getApplicationBufferSize).flip() // unwrapped, not yet read
-  private var netOut = ByteBuffer.allocate(session.getPacketBufferSize).flip() // wrapped, not yet written
+  private var netIn = ByteBuffer.allocate(session.getPacketBufferSize)
+  private var appIn = ByteBuffer.allocate(session.getApplicationBufferSize).flip()
+  private var netOut = ByteBuffer.allocate(session.getPacketBufferSize).flip()
   private val writing = Semaphore(1)
   @volatile private var closed = false
   @volatile private var notified = false
@@ -167,7 +161,6 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
 
   def closeNotified: Boolean = notified
 
-  /** The handshake, all of it within `timeout`: a peer that sends a byte at a time cannot make it last longer. */
   def handshake(timeout: Duration)(using Async): Unit = {
     val deadline = Stream.limit(timeout) match {
       case null              => -1L
@@ -206,9 +199,6 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     }
   }
 
-  /** Unwraps one record into `appIn`, reading more of `underlying` as needed, each read within `timeout`, taken anew
-    * for each, as a handshake's shrinks: null at the end of the stream.
-    */
   private def unwrapSome(timeout: => Duration)(using Async): SSLEngineResult | Null = {
     var result: SSLEngineResult | Null = null
     while result == null do {
@@ -238,7 +228,7 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
           }
           if underlying.read(netIn, timeout) < 0 then {
             inputDone = true
-            try engine.closeInbound() // throws without the peer's close notification
+            try engine.closeInbound()
             catch case _: SSLException => ()
             return null
           }
@@ -248,14 +238,9 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     result
   }
 
-  /** Wraps all of `src`, or a handshake message for an empty one, and writes the records, holding the write side. What
-    * a write that timed out or was cancelled had not written stays in `netOut`, to go first next time, so that no
-    * record is cut or lost; `src` is advanced as the engine takes its bytes.
-    */
   private def sendWrapped(src: ByteBuffer, timeout: Duration)(using Async): Unit =
     Stream.holding(writing)(wrapHeld(Array(src), timeout))
 
-  /** `sendWrapped`'s work, the write side held, for all of `srcs`, which the engine gathers into each record. */
   private def wrapHeld(srcs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
     if netOut.hasRemaining then underlying.write(netOut, timeout)
     var more = true
@@ -294,7 +279,6 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
         val r = unwrapSome(timeout)
         if r == null then n = -1
         else if r.getHandshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP then
-          // A post-handshake message's answer, unless a write holds the write side: it sends it with its own records.
           writing.poll() match {
             case Some(guard) =>
               try wrapHeld(Array(ByteBuffer.allocate(0)), timeout)
@@ -310,8 +294,6 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     if buf.hasRemaining then sendWrapped(buf, timeout)
   }
 
-  /** Small buffers, such as a response's head and body, go out together, as one record and one write of `underlying`.
-    */
   override def write(bufs: Array[ByteBuffer], timeout: Duration)(using Async): Unit = {
     if closed then throw new java.nio.channels.ClosedChannelException()
     if EngineStream.remains(bufs) then Stream.holding(writing)(wrapHeld(bufs, timeout))
@@ -319,7 +301,7 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
 
   def shutdownOutput()(using Async): Unit = {
     engine.closeOutbound()
-    sendWrapped(ByteBuffer.allocate(0), 5.seconds) // the close notification
+    sendWrapped(ByteBuffer.allocate(0), 5.seconds)
     underlying.shutdownOutput()
   }
 
@@ -327,8 +309,6 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
     if !closed then {
       closed = true
       Stream.uncancelled {
-        // Best effort, the close notification; not behind a write under way, which may be stuck on a peer that does
-        // not read: closing the stream fails it.
         try
           if !engine.isOutboundDone then
             writing.poll() match {
@@ -350,7 +330,6 @@ private final class EngineStream(underlying: Stream, engine: SSLEngine) extends 
 
 private object EngineStream {
 
-  /** Whether any of `bufs` has bytes left. */
   def remains(bufs: Array[ByteBuffer]): Boolean = {
     var i = 0
     while i < bufs.length && !bufs(i).hasRemaining do i += 1

@@ -18,9 +18,6 @@ import scala.util.Try
 
 import munit.FunSuite
 
-/** TLS streams against a peer that misbehaves, one that trickles its handshake and one that stops reading, and how many
-  * writes a TLS stream makes.
-  */
 class TlsSuite extends FunSuite {
   override val munitTimeout = scala.concurrent.duration.Duration(30, "s")
 
@@ -39,8 +36,6 @@ class TlsSuite extends FunSuite {
       val raw = Tcp.connect("127.0.0.1", server.port)
       try {
         val began = System.nanoTime()
-        // A record of 512 bytes holding a ClientHello of 508, of which only the headers come at once, then a byte every
-        // 200 ms: nothing to refuse until the message is whole.
         raw.write(ByteBuffer.wrap(Array[Byte](0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc.toByte, 0x03, 0x03)))
         val trickle = Future {
           while true do {
@@ -67,7 +62,7 @@ class TlsSuite extends FunSuite {
         val peer = Future {
           val tls = Tls.server(listener.accept(), context, 5.seconds)
           tls.write(ByteBuffer.wrap("hello".getBytes(StandardCharsets.UTF_8)), 5.seconds)
-          AsyncOperations.sleep(60_000) // reads nothing more
+          AsyncOperations.sleep(60_000)
         }
         val raw = Tcp.connect("127.0.0.1", Tcp.port(listener.localAddress))
         val tls = Tls.client(raw, "localhost", trusting, 5.seconds)
@@ -75,7 +70,7 @@ class TlsSuite extends FunSuite {
         val writer = Future(Try {
           while true do tls.write(ByteBuffer.wrap(chunk), Duration.Inf)
         })
-        AsyncOperations.sleep(500) // the socket's buffers fill, and the write waits for a peer that does not read
+        AsyncOperations.sleep(500)
         assert(writer.poll().isEmpty, s"the write is stuck, not ${writer.poll()}")
         val got = ByteBuffer.allocate(16)
         val n = gears.async.withTimeout(3.seconds)(tls.read(got, 3.seconds))

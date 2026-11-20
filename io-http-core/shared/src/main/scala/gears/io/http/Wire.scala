@@ -12,17 +12,12 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 
-/** HTTP/1.1's syntax (RFC 9112), as the server and the client read and write it. Parsing is strict where leniency is
-  * what request smuggling exploits: whitespace before a header's colon, folded lines, a `Transfer-Encoding` beside a
-  * `Content-Length`, or two lengths, are refused rather than guessed at.
-  */
 private[http] object Wire {
   val Crlf: Array[Byte] = "\r\n".getBytes(StandardCharsets.ISO_8859_1)
   val HeadEnd: Array[Byte] = "\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1)
   val LastChunk: Array[Byte] = "0\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1)
   val Continue: Array[Byte] = "HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1)
 
-  /** How a message's body is delimited (RFC 9112, 6.3). */
   enum Framing {
     case NoBody
     case Length(bytes: Long)
@@ -30,9 +25,6 @@ private[http] object Wire {
     case UntilClose
   }
 
-  /** A malformed message: what a server answers with `status`, and a client reports as an `IOException`. Any peer can
-    * send one, so it has no stack trace, which costs as much as serving a request on Scala Native.
-    */
   final class Malformed(val status: Status, message: String) extends IOException(message) {
     override def fillInStackTrace(): Throwable = this
   }
@@ -40,10 +32,6 @@ private[http] object Wire {
   final case class RequestHead(method: Method, target: String, version: HttpVersion, headers: Headers)
   final case class ResponseHead(version: HttpVersion, status: Status, headers: Headers)
 
-  /** Reads a request's head, within `timeout` from its first byte; null if the stream ended, or `idle` passed, before
-    * any byte came.
-    */
-  /** How long a kept-alive connection waits for its next request with its own buffers. */
   val IdleGrace: FiniteDuration = 1.second
 
   def readRequestHead(
@@ -60,7 +48,7 @@ private[http] object Wire {
         try input.awaitMore(idle, IdleGrace, pool, released)
         catch case _: java.util.concurrent.TimeoutException => false
       if !more then return null
-      begun() // the head's first bytes are in: the connection is no longer idle
+      begun()
     }
     val bytes =
       try input.readUntil(HeadEnd, limits.head, timeout)
@@ -91,9 +79,6 @@ private[http] object Wire {
     RequestHead(Method.parse(methodToken), target, spoken, headers)
   }
 
-  /** Reads a response's head, skipping interim (1xx) ones but `101 Switching Protocols`, each read within `timeout`
-    * from the call.
-    */
   def readResponseHead(input: BufferedInput, limit: Int, timeout: Duration)(using Async): ResponseHead = {
     var head: ResponseHead | Null = null
     while head == null do {
@@ -123,7 +108,6 @@ private[http] object Wire {
     head.nn
   }
 
-  /** The version a head's line names; a `Malformed` if it is not one, or one not spoken here. */
   private def checkVersion(version: String): HttpVersion =
     if !(version.length == 8 && version.startsWith("HTTP/") && version.charAt(5).isDigit && version.charAt(6) == '.' &&
         version.charAt(7).isDigit)
@@ -132,9 +116,6 @@ private[http] object Wire {
     else if version == "HTTP/1.0" then HttpVersion.Http10
     else throw new Malformed(Status.HttpVersionNotSupported, s"$version is not supported")
 
-  /** Where the line of `bytes` from `from` ends, before `end`: at its CRLF, or at `end`. A bare LF is refused, as is a
-    * bare CR.
-    */
   private def lineEnd(bytes: Array[Byte], from: Int, end: Int): Int = {
     var i = from
     while i < end do {
@@ -149,11 +130,6 @@ private[http] object Wire {
     end
   }
 
-  /** The size a chunk's line gives, the line's first `end` bytes before its CRLF (RFC 9112, 7.1): hex digits, then
-    * extensions, each a `;` and a token, with `=` and a token or a quoted string, whitespace only around `;` and `=`.
-    * Anything else is refused, a bare CR or LF above all: a front end that ended the line there would frame the body
-    * otherwise, and read what follows as another request.
-    */
   private[http] def chunkSize(line: Array[Byte], end: Int): Long = {
     def malformed = new Malformed(Status.BadRequest, "A malformed chunk line")
     def spaces(from: Int): Int = {
@@ -167,7 +143,7 @@ private[http] object Wire {
       if i == from then throw malformed
       i
     }
-    def quoted(from: Int): Int = { // from just after the opening quote, to just after the closing one
+    def quoted(from: Int): Int = {
       var i = from
       while i < end && line(i) != '"' do {
         val c = line(i) & 0xff
@@ -208,7 +184,6 @@ private[http] object Wire {
     size
   }
 
-  /** The bytes from `from` to `to` as text, a byte a character. */
   private def latin1(bytes: Array[Byte], from: Int, to: Int): String = {
     val chars = new Array[Char](to - from)
     var i = 0
@@ -219,9 +194,6 @@ private[http] object Wire {
     new String(chars)
   }
 
-  /** Header fields from the lines of `bytes` between `from` and `end`, at most `max`: `name: value`, the name a token
-    * right before the colon, the value trimmed.
-    */
   private def parseFields(bytes: Array[Byte], from: Int, end: Int, max: Int): Headers = {
     var fields = new Array[String](16)
     var n = 0
@@ -254,14 +226,9 @@ private[http] object Wire {
     Headers.trusted(if n == fields.length then fields else java.util.Arrays.copyOf(fields, n))
   }
 
-  /** How a message with `headers` is framed, given that it may have a body at all: chunked, a length, or `orElse`.
-    * Refuses a `Transfer-Encoding` other than `chunked`, an empty one, one beside a `Content-Length`, and lengths that
-    * disagree.
-    */
   def framing(headers: Headers, orElse: Framing): Framing = {
     val te = headers.tokens("Transfer-Encoding")
     val lengths = headers.getAll("Content-Length").flatMap(Text.split(_, ',').map(_.trim)).distinct
-    // An empty one is refused too: a front end that takes any Transfer-Encoding for chunked would frame it otherwise.
     if te.isEmpty && headers.contains("Transfer-Encoding") then
       throw new Malformed(Status.BadRequest, "An empty Transfer-Encoding")
     if te.nonEmpty then {
@@ -280,10 +247,6 @@ private[http] object Wire {
     } else orElse
   }
 
-  /** A body arriving on `input`, framed by `framing`, at most `limit` bytes, each read within `timeout`; `onFirstRead`
-    * runs before its first read, for a server to send `100 Continue`. `truncatedAtEnd` says whether a close-delimited
-    * body that ends without TLS's close notification is a truncation, an error, rather than its end.
-    */
   final class Source(
       input: BufferedInput,
       framing: Framing,
@@ -299,14 +262,11 @@ private[http] object Wire {
       case _                 => -1L
     }
     private var chunkLeft = 0L
-    // Volatile: a server's watch for the client going away reads it from another future (`Server.Connection`).
     @volatile private var done = framing == Framing.NoBody
     private var total = 0L
 
-    /** Whether all of it has been read, so that the connection may carry another message. */
     def complete: Boolean = done
 
-    /** What a read of it failed with, if one did: a server answers the client for that, not the handler. */
     def failure: Throwable | Null = failed
     private var failed: Throwable | Null = null
 
@@ -377,7 +337,7 @@ private[http] object Wire {
         while line2 != null && line2.nn.length > 2 do {
           trailers += 1
           if trailers > 100 then throw new Malformed(Status.BadRequest, "Too many trailer fields")
-          parseFields(line2.nn, 0, line2.nn.length - 2, 1): Unit // a trailer is a header field, and checked as one
+          parseFields(line2.nn, 0, line2.nn.length - 2, 1): Unit
           line2 = input.readUntil(Crlf, 8192, timeout)
         }
         if line2 == null then throw new EOFException("The body ended within its trailers")
@@ -390,7 +350,6 @@ private[http] object Wire {
       if crlf(0) != '\r' || crlf(1) != '\n' then throw new Malformed(Status.BadRequest, "A chunk not ended by CRLF")
     }
 
-    /** Reads what is left and drops it, at most `max` bytes: whether it reached the end. */
     def drain(max: Long)(using Async): Boolean = {
       val scratch = ByteBuffer.allocate(8192)
       var dropped = 0L
@@ -403,17 +362,12 @@ private[http] object Wire {
     }
   }
 
-  /** The head of a message: its first line and `headers`, as bytes, ISO-8859-1, as they go out. */
   def head(firstLine: String, headers: Headers): ByteBuffer = {
     val out = new OutBuffer(firstLine.length + 32 * headers.size + 4)
     out.putHead(firstLine, headers)
     out.take().nn
   }
 
-  /** A connection's bytes on their way out: a message's head, and with it a body or a chunk small enough to copy, all
-    * written with one write, of one buffer, the same each time while the bytes fit, so that a stream keeps the op it
-    * made for it. ISO-8859-1: what goes in has been checked to have nothing above U+00FF.
-    */
   final class OutBuffer(initial: Int) {
     private var bytes = new Array[Byte](initial)
     private var view = ByteBuffer.wrap(bytes)
@@ -423,10 +377,8 @@ private[http] object Wire {
     def capacity: Int = bytes.length
     def isEmpty: Boolean = count == 0
 
-    /** Drops what it holds, unwritten. */
     def reset(): Unit = count = 0
 
-    /** Lets go of its array if empty; the next put allocates one. */
     def release(): Unit =
       if count == 0 && bytes.length > 0 then {
         bytes = new Array[Byte](0)
@@ -484,7 +436,6 @@ private[http] object Wire {
         count += digits
       }
 
-    /** `n` in hex, as a chunk's size line has it. */
     def putHex(n: Int): Unit = {
       var digits = 1
       while digits < 8 && (n >>> (4 * digits)) != 0 do digits += 1
@@ -498,7 +449,6 @@ private[http] object Wire {
       count += digits
     }
 
-    /** A header field: `name` and `value`, which `Headers` has checked. */
     def putField(name: String, value: String): Unit = {
       putLatin1(name)
       room(2)
@@ -509,12 +459,10 @@ private[http] object Wire {
       putCrlf()
     }
 
-    /** A head: `firstLine`, checked here, then `headers` and the empty line. */
     def putHead(firstLine: String, headers: Headers): Unit = {
       var i = 0
       while i < firstLine.length do {
         val c = firstLine.charAt(i)
-        // Never truncated: U+010A would go out as LF. Headers are checked as they are built; this guards the first line.
         if c > '\u00ff' || c == '\r' || c == '\n' || c == '\u0000' then
           throw new IllegalArgumentException(
             s"A character that may not go out in a message head: U+${c.toInt.toHexString}"
@@ -531,7 +479,6 @@ private[http] object Wire {
       putCrlf()
     }
 
-    /** Writes what it holds, and empties it. */
     def writeTo(stream: Stream, timeout: Duration)(using Async): Unit = {
       val v = view
       v.limit(count)
@@ -540,9 +487,6 @@ private[http] object Wire {
       stream.write(v, timeout)
     }
 
-    /** What it holds, to go out with other buffers, or null if nothing; it is empty then. The same buffer each time,
-      * until it grows, to be written before anything is put in again.
-      */
     def take(): ByteBuffer | Null =
       if count == 0 then null
       else {
@@ -554,10 +498,6 @@ private[http] object Wire {
       }
   }
 
-  /** Writes a body to `stream`, behind the head in `out`, which goes out with the first write: chunked, or as is, at
-    * most `declared` bytes if that is not negative, or nothing at all if `suppress`, as for a `HEAD`. A write small
-    * enough is copied into `out` with its framing and goes out in one write of one buffer. Each write within `timeout`.
-    */
   final class Out(
       stream: Stream,
       out: OutBuffer,
@@ -569,16 +509,10 @@ private[http] object Wire {
     private var written = 0L
     private var headOut = false
 
-    /** How many body bytes have been written. */
     def bytesWritten: Long = written
 
-    /** Whether the head has gone out, or begun to. */
     def committed: Boolean = headOut
 
-    // A write too large to copy goes out from the caller's array, wrapped, behind what `out` holds: the same buffers,
-    // in the same array, while the caller writes from the same array and `out` keeps its own, so that the stream
-    // performs its op again rather than building one for each write (`SocketStream`). An op keeps the array it was
-    // built with, and a backend may read its buffers as it is built, so the array is never changed, but replaced.
     private var dataArray: Array[Byte] | Null = null
     private var data: ByteBuffer | Null = null
     private var crlf: ByteBuffer | Null = null
@@ -596,6 +530,7 @@ private[http] object Wire {
       d
     }
 
+    // - an op keeps the array it was built with: replace the array, never change it
     private def vectorOf(first: ByteBuffer, second: ByteBuffer, third: ByteBuffer | Null): Array[ByteBuffer] = {
       val v = vector
       val size = if third == null then 2 else 3
@@ -641,14 +576,12 @@ private[http] object Wire {
         out.writeTo(stream, timeout)
       }
 
-    /** Ends the body: the last chunk if chunked, and the head if nothing was written. */
     def finish()(using Async): Unit = {
       if chunked && !suppress then out.put(LastChunk)
       flushHead()
     }
   }
 
-  /** Today's date as a `Date` header has it (RFC 9110, 5.6.7), formatted once a second. */
   def date(): String = {
     val now = System.currentTimeMillis() / 1000
     val cached = dateCache
@@ -665,7 +598,6 @@ private[http] object Wire {
   private val days = Array("Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed")
   private val months = Array("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
-  /** `seconds` since the epoch as an IMF-fixdate, by the civil-from-days algorithm. */
   private[http] def formatDate(seconds: Long): String = {
     val dayNumber = Math.floorDiv(seconds, 86400L)
     val secondOfDay = Math.floorMod(seconds, 86400L)

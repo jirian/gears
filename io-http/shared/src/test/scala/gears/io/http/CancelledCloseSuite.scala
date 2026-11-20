@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicReference
 
 import munit.FunSuite
 
-/** A close in a `finally` runs as its future is cancelled: what every resource in a structured program relies on. */
 class CancelledCloseSuite extends FunSuite {
 
   test("a listener's close in the finally of a cancelled future runs, and frees the port") {
@@ -32,13 +31,9 @@ class CancelledCloseSuite extends FunSuite {
       (seen.get(), port)
     }
     assertEquals(failure, null)
-    Http.run(Tcp.listen("127.0.0.1", port).close()) // free again
+    Http.run(Tcp.listen("127.0.0.1", port).close())
   }
 
-  /** Backends differ here: the reference and NIO backends refuse an op performed in a cancelled group, so the close
-    * never runs and the port leaks, which is why `Stream` closes outside the group (`Stream.uncancelled`); io_uring's
-    * runtime lets an op that completes at once through. Either way the outcome is consistent.
-    */
   test("the interface's close op, performed the same way, is either refused, leaving the port taken, or closes it") {
     val (failure, port) = Http.run {
       val io = summon[gears.async.io.Io[gears.io.net.DefaultCapabilities]]
@@ -58,10 +53,10 @@ class CancelledCloseSuite extends FunSuite {
       f.awaitResult
       (seen.get(), port)
     }
-    if failure == null then Http.run(Tcp.listen("127.0.0.1", port).close()) // closed: free again
+    if failure == null then Http.run(Tcp.listen("127.0.0.1", port).close())
     else {
       assert(failure.isInstanceOf[CancellationException], String.valueOf(failure))
-      intercept[java.io.IOException](Http.run(Tcp.listen("127.0.0.1", port).close())) // still bound: it leaked
+      intercept[java.io.IOException](Http.run(Tcp.listen("127.0.0.1", port).close()))
     }
   }
 }

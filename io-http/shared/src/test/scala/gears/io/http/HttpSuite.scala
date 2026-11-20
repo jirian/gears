@@ -17,18 +17,15 @@ import scala.concurrent.duration.DurationInt
 
 import munit.FunSuite
 
-/** The server and the client, over loopback, on the platform's default backend. */
 class HttpSuite extends FunSuite {
   override val munitTimeout = scala.concurrent.duration.Duration(60, "s")
 
   private val quiet = ServerConfig(host = "127.0.0.1", port = 0, log = _ => ())
 
-  /** Runs `body` with a server of `routes` on a port of its own, and the run's client. */
   private def withServer[A](routes: Routes, config: ServerConfig = quiet)(
       body: Server => (Io[DefaultCapabilities], Async.Spawn, HttpClient) ?=> A
   ): A = Http.testServer(routes, config)(body)
 
-  /** Sends `raw` on a new connection and returns all the server answers until it closes, or `wait` passes. */
   private def rawExchange(server: Server, raw: String, wait: scala.concurrent.duration.FiniteDuration = 5.seconds)(using
       Io[DefaultCapabilities],
       Async
@@ -161,7 +158,7 @@ class HttpSuite extends FunSuite {
           ("/a?", "x:", "x 80 /a?"),
           ("/a", "[::1]:9", "::1 9 /a"),
           ("/a", "10.0.0.1", "10.0.0.1 80 /a"),
-          ("/a", "My_Service:8080", "my_service 8080 /a"), // a container's name, as Docker's often have
+          ("/a", "My_Service:8080", "my_service 8080 /a"),
           ("/a", "x~y", "x~y 80 /a")
         )
       do {
@@ -370,7 +367,7 @@ class HttpSuite extends FunSuite {
     )
     withServer(routes) { server =>
       val idle = new HttpClient()
-      assertEquals(idle.get(server.url.resolve("/fast")).text(), "fast") // leaves a kept connection
+      assertEquals(idle.get(server.url.resolve("/fast")).text(), "fast")
       val slow = Future(Http.get(server.url.resolve("/slow")).text())
       while started.getCount > 0 do AsyncOperations.sleep(5)
       server.shutdown(5.seconds)
@@ -420,7 +417,7 @@ class HttpSuite extends FunSuite {
         assertEquals(any.url.toString, s"http://127.0.0.1:${any.port}/")
         val v6 =
           try Some(Http.server(routes, quiet.copy(host = "::1")))
-          catch case _: IOException => None // no IPv6 here
+          catch case _: IOException => None
         for s <- v6 do {
           assertEquals(s.url.toString, s"http://[::1]:${s.port}/")
           assertEquals(Http.get(s.url.resolve("/")).text(), "ok")
@@ -433,7 +430,7 @@ class HttpSuite extends FunSuite {
     val routes = Routes(GET("/ws") { r =>
       WebSocket.accept(r, pingEvery = Some(100.millis)) { ws =>
         for m <- ws.messages do {
-          AsyncOperations.sleep(500) // while the next waits for it, and the reader reads nothing
+          AsyncOperations.sleep(500)
           ws.send(m)
         }
       }
@@ -462,7 +459,6 @@ class HttpSuite extends FunSuite {
         val handshake = s"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: Upgrade\r\n" +
           "Upgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         stream.write(ByteBuffer.wrap(handshake.getBytes(StandardCharsets.ISO_8859_1)))
-        // Nothing is read from here on.
         val message = gears.async.withTimeout(10.seconds)(failed.asFuture.await)
         assert(message.contains("not written within"), message)
       } finally stream.close()

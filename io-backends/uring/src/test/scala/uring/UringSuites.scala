@@ -4,7 +4,6 @@ package uring
 import gears.async.io.testkit.*
 import gears.io.testkit.SimpleIOChecks
 
-/** Each suite sees only the capabilities required by its contracts. */
 class UringContractSuite extends OpsContract {
   val backend: Backend = UringBackend
 }
@@ -17,7 +16,6 @@ class UringSimpleIOSuite extends SimpleIOChecks with PipeFixture {
   val backend: Backend { type Interface <: Pipes } = UringBackend
 }
 
-/** Runs the same stream contracts over TCP, without exposing Pipes to the suite. */
 class UringSocketStreamSuite extends StreamContract with IpStreamFixture {
   val backend: Backend { type Interface <: IpStreams } = UringBackend
 }

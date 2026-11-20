@@ -21,19 +21,6 @@ import java.util.concurrent.CancellationException
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 
-/** A WebSocket (RFC 6455), scoped to its session: `WebSocket.accept` answers a request with one, and
-  * `WebSocket.connect` opens one, each running the session function with it and closing it when the function returns,
-  * with the closing handshake.
-  *
-  * A future of the session's reads the peer's frames as they come, so that pings are answered and the peer's close is
-  * seen while the session is busy: it hands messages over one at a time, and while one waits for the session to take it
-  * reads nothing more, which holds the peer back. `receive` takes the next, and `messages` iterates them until the peer
-  * closes. `send` may be called from many futures at once: frames go out whole, one after another, each within
-  * `writeTimeout`; one that is not, or that is cancelled once part of it has gone, closes the socket, since the peer
-  * would read the next frame as the rest of it. With `pingEvery`, the socket pings the peer that often, and closes if
-  * nothing comes from it for twice as long while it is read, which is how a peer that vanished without closing is
-  * found.
-  */
 final class WebSocket private (
     stream: Stream,
     input: BufferedInput,
@@ -50,10 +37,9 @@ final class WebSocket private (
   @volatile private var closeSent = false
   @volatile private var ended = false
   @volatile private var lastHeard = System.nanoTime()
-  @volatile private var handing = false // a message waits for the session, so the peer is not read
+  @volatile private var handing = false
   @volatile private var received: Option[Close] = None
 
-  /** The peer's close, once it has come. */
   def peerClose: Option[Close] = received
 
   def send(text: String)(using Async): Unit = send(Message.Text(text))
@@ -69,9 +55,6 @@ final class WebSocket private (
     writeFrame(Opcode.Ping, data)
   }
 
-  /** The next message, or None once the peer has closed, or the socket was closed; the reading's failure if it ended
-    * with one, such as a protocol error, which closed the socket.
-    */
   def receive()(using Async): Option[Message] =
     if ended then None
     else
@@ -84,7 +67,6 @@ final class WebSocket private (
         case _ => None
       }
 
-  /** The messages, as they come, until the peer closes. */
   def messages(using Async): Iterator[Message] = new Iterator[Message] {
     private var ahead: Option[Message] | Null = null
     def hasNext: Boolean = {
@@ -99,7 +81,6 @@ final class WebSocket private (
     }
   }
 
-  /** Starts the closing handshake: sends a close with `code` and `reason`, once; later sends fail. */
   def close(code: Int = 1000, reason: String = "")(using Async): Unit =
     if !closeSent then {
       require(validCloseCode(code), s"Not a close code a socket may send: $code")
@@ -141,12 +122,11 @@ final class WebSocket private (
           stream.close()
           throw new IOException(s"A frame was not written within $writeTimeout: the WebSocket is closed", e)
         case e: CancellationException if head.position() > 0 =>
-          stream.close() // part of the frame went: the stream is no longer framed
+          stream.close()
           throw e
       }
     }
 
-  /** Reads frames until the peer closes, or the stream ends or fails, handing messages to the session. */
   private def readLoop()(using Async): Unit = {
     var failure: Throwable | Null = null
     try {
@@ -182,7 +162,7 @@ final class WebSocket private (
                   )
                 else Message.Binary(bytes)
               kind = 0
-              if !closeSent then { // after our close, data is dropped until the peer's
+              if !closeSent then {
                 handing = true
                 try inbox.send(value)
                 finally {
@@ -199,7 +179,7 @@ final class WebSocket private (
         failure = e
         try if !closeSent then writeFrame(Opcode.Close, ByteBuffer.allocate(2).putShort(e.closeCode.toShort).array())
         catch case Stream.Failed() => ()
-      case _: EOFException if closeSent => () // the peer closed the connection rather than answering our close
+      case _: EOFException if closeSent => ()
       case e: Exception                 => failure = e
     } finally
       try inbox.send(Ended(failure))
@@ -245,7 +225,6 @@ final class WebSocket private (
     Frame(fin, opcode, payload)
   }
 
-  /** `n` bytes, held as they arrive rather than all at once, so that a length announced but not sent costs nothing. */
   private def readPayload(n: Int)(using Async): Array[Byte] =
     if n <= PayloadChunk then input.readExactly(n)
     else {
@@ -271,9 +250,6 @@ final class WebSocket private (
       Close(Some(code), reason)
     }
 
-  /** Runs `session` with this socket: the reader, and the pinger if `pingEvery`, beside it; then the closing handshake,
-    * waiting at most two seconds for the peer's close, and the stream's close.
-    */
   private def run[A](session: WebSocket => Async ?=> A, pingEvery: Option[FiniteDuration])(using Async): A =
     try
       Async.group {
@@ -284,7 +260,7 @@ final class WebSocket private (
             while alive do {
               timers.sleep(every.toMillis)
               if !handing && System.nanoTime() - lastHeard > 2 * every.toNanos then {
-                stream.close() // the peer went away without closing: the reader ends
+                stream.close()
                 alive = false
               } else
                 try ping()
@@ -297,7 +273,6 @@ final class WebSocket private (
           try close()
           catch case _: Exception => ()
           pinger.foreach(_.cancel())
-          // The peer's close ends the reader; one that never answers is cut off.
           gears.async.withTimeoutOption(2.seconds)(reader.awaitResult)(using timers, summon[Async]): Unit
           reader.cancel()
         }
@@ -312,15 +287,12 @@ object WebSocket {
     case Binary(bytes: Array[Byte])
   }
 
-  /** A peer's close: its code, if it gave one, and its reason. */
   final case class Close(code: Option[Int], reason: String)
 
-  /** A frame that breaks the protocol, closed with `closeCode`. */
   final class ProtocolException(message: String, val closeCode: Int) extends IOException(message)
 
   private final case class Ended(failure: Throwable | Null)
 
-  /** A frame's opcode (RFC 6455, 5.2): the data frames' below `Close`, the control frames' from it on. */
   private object Opcode {
     inline val Continuation = 0
     inline val Text = 1
@@ -334,15 +306,6 @@ object WebSocket {
 
   private def protocolError(message: String, code: Int = 1002): Nothing = throw new ProtocolException(message, code)
 
-  /** Answers `request` by upgrading it to a WebSocket, running `session` with it, and closing it as `session` returns:
-    * {{{
-    * GET("/echo") { req => WebSocket.accept(req) { ws => for m <- ws.messages do ws.send(m) } }
-    * }}}
-    * Refuses, with the response a client expects, a request that is not a valid version 13 handshake, and one whose
-    * `Origin` is not allowed: by default only the server's own, so that another site's page cannot open a socket with
-    * its visitor's cookies. `protocols` are the subprotocols offered, in preference order, of which the first the
-    * client also offers is chosen (`WebSocket.protocol`).
-    */
   def accept(
       request: Request,
       protocols: Seq[String] = Nil,
@@ -379,9 +342,6 @@ object WebSocket {
     )
   }
 
-  /** Opens a WebSocket to `url`, `ws` or `wss`, runs `session` with it, closes it as `session` returns, and returns
-    * what `session` returns. Fails if the server refuses the upgrade, or answers it wrongly.
-    */
   def connect[A](
       url: String | Url,
       protocols: Seq[String] = Nil,
@@ -437,7 +397,7 @@ object WebSocket {
 
   private def sameOrigin(request: Request): Boolean =
     request.headers.getAll("Origin") match {
-      case Seq()       => true // not a browser
+      case Seq()       => true
       case Seq(origin) =>
         try {
           val o = Url.parse(origin)
@@ -452,12 +412,10 @@ object WebSocket {
     key.length == 24 && key.endsWith("==") && key.take(22).forall(alphabet.contains(_)) &&
       (alphabet.indexOf(key(21)) & 15) == 0
 
-  /** `Sec-WebSocket-Accept` for `key`: the base64 of the SHA-1 of the key and the protocol's GUID. */
   private[http] def acceptKey(key: String): String =
     java.util.Base64.getEncoder
       .encodeToString(sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").getBytes(StandardCharsets.US_ASCII)))
 
-  /** SHA-1, which the handshake needs, and Scala Native's library lacks. */
   private def sha1(input: Array[Byte]): Array[Byte] = {
     val padded = new Array[Byte](((input.length + 9 + 63) / 64) * 64)
     System.arraycopy(input, 0, padded, 0, input.length)

@@ -2,9 +2,6 @@ package httpbench
 
 import gears.io.http.*
 
-/** The routes the HTTP bench serves, the same as its Go counterpart's: a fixed text, and a path parameter answered with
-  * a small JSON document.
-  */
 object BenchRoutes {
   val routes: Routes = Routes(
     GET("/hello") { _ => "Hello, world" },

@@ -7,14 +7,8 @@ import gears.io.demos.DemoBackends
 
 import mainargs.ParserForMethods
 
-/** The gears bench over the reference backend, run as `ioReferenceBench/run bench` and `bench-serve`
-  * (`gearsbench.BenchCommands`): the JVM's column of the bench, beside io_uring's (`uringdemos.UringDemos`).
-  */
 object ReferenceBench {
 
-  /** Runs programs over the reference backend. Its futures are virtual threads, each performing its own ops, so a pool
-    * of any size is `Io.run`.
-    */
   private object Runner extends gearsbench.BenchRunner[ReferenceOps.type] {
     val ops: ReferenceOps.type = ReferenceOps
     def run[T](program: Io[ReferenceOps.type] ?=> Async.Spawn ?=> T): T = Io.run(using ReferenceBackend)(program)

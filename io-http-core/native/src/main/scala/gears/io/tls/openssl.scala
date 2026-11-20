@@ -2,7 +2,6 @@ package gears.io.tls
 
 import scala.scalanative.unsafe.*
 
-/** The OpenSSL (1.1.0 or later) functions and constants `TlsStream` uses. */
 @link("ssl")
 @link("crypto")
 @extern

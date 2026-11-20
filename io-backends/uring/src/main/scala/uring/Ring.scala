@@ -189,7 +189,7 @@ private[uring] final class Ring(entries: Int, completions: Int) {
 
 private[uring] object Ring {
 
-  // - Unix socket round trip: 13.7 µs without the spin, 7.1 µs with 20 µs (2026-11-15)
+  // - ping-pong over a Unix socket: 13.7 µs without the spin, 7.4 µs with 20 µs (results/2026-11-16-backends)
   inline val SpinNanos = 20_000L
 
   inline val WakeId = 0L

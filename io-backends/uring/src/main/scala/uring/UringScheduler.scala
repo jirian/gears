@@ -66,7 +66,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       ring.afterSubmit = () => {
         submitted.foreach(c =>
           if c.state == Command.Stage.Submitted && c.handle.isClosing then
-            if ring.pending(c.sqe) then {
+            if ring.pending(c.sqe, c.id) then {
               ring.nop(c.sqe)
               inFlight.remove(c.id)
               c.outOfRing()
@@ -181,7 +181,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
       val o = own
       val held = o.inFlight.values.toList
       val letGo = held.map(c =>
-        c.state != Command.Stage.Submitted || o.ring.pending(c.sqe) || {
+        c.state != Command.Stage.Submitted || o.ring.pending(c.sqe, c.id) || {
           val res = o.ring.cancelNow(c.id)
           res == 0 || res == -errno.ENOENT
         }
@@ -302,7 +302,7 @@ private[uring] final class UringScheduler private (rings: Array[Ring])
         own.ring.nop(command.sqe)
         withdrawn(command)
         true
-      case Command.Stage.Submitted if own.ring.pending(command.sqe) =>
+      case Command.Stage.Submitted if own.ring.pending(command.sqe, command.id) =>
         own.ring.nop(command.sqe)
         withdrawn(command)
         true

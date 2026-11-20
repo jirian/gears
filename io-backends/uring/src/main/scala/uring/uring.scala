@@ -54,7 +54,7 @@ private[uring] object uring {
   def io_uring_submit(ring: Ptr[io_uring]): CInt = extern
 
   @name("gears_io_uring_sqe_pending")
-  def io_uring_sqe_pending(ring: Ptr[io_uring], sqe: Ptr[io_uring_sqe]): CInt = extern
+  def io_uring_sqe_pending(ring: Ptr[io_uring], sqe: Ptr[io_uring_sqe], user_data: __u64): CInt = extern
 
   @name("gears_io_uring_sq_ready")
   def io_uring_sq_ready(ring: Ptr[io_uring]): CUnsignedInt = extern

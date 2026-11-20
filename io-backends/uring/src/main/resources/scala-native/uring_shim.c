@@ -16,10 +16,11 @@ int gears_io_uring_spin_check(struct io_uring *ring) {
 }
 
 // - no SQPOLL: the kernel's head moves only in this thread's io_uring_enter
-int gears_io_uring_sqe_pending(struct io_uring *ring, struct io_uring_sqe *sqe) {
+// - a slot the kernel took is reused: it is this entry only while it still has the entry's user data
+int gears_io_uring_sqe_pending(struct io_uring *ring, struct io_uring_sqe *sqe, unsigned long long user_data) {
   unsigned head = io_uring_smp_load_acquire(ring->sq.khead);
   unsigned index = (unsigned)(sqe - ring->sq.sqes);
-  return ((index - head) & ring->sq.ring_mask) < ring->sq.sqe_tail - head;
+  return ((index - head) & ring->sq.ring_mask) < ring->sq.sqe_tail - head && sqe->user_data == user_data;
 }
 
 struct io_uring_sqe *gears_io_uring_get_sqe(struct io_uring *ring) {

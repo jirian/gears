@@ -420,19 +420,71 @@ class UringSuite extends munit.FunSuite {
   }
 
   test("an entry counts as pending until a submission takes it, also once the queue's counters wrap") {
+    import uringStructOps.*
     val ring = new Ring(8, 16)
     try {
+      var id = 100L
+      var before = Seq.empty[(Ptr[uring.io_uring_sqe], Long)]
       for round <- 1 to 5 do {
-        val sqes = Seq.fill(7) {
+        val entries = Seq.fill(7) {
           val sqe = ring.nextSqe()
           ring.nop(sqe)
-          sqe
+          id += 1
+          sqe.user_data = id.toULong
+          (sqe, id)
         }
-        sqes.foreach(sqe => assert(ring.pending(sqe), s"round $round: prepared, not yet submitted"))
+        entries.foreach((sqe, id) => assert(ring.pending(sqe, id), s"round $round: prepared, not yet submitted"))
+        // - the slots the last round's entries had, now another entry's
+        before.foreach((sqe, id) => assert(!ring.pending(sqe, id), s"round $round: taken by the kernel, slot reused"))
         ring.await(System.nanoTime(), hasWork = true, spin = false)((_, _) => ())
-        sqes.foreach(sqe => assert(!ring.pending(sqe), s"round $round: submitted"))
+        entries.foreach((sqe, id) => assert(!ring.pending(sqe, id), s"round $round: submitted"))
+        before = entries
       }
     } finally ring.close()
+  }
+
+  test("a cancel of a read whose slot another entry now has cancels that read, and leaves the other entry") {
+    onPool(1) { io ?=>
+      val (ra, wa) = pipe()
+      val bufA = ByteBuffer.allocate(16)
+      val readA = ops.read(ra, bufA).asInstanceOf[Command]
+      val (reader, performed) = performing(readA)
+      AsyncOperations.sleep(20)
+      assertEquals(readA.state, Command.Stage.Submitted)
+      var other: (Future[Unit], UringReadable, UringWritable) | Null = null
+      var rounds = 0
+      while other == null && rounds < 600 do {
+        rounds += 1
+        val (rb, wb) = pipe()
+        val readB = ops.read(rb, ByteBuffer.allocate(16)).asInstanceOf[Command]
+        val b = Future(io.perform(readB))
+        Future {
+          // - B prepared in A's old slot, not yet submitted: cancel A now, on the same worker
+          if readB.sqe == readA.sqe && readB.state == Command.Stage.Prepared then {
+            other = (b, rb, wb)
+            reader.cancel()
+          }
+        }.await
+        if other == null then {
+          rawWrite(wb, "b")
+          b.await
+          close(rb)
+          close(wb)
+        }
+      }
+      assert(other != null, s"no slot reused in $rounds rounds")
+      reader.awaitResult: Unit
+      assert(performed.get().nn.failed.toOption.exists(_.isInstanceOf[CancellationException]), performed.get())
+      rawWrite(wa, "a")
+      AsyncOperations.sleep(20)
+      assertEquals(bufA.position(), 0)
+      assertEquals(rawRead(ra), "a")
+      val (b, rb, wb) = other.nn
+      rawWrite(wb, "b")
+      val bEnded = gears.async.withTimeoutOption(2.seconds)(b.awaitResult)
+      assert(bEnded.exists(_.isSuccess), s"the other entry's read: $bEnded")
+      List(ra, wa, rb, wb).foreach(close)
+    }
   }
 
   test("a read cancelled while it waits in the kernel takes nothing written after") {

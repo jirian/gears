@@ -129,7 +129,7 @@ private[uring] final class Ring(entries: Int, completions: Int) {
     sqe
   }
 
-  def pending(sqe: Ptr[io_uring_sqe]): Boolean = io_uring_sqe_pending(ring, sqe) != 0
+  def pending(sqe: Ptr[io_uring_sqe], id: Long): Boolean = io_uring_sqe_pending(ring, sqe, id.toULong) != 0
 
   def nop(sqe: Ptr[io_uring_sqe]): Unit = {
     io_uring_prep_nop(sqe)
